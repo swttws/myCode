@@ -1,80 +1,85 @@
-# myCode Pure Chat TUI Spec
+# myCode 纯对话 TUI 规格说明
 
-## Background
+## 背景
 
-myCode is a Python terminal AI coding assistant project. The first milestone is not a full coding agent yet. It should provide a comfortable terminal conversation experience, stream model output as it is generated, and establish a clean provider boundary for future agent features.
+myCode 是一个使用 Python 开发的终端 AI 编程助手项目。当前里程碑不是完整 Coding Agent，而是先建立一个可用的终端对话体验，让用户能在命令行里和大模型连续对话，并为后续 agent 能力留下清晰的 Provider 边界。
 
-This milestone focuses on pure conversation. It does not read project files, run shell commands for the model, edit code, or expose tool use.
+本阶段只做纯对话能力。myCode 不会替模型读取项目文件、执行 shell 命令、修改代码，也不会暴露 tool use 或函数调用能力。
 
-## Target Users
+## 目标用户
 
-- Developers who want to start myCode from a terminal and chat with an LLM inside the current working context.
-- Project maintainers who need a provider abstraction that can later support tool use, code editing, and additional model backends.
-- Users who may switch between Anthropic Claude, OpenAI native APIs, and OpenAI-compatible services through configuration.
+- 希望在终端启动 myCode，并直接与大模型对话的开发者。
+- 希望先建立可扩展 Provider 抽象，再逐步加入 tool use、代码编辑等能力的项目维护者。
+- 需要通过配置在 Anthropic Claude、OpenAI 原生 API 和 OpenAI-compatible 服务之间切换的用户。
 
-## Goals
+## 目标
 
-- Start myCode from the terminal and enter an interactive TUI conversation.
-- Let the user type questions and receive streamed model output immediately.
-- Preserve multi-turn conversation history during the current process.
-- Support Anthropic Claude and OpenAI protocol families through configuration.
-- Support Anthropic extended thinking without making it part of normal chat output by default.
-- Keep provider implementations behind one unified streaming interface.
-- Use YAML configuration for provider selection, model selection, endpoint selection, and authentication.
-- Allow authentication secrets to come from either the YAML file or environment variables.
+- 用户可以从终端启动 myCode，并进入交互式 TUI 对话界面。
+- 用户输入问题后，可以立即看到大模型回复以流式方式输出。
+- 当前进程内保留多轮对话历史，让后续问题能带上前文上下文。
+- 通过 YAML 配置选择 LLM 协议、模型、请求地址和认证信息。
+- 支持 Anthropic Claude 和 OpenAI 两类协议后端。
+- 支持 OpenAI Responses API 和 OpenAI Chat Completions API 两种 OpenAI 协议入口。
+- 支持 Claude extended thinking，但默认不把 thinking 内容显示为普通回复。
+- Provider 层暴露统一的流式接口，方便后续加入新的后端。
+- 认证信息可以直接写在 YAML 中，也可以从环境变量读取。
 
-## Capability List
+## 能力清单
 
-- Launches a terminal chat session from a command.
-- Loads configuration from an explicitly provided file, the current directory, or a user-level config location.
-- Selects a provider implementation from the configured protocol.
-- Sends the full in-memory conversation history on each user turn.
-- Streams assistant text into the terminal as chunks arrive.
-- Converts provider-specific stream data into shared internal stream events.
-- Supports Anthropic Claude streaming responses.
-- Supports Claude extended thinking as an optional Anthropic-specific capability.
-- Supports OpenAI Responses API streaming.
-- Supports OpenAI Chat Completions streaming for compatibility-oriented backends.
-- Provides basic in-session commands for leaving the TUI and clearing memory.
-- Reports configuration, authentication, network, and stream parsing failures without exposing secrets.
+- 从命令行启动终端对话会话。
+- 按固定优先级查找配置文件。
+- 校验配置中用于选择协议、模型、请求地址和认证的核心字段。
+- 根据配置中的协议创建对应 Provider。
+- 在每轮请求中携带当前进程内的完整对话历史。
+- 在 Provider 返回增量内容时，把 assistant 文本持续打印到终端。
+- 把不同 Provider 的原始流式事件转换为统一的内部事件。
+- 支持 Anthropic Claude 的流式响应。
+- 支持 Claude extended thinking 作为 Anthropic Provider 的可选能力。
+- 支持 OpenAI Responses API 的流式响应。
+- 支持 OpenAI Chat Completions API 的流式响应，用于兼容性更强的后端。
+- 提供基础会话命令，用于退出 TUI 和清空当前会话记忆。
+- 在配置、认证、网络请求和流解析失败时给出可理解的终端错误提示。
+- 错误提示中不回显真实 API key。
 
-## Non-Functional Requirements
+## 非功能要求
 
-- The first response token should appear as soon as the provider stream yields content.
-- The TUI should remain usable after a failed request.
-- Provider-specific logic should not leak into the TUI layer.
-- Adding a future provider should not require changing the chat loop design.
-- The project should be testable without real API credentials by using mocked streams.
-- Configuration parsing should be deterministic and easy to diagnose.
-- The terminal UI should favor readability over complex layout.
+- Provider 一旦返回首个内容增量，终端应尽快显示对应输出。
+- 单次请求失败后，TUI 应回到可继续输入的状态。
+- TUI 层不直接依赖 Anthropic 或 OpenAI 的原始 SSE 事件格式。
+- 后续新增 Provider 时，不应要求重写聊天主循环。
+- 自动化测试不依赖真实 API key，可以通过 mocked stream 验证核心行为。
+- 配置加载和校验结果要稳定、可诊断。
+- 终端界面以清晰、可读、轻量为优先，不追求复杂全屏布局。
 
-## Design Skeleton
+## 设计骨架
 
-The system is organized into five layers.
+系统分为五层。
 
-The CLI entry layer parses startup options and begins the session.
+CLI 入口层负责解析启动参数，并启动会话。
 
-The configuration layer locates and validates the YAML file, resolves authentication values, and exposes provider settings to the rest of the application.
+配置层负责查找 YAML 文件、校验配置、解析认证值，并向其他模块提供 Provider 设置。
 
-The TUI layer handles prompt input, terminal rendering, in-memory history, and built-in session commands.
+TUI 层负责用户输入、终端渲染、当前进程内的对话历史和基础会话命令。
 
-The provider abstraction layer defines the shared streaming contract consumed by the TUI.
+Provider 抽象层定义 TUI 消费的统一流式事件契约。
 
-The provider implementation layer translates Anthropic and OpenAI protocol streams into the shared internal event model.
+Provider 实现层负责把 Anthropic 和 OpenAI 的协议细节转换为统一内部事件。
 
-## Out Of Scope
+## 不做范围
 
-- Tool use and function calling.
-- Reading, searching, or editing local files.
-- Running shell commands on behalf of the model.
-- Persistent session storage.
-- Project indexing or retrieval.
-- Multi-agent workflows.
-- Rich code diff rendering.
-- Authentication setup wizards.
-- Model pricing, quota tracking, or cost estimation.
-- A full-screen terminal application with panes, tabs, or scrollback management.
+- tool use 和函数调用。
+- 读取、搜索或编辑本地文件。
+- 代表模型执行 shell 命令。
+- 会话持久化存储。
+- 项目索引或检索增强。
+- 多 agent 工作流。
+- 复杂代码 diff 渲染。
+- 认证配置向导。
+- 模型价格、配额或成本估算。
+- 带多面板、标签页或完整滚动管理的全屏终端应用。
 
-## Completion Definition
+## 完成定义
 
-This milestone is complete when a user can configure one supported provider, start myCode, ask multiple questions in one terminal session, see streamed output, clear the in-memory conversation, and exit cleanly. It is also complete only if provider selection, stream parsing, configuration loading, environment-variable authentication, hidden-by-default Claude thinking, and at least one mocked end-to-end conversation are covered by automated checks.
+当用户可以配置任意一个受支持的 Provider，启动 myCode，在一个终端会话中连续提问，看到流式回复，清空当前进程内的会话历史，并正常退出时，本阶段功能完成。
+
+同时，Provider 选择、流解析、配置加载、环境变量认证、Claude thinking 默认隐藏，以及至少一个 mocked 端到端对话流程都必须有自动化检查覆盖。
