@@ -1,18 +1,25 @@
 from pathlib import Path
 
 
-def test_readme_documents_supported_protocols_and_scope():
+def test_readme_documents_supported_protocols_and_stage_02_tool_scope():
     readme = Path("README.md").read_text(encoding="utf-8")
 
+    assert "Stage 02" in readme
     assert "anthropic" in readme
     assert "openai_responses" in readme
     assert "openai_chat" in readme
     assert "thinking" in readme
-    assert "tool use" in readme
-    assert "文件操作" in readme
-    assert "代码编辑" in readme
+    assert "read_file" in readme
+    assert "write_file" in readme
+    assert "edit_file" in readme
+    assert "run_command" in readme
+    assert "find_files" in readme
+    assert "search_code" in readme
     assert "shell" in readme
-    assert "持久化会话" in readme
+    assert "单轮工具调用" in readme
+    assert "Agent Loop" in readme
+    assert "多工具连环调用" in readme
+    assert "Anthropic 工具调用" in readme
 
 
 def test_example_configs_exist_and_use_environment_variables():

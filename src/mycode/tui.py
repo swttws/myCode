@@ -26,7 +26,7 @@ class ChatTUI:
         self._input_func = input_func or self._prompt
 
     async def run(self) -> int:
-        self._console.print("[bold cyan]myCode[/bold cyan] 纯对话模式，输入 /exit 退出，/clear 清空上下文。")
+        self._console.print("[bold cyan]myCode[/bold cyan] Stage 02 工具模式，输入 /exit 退出，/clear 清空上下文。")
         while True:
             try:
                 user_text = await self._read_input()
@@ -66,6 +66,17 @@ class ChatTUI:
             elif event.type == StreamEventType.THINKING_DELTA and self._show_thinking:
                 # thinking 用弱化样式输出，避免和最终回答混在一起。
                 self._console.print(event.content, style="dim italic", end="")
+            elif event.type == StreamEventType.TOOL_RESULT and event.tool_result is not None:
+                if event.tool_result.ok:
+                    self._console.print(
+                        f"\n[dim]工具已执行：{event.tool_result.tool_name}[/dim]",
+                        end="",
+                    )
+                else:
+                    self._console.print(
+                        f"\n[red]工具失败：{event.tool_result.tool_name} - {event.tool_result.error}[/red]",
+                        end="",
+                    )
             elif event.type == StreamEventType.ERROR:
                 self._console.print(f"\n[red]错误：{event.content}[/red]")
         self._console.print()

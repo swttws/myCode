@@ -4,6 +4,7 @@ from rich.console import Console
 
 from mycode.llm import StreamEvent, StreamEventType
 from mycode.tui import ChatTUI
+from mycode.tool import ToolResult
 
 
 class FakeSession:
@@ -42,6 +43,21 @@ def test_tui_streams_assistant_text_and_exits():
     assert exit_code == 0
     assert session.sent == ["hello"]
     assert "hi" in output.getvalue()
+
+
+def test_tui_announces_stage_02_tool_mode():
+    console, output = make_console()
+    session = FakeSession()
+    inputs = iter(["/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    text = output.getvalue()
+    assert "Stage 02" in text
+    assert "工具" in text
+    assert "纯对话模式" not in text
 
 
 def test_tui_clear_command_clears_memory_without_llm_request():
@@ -125,3 +141,42 @@ def test_tui_can_show_thinking_when_enabled():
 
     assert asyncio.run(tui.run()) == 0
     assert "thinking" in output.getvalue()
+
+
+def test_tui_prints_successful_tool_result():
+    console, output = make_console()
+    session = FakeSession(
+        [[StreamEvent(StreamEventType.TOOL_RESULT, tool_result=ToolResult(True, "read_file", {}))]]
+    )
+    inputs = iter(["hello", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    text = output.getvalue()
+    assert "read_file" in text
+    assert "已执行" in text
+
+
+def test_tui_prints_failed_tool_result():
+    console, output = make_console()
+    session = FakeSession(
+        [
+            [
+                StreamEvent(
+                    StreamEventType.TOOL_RESULT,
+                    tool_result=ToolResult(False, "edit_file", {}, "expected exactly one match"),
+                )
+            ]
+        ]
+    )
+    inputs = iter(["hello", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    text = output.getvalue()
+    assert "edit_file" in text
+    assert "expected exactly one match" in text

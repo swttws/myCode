@@ -5,6 +5,7 @@ import httpx
 from mycode.config import LLMConfig, ThinkingConfig
 from mycode.llm import ChatMessage, StreamEvent, StreamEventType
 from mycode.protocols.anthropic import AnthropicLLM
+from mycode.tool import ToolDefinition
 from tests.helpers import collect_async
 
 
@@ -57,3 +58,36 @@ def test_anthropic_maps_text_thinking_and_done_events():
     assert payload["stream"] is True
     assert payload["messages"] == [{"role": "user", "content": "hello"}]
     assert payload["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+
+
+def test_anthropic_accepts_tools_parameter_without_sending_tools():
+    request_log: list[httpx.Request] = []
+    body = "\n".join(
+        [
+            "event: message_stop",
+            'data: {"type":"message_stop"}',
+            "",
+        ]
+    )
+    config = LLMConfig(
+        protocol="anthropic",
+        model="claude-test",
+        base_url="https://api.anthropic.test",
+        api_key="sk-test",
+    )
+    llm = AnthropicLLM(config, http_client=make_response(body, request_log))
+    tools = [
+        ToolDefinition(
+            name="read_file",
+            description="Read a file.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ]
+
+    import asyncio
+
+    events = asyncio.run(collect_async(llm.stream_chat([ChatMessage(role="user", content="hello")], tools=tools)))
+
+    assert events == [StreamEvent(StreamEventType.DONE)]
+    payload = json.loads(request_log[0].content)
+    assert "tools" not in payload

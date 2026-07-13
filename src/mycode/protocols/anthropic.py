@@ -6,6 +6,7 @@ from mycode.config import LLMConfig
 from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType
 from mycode.protocols.common import join_url, parse_json_object, raise_for_bad_status
 from mycode.protocols.sse import parse_sse_events_async
+from mycode.tool import ToolDefinition
 
 
 class AnthropicLLM(BaseLLM):
@@ -13,7 +14,11 @@ class AnthropicLLM(BaseLLM):
         self.config = config
         self._client = http_client or httpx.AsyncClient(timeout=None)
 
-    async def stream_chat(self, messages: list[ChatMessage]):
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition] | None = None,
+    ):
         url = join_url(self.config.base_url, "/v1/messages")
         payload = {
             "model": self.config.model,
