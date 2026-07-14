@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Callable
 
@@ -8,6 +9,12 @@ from rich.console import Console
 
 from mycode.llm import StreamEventType
 from mycode.session import ChatSession
+
+try:
+    from prompt_toolkit.output.win32 import NoConsoleScreenBufferError
+except ImportError:
+    class NoConsoleScreenBufferError(Exception):
+        pass
 
 
 class ChatTUI:
@@ -55,8 +62,18 @@ class ChatTUI:
     async def _prompt(self) -> str:
         # 只有真实交互输入时才创建 PromptSession，避免测试环境缺少控制台而失败。
         if self._prompt_session is None:
-            self._prompt_session = PromptSession()
-        return await self._prompt_session.prompt_async("you> ")
+            try:
+                self._prompt_session = PromptSession()
+            except NoConsoleScreenBufferError:
+                return await self._plain_input()
+        try:
+            return await self._prompt_session.prompt_async("you> ")
+        except NoConsoleScreenBufferError:
+            self._prompt_session = None
+            return await self._plain_input()
+
+    async def _plain_input(self) -> str:
+        return await asyncio.to_thread(input, "you> ")
 
     async def _render_stream(self, user_text: str) -> None:
         self._console.print("[bold green]assistant>[/bold green] ", end="")

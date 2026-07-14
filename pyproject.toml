@@ -17,6 +17,7 @@ dev = [
 
 [project.scripts]
 mycode = "mycode.cli:main"
+mycode-dev = "mycode.dev_launcher:main"
 
 [build-system]
 requires = ["setuptools>=68"]

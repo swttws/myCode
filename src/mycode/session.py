@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType
 from mycode.memory import ConversationMemory
 from mycode.tool import ToolExecutor, ToolResult
+
+
+logger = logging.getLogger(__name__)
 
 
 class ChatSession:
@@ -23,6 +27,7 @@ class ChatSession:
         # 当前 user 消息先进入 memory，确保本轮请求能看到完整上下文。
         self._memory.append(ChatMessage(role="user", content=user_text))
         assistant_parts: list[str] = []
+        logger.info("收到用户输入，开始请求模型。")
 
         try:
             stream = (
@@ -35,15 +40,18 @@ class ChatSession:
                     assistant_parts.append(event.content)
                 elif event.type == StreamEventType.TOOL_CALL:
                     if event.tool_call is None:
+                        logger.error("工具调用事件缺少 tool_call。")
                         yield StreamEvent(StreamEventType.ERROR, "tool call event is missing tool_call")
                         return
                     if self._tool_executor is None:
+                        logger.error("收到工具调用，但当前会话没有配置工具执行器。")
                         yield StreamEvent(
                             StreamEventType.ERROR,
                             "tool call received but tools are not configured",
                         )
                         return
 
+                    logger.info("模型请求工具：%s，调用 ID：%s", event.tool_call.name, event.tool_call.id)
                     self._memory.append(
                         ChatMessage(
                             role="assistant",
@@ -54,6 +62,10 @@ class ChatSession:
                         )
                     )
                     tool_result = await self._tool_executor.execute(event.tool_call)
+                    if tool_result.ok:
+                        logger.info("工具执行成功：%s", tool_result.tool_name)
+                    else:
+                        logger.warning("工具执行失败：%s，错误：%s", tool_result.tool_name, tool_result.error)
                     yield StreamEvent(StreamEventType.TOOL_RESULT, tool_result=tool_result)
                     self._memory.append(
                         ChatMessage(
@@ -66,6 +78,7 @@ class ChatSession:
                 # thinking 是模型内部推理展示，不属于普通 assistant 回复历史。
                 yield event
         except LLMError as exc:
+            logger.error("模型调用失败：%s", exc)
             yield StreamEvent(StreamEventType.ERROR, str(exc))
             return
 

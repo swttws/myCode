@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from mycode.tool.base import ToolCall, ToolDefinition, ToolResult
 from mycode.tool.registry import ToolRegistry
+
+
+logger = logging.getLogger(__name__)
 
 
 class ToolExecutor:
@@ -19,6 +23,7 @@ class ToolExecutor:
     async def execute(self, call: ToolCall) -> ToolResult:
         tool = self._registry.get(call.name)
         if tool is None:
+            logger.warning("模型请求了未知工具：%s", call.name)
             return ToolResult(
                 ok=False,
                 tool_name=call.name,
@@ -27,6 +32,7 @@ class ToolExecutor:
             )
 
         if call.arguments is None:
+            logger.warning("工具参数不是合法 JSON：%s", call.name)
             return ToolResult(
                 ok=False,
                 tool_name=call.name,
@@ -35,11 +41,15 @@ class ToolExecutor:
             )
 
         try:
-            return await asyncio.wait_for(
+            logger.info("开始执行工具：%s", call.name)
+            result = await asyncio.wait_for(
                 asyncio.to_thread(tool.execute, call.arguments),
                 timeout=self._timeout_seconds,
             )
+            logger.info("工具执行完成：%s，成功：%s", call.name, result.ok)
+            return result
         except asyncio.TimeoutError:
+            logger.warning("工具执行超时：%s", call.name)
             return ToolResult(
                 ok=False,
                 tool_name=call.name,
@@ -47,6 +57,7 @@ class ToolExecutor:
                 error=f"tool execution timeout after {self._timeout_seconds} seconds",
             )
         except Exception as exc:
+            logger.exception("工具执行异常：%s", call.name)
             return ToolResult(
                 ok=False,
                 tool_name=call.name,

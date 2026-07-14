@@ -2,6 +2,7 @@ from io import StringIO
 
 from rich.console import Console
 
+from mycode import tui as tui_module
 from mycode.llm import StreamEvent, StreamEventType
 from mycode.tui import ChatTUI
 from mycode.tool import ToolResult
@@ -180,3 +181,20 @@ def test_tui_prints_failed_tool_result():
     text = output.getvalue()
     assert "edit_file" in text
     assert "expected exactly one match" in text
+
+
+def test_tui_falls_back_to_plain_input_when_prompt_toolkit_has_no_console(monkeypatch):
+    class NoConsolePromptSession:
+        def __init__(self):
+            raise tui_module.NoConsoleScreenBufferError
+
+    monkeypatch.setattr(tui_module, "PromptSession", NoConsolePromptSession)
+    monkeypatch.setattr("builtins.input", lambda prompt: "/exit")
+
+    console, _ = make_console()
+    session = FakeSession()
+    tui = ChatTUI(session=session, console=console)
+
+    import asyncio
+
+    assert asyncio.run(tui._read_input()) == "/exit"

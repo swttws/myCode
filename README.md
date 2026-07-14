@@ -23,6 +23,24 @@ mycode --config examples/mycode.openai-responses.yaml
 1. 当前目录的 `mycode.yaml`
 2. 用户目录的 `~/.mycode/config.yaml`
 
+## 开发调试启动
+
+IDEA/PyCharm 里可以创建 Python 运行配置，模块名填 `mycode.dev_launcher`，工作目录填项目根目录，然后用 Debug 启动。启动器不会再弹出外部 Windows 窗口，而是直接复用 IDEA 的 Run/Debug 控制台；CLI 输入输出和开发日志都会显示在这个控制台里，断点调试也会留在同一个进程内。
+
+也可以直接运行：
+
+```powershell
+python -m mycode.dev_launcher --config examples/mycode.openai-responses.yaml
+```
+
+安装为可编辑包后，也可以使用：
+
+```powershell
+mycode-dev --config examples/mycode.openai-responses.yaml
+```
+
+日志会同时输出到 IDEA 控制台和文件。日志文件默认写入系统临时目录下的 `mycode-dev.log`，也可以用 `--log-file path/to/file.log` 指定。
+
 ## 配置格式
 
 YAML 配置包含四个核心字段：
