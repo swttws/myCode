@@ -25,7 +25,19 @@ mycode --config examples/mycode.openai-responses.yaml
 
 ## 开发调试启动
 
-IDEA/PyCharm 里可以创建 Python 运行配置，模块名填 `mycode.dev_launcher`，工作目录填项目根目录，然后用 Debug 启动。启动器不会再弹出外部 Windows 窗口，而是直接复用 IDEA 的 Run/Debug 控制台；CLI 输入输出和开发日志都会显示在这个控制台里，断点调试也会留在同一个进程内。
+IDEA/PyCharm 里可以创建 Python 运行配置，然后用 Debug 启动。不要在 IDEA 的 Terminal 或外部 PowerShell 里直接运行 `python -m ...` 来期待断点生效；断点只有在 IDE Debug 配置启动的进程里才会命中。
+
+推荐配置如下：
+
+| 配置项 | 值 |
+| --- | --- |
+| 配置类型 | Python |
+| 运行目标 | Module name |
+| 模块名 | `mycode.dev_launcher` |
+| 工作目录 | 项目根目录，例如 `D:\java\project\myCode\myCode` |
+| 参数 | `--config examples/mycode.openai-responses.yaml` |
+
+启动器不会再弹出外部 Windows 窗口，而是直接复用 IDEA 的 Run/Debug 控制台；CLI 输入输出和开发日志都会显示在这个控制台里，断点调试也会留在同一个进程内。如果 IDEA Debug 控制台不支持 `prompt_toolkit` 的 Windows 控制台能力，TUI 会自动降级为普通输入模式。
 
 也可以直接运行：
 
