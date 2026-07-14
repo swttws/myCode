@@ -18,10 +18,16 @@ class ReadFileTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="read_file",
-            description="Read a UTF-8 text file from the current workspace.",
+            description="读取工作区内的 UTF-8 文本文件。",
             parameters={
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "description": "读取文件所需参数。",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "要读取的工作区内相对路径。",
+                    }
+                },
                 "required": ["path"],
             },
         )
@@ -49,12 +55,19 @@ class WriteFileTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="write_file",
-            description="Write UTF-8 text to a file in the current workspace.",
+            description="向工作区内写入 UTF-8 文本文件，并自动创建父目录。",
             parameters={
                 "type": "object",
+                "description": "写入文件所需参数。",
                 "properties": {
-                    "path": {"type": "string"},
-                    "text": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "要写入的工作区内相对路径。",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "要写入文件的文本内容。",
+                    },
                 },
                 "required": ["path", "text"],
             },
@@ -87,13 +100,23 @@ class EditFileTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="edit_file",
-            description="Replace text in a UTF-8 file when the original text appears exactly once.",
+            description="仅当原文在文件中唯一出现时，替换对应文本。",
             parameters={
                 "type": "object",
+                "description": "改写文件所需参数。",
                 "properties": {
-                    "path": {"type": "string"},
-                    "old_text": {"type": "string"},
-                    "new_text": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "要修改的工作区内相对路径。",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "要替换的原始文本。",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "替换后的新文本。",
+                    },
                 },
                 "required": ["path", "old_text", "new_text"],
             },
@@ -130,12 +153,19 @@ class FindFilesTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="find_files",
-            description="Find files in the current workspace using a glob-style pattern.",
+            description="按 glob 模式在工作区内查找文件。",
             parameters={
                 "type": "object",
+                "description": "查找文件所需参数。",
                 "properties": {
-                    "pattern": {"type": "string"},
-                    "root": {"type": "string"},
+                    "pattern": {
+                        "type": "string",
+                        "description": "用于匹配文件名的 glob 模式。",
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "查找起始目录，相对于工作区根目录。",
+                    },
                 },
                 "required": ["pattern"],
             },
@@ -163,12 +193,19 @@ class SearchCodeTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="search_code",
-            description="Search UTF-8 text files in the current workspace for a literal query.",
+            description="在工作区内的 UTF-8 文本文件中搜索字面量内容。",
             parameters={
                 "type": "object",
+                "description": "搜索代码所需参数。",
                 "properties": {
-                    "query": {"type": "string"},
-                    "root": {"type": "string"},
+                    "query": {
+                        "type": "string",
+                        "description": "要搜索的字面量内容。",
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "搜索起始目录，相对于工作区根目录。",
+                    },
                 },
                 "required": ["query"],
             },

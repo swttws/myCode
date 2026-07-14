@@ -17,6 +17,7 @@ from mycode.tool.registry import ToolRegistry
 
 def create_default_tool_registry(workspace_root: str | Path) -> ToolRegistry:
     path_guard = PathGuard(workspace_root)
+    # 默认注册中心复用同一个路径守卫和文本缓存，给读写改三类文件工具共享。
     cache = FileTextCache()
     return ToolRegistry(
         [

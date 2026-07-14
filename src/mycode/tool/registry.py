@@ -4,6 +4,8 @@ from mycode.tool.base import Tool, ToolDefinition
 
 
 class ToolRegistry:
+    """集中登记工具，并输出协议需要的 tool spec。"""
+
     def __init__(self, tools: list[Tool] | None = None) -> None:
         self._tools: dict[str, Tool] = {}
         for tool in tools or []:

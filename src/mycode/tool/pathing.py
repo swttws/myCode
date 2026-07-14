@@ -4,10 +4,12 @@ from pathlib import Path
 
 
 class ToolPathError(ValueError):
-    """Raised when a tool path escapes the configured workspace."""
+    """工具路径逃出工作区时抛出。"""
 
 
 class PathGuard:
+    """把模型传入的路径限制在当前工作区内。"""
+
     def __init__(self, workspace_root: str | Path) -> None:
         self._workspace_root = Path(workspace_root).resolve()
 

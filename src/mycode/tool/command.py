@@ -15,12 +15,19 @@ class RunCommandTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="run_command",
-            description="Run a shell command in the current workspace with a timeout.",
+            description="在当前工作区内执行 shell 命令，并返回退出码、标准输出、标准错误和超时状态。",
             parameters={
                 "type": "object",
+                "description": "执行命令所需参数。",
                 "properties": {
-                    "command": {"type": "string"},
-                    "timeout_seconds": {"type": "number"},
+                    "command": {
+                        "type": "string",
+                        "description": "要执行的 shell 命令。",
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "命令超时时间（秒）。",
+                    },
                 },
                 "required": ["command"],
             },

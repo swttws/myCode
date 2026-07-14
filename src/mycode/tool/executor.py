@@ -7,6 +7,8 @@ from mycode.tool.registry import ToolRegistry
 
 
 class ToolExecutor:
+    """统一执行工具调用，把异常和超时包装成结构化结果。"""
+
     def __init__(self, registry: ToolRegistry, timeout_seconds: float = 10.0) -> None:
         self._registry = registry
         self._timeout_seconds = timeout_seconds

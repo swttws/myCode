@@ -14,6 +14,7 @@ class CachedText:
 
 class FileTextCache:
     def __init__(self) -> None:
+        # 读、写、改共享同一把锁，避免同一进程内的缓存和磁盘状态打架。
         self._lock = RLock()
         self._cache: dict[Path, CachedText] = {}
 
@@ -43,6 +44,7 @@ class FileTextCache:
     def edit_text(self, path: Path, old_text: str, new_text: str) -> tuple[int, str | None]:
         resolved = path.resolve()
         with self._lock:
+            # 先统计原文命中数，再决定是否写回，保证只做唯一匹配替换。
             text = self.read_text(resolved)
             match_count = text.count(old_text)
             if match_count != 1:
