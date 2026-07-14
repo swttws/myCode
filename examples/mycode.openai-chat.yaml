@@ -1,6 +1,6 @@
 
 # 模型配置不要修改，protocol  model  base_url  api_key
 protocol: openai_chat
-model: gpt-4o-mini
-base_url: https://dgi.deepexi.com/v1/
-api_key: sk-2Eyh7CfuXfaagoDe
+model: 
+base_url: 
+api_key: 
