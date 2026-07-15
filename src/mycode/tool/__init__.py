@@ -1,4 +1,4 @@
-from mycode.tool.base import Tool, ToolArguments, ToolCall, ToolDefinition, ToolResult
+from mycode.tool.base import Tool, ToolArguments, ToolCall, ToolDefinition, ToolKind, ToolResult
 from mycode.tool.cache import FileTextCache
 from mycode.tool.command import RunCommandTool
 from mycode.tool.defaults import create_default_tool_registry
@@ -26,6 +26,7 @@ __all__ = [
     "ToolCall",
     "ToolDefinition",
     "ToolExecutor",
+    "ToolKind",
     "ToolPathError",
     "ToolRegistry",
     "ToolResult",

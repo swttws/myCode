@@ -1,102 +1,39 @@
 from __future__ import annotations
 
-import json
-import logging
-
-from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType
-from mycode.memory import ConversationMemory
-from mycode.tool import ToolExecutor, ToolResult
-
-
-logger = logging.getLogger(__name__)
+from mycode.agent import AgentLoop, AgentMode, ApprovalProvider
 
 
 class ChatSession:
+    # Session 只保存会话模式并转发 AgentEvent，具体循环逻辑集中在 AgentLoop。
     def __init__(
         self,
         *,
-        llm: BaseLLM,
-        memory: ConversationMemory,
-        tool_executor: ToolExecutor | None = None,
+        agent: AgentLoop,
+        mode: AgentMode | None = None,
     ) -> None:
-        self._llm = llm
-        self._memory = memory
-        self._tool_executor = tool_executor
+        self._agent = agent
+        self._mode = mode or AgentMode()
 
-    async def send(self, user_text: str):
-        # 当前 user 消息先进入 memory，确保本轮请求能看到完整上下文。
-        self._memory.append(ChatMessage(role="user", content=user_text))
-        assistant_parts: list[str] = []
-        logger.info("收到用户输入，开始请求模型。")
+    async def send(
+        self,
+        user_text: str,
+        *,
+        approval_provider: ApprovalProvider | None = None,
+    ):
+        async for event in self._agent.run(
+            user_text,
+            mode=self._mode,
+            approval_provider=approval_provider,
+        ):
+            yield event
 
-        try:
-            stream = (
-                self._llm.stream_chat(self._memory.messages(), tools=self._tool_executor.definitions())
-                if self._tool_executor is not None
-                else self._llm.stream_chat(self._memory.messages())
-            )
-            async for event in stream:
-                if event.type == StreamEventType.TEXT_DELTA:
-                    assistant_parts.append(event.content)
-                elif event.type == StreamEventType.TOOL_CALL:
-                    if event.tool_call is None:
-                        logger.error("工具调用事件缺少 tool_call。")
-                        yield StreamEvent(StreamEventType.ERROR, "tool call event is missing tool_call")
-                        return
-                    if self._tool_executor is None:
-                        logger.error("收到工具调用，但当前会话没有配置工具执行器。")
-                        yield StreamEvent(
-                            StreamEventType.ERROR,
-                            "tool call received but tools are not configured",
-                        )
-                        return
+    def set_plan_only(self, enabled: bool) -> None:
+        self._mode.plan_only = enabled
 
-                    logger.info("模型请求工具：%s，调用 ID：%s", event.tool_call.name, event.tool_call.id)
-                    self._memory.append(
-                        ChatMessage(
-                            role="assistant",
-                            content="",
-                            tool_call_id=event.tool_call.id,
-                            tool_name=event.tool_call.name,
-                            tool_arguments=event.tool_call.raw_arguments,
-                        )
-                    )
-                    tool_result = await self._tool_executor.execute(event.tool_call)
-                    if tool_result.ok:
-                        logger.info("工具执行成功：%s", tool_result.tool_name)
-                    else:
-                        logger.warning("工具执行失败：%s，错误：%s", tool_result.tool_name, tool_result.error)
-                    yield StreamEvent(StreamEventType.TOOL_RESULT, tool_result=tool_result)
-                    self._memory.append(
-                        ChatMessage(
-                            role="tool",
-                            content=_serialize_tool_result(tool_result),
-                            tool_call_id=event.tool_call.id,
-                        )
-                    )
-                    return
-                # thinking 是模型内部推理展示，不属于普通 assistant 回复历史。
-                yield event
-        except LLMError as exc:
-            logger.error("模型调用失败：%s", exc)
-            yield StreamEvent(StreamEventType.ERROR, str(exc))
-            return
-
-        assistant_text = "".join(assistant_parts)
-        if assistant_text:
-            self._memory.append(ChatMessage(role="assistant", content=assistant_text))
+    def is_plan_only(self) -> bool:
+        return self._mode.plan_only
 
     def clear(self) -> None:
-        self._memory.clear()
-
-
-def _serialize_tool_result(result: ToolResult) -> str:
-    return json.dumps(
-        {
-            "ok": result.ok,
-            "tool_name": result.tool_name,
-            "content": result.content,
-            "error": result.error,
-        },
-        ensure_ascii=False,
-    )
+        # 清空上下文时同步复位 plan-only，避免旧模式影响下一轮。
+        self._agent.clear_memory()
+        self._mode.reset()

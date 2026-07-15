@@ -5,7 +5,7 @@ import httpx
 from mycode.config import LLMConfig
 from mycode.llm import ChatMessage, StreamEvent, StreamEventType
 from mycode.protocols.openai_responses import OpenAIResponsesLLM
-from mycode.tool import ToolCall, ToolDefinition
+from mycode.tool import ToolCall, ToolDefinition, ToolKind
 from tests.helpers import collect_async
 
 
@@ -69,6 +69,7 @@ def test_openai_responses_includes_tools_when_provided():
         name="read_file",
         description="Read file",
         parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        kind=ToolKind.READ,
     )
 
     import asyncio
@@ -89,6 +90,7 @@ def test_openai_responses_includes_tools_when_provided():
             "strict": False,
         }
     ]
+    assert "kind" not in payload["tools"][0]
     assert payload["parallel_tool_calls"] is False
 
 

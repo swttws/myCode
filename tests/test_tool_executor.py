@@ -1,7 +1,7 @@
 import time
 import asyncio
 
-from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolRegistry, ToolResult
+from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
 
 
 class EchoTool:
@@ -11,6 +11,7 @@ class EchoTool:
             name="echo",
             description="Echo arguments.",
             parameters={"type": "object", "properties": {}, "required": []},
+            kind=ToolKind.READ,
         )
 
     def execute(self, arguments):
@@ -24,6 +25,7 @@ class ExplodingTool(EchoTool):
             name="explode",
             description="Raise an error.",
             parameters={"type": "object", "properties": {}, "required": []},
+            kind=ToolKind.READ,
         )
 
     def execute(self, arguments):
@@ -37,6 +39,7 @@ class SlowTool(EchoTool):
             name="slow",
             description="Sleep too long.",
             parameters={"type": "object", "properties": {}, "required": []},
+            kind=ToolKind.READ,
         )
 
     def execute(self, arguments):

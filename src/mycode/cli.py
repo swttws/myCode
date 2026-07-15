@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mycode.config import ConfigError, load_config
 from mycode.dev_logging import configure_dev_logging_from_env
+from mycode.agent import AgentLoop
 from mycode.memory import InMemoryConversationMemory
 from mycode.protocols import ProtocolError, create_llm
 from mycode.session import ChatSession
@@ -45,7 +46,13 @@ def main(argv: list[str] | None = None) -> int:
     memory = InMemoryConversationMemory()
     tool_registry = create_default_tool_registry(Path.cwd())
     tool_executor = ToolExecutor(tool_registry)
-    session = ChatSession(llm=llm, memory=memory, tool_executor=tool_executor)
+    agent = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=tool_executor,
+        tool_registry=tool_registry,
+    )
+    session = ChatSession(agent=agent)
     tui = ChatTUI(session=session, show_thinking=config.thinking.show)
     exit_code = asyncio.run(tui.run())
     logger.info("myCode CLI 退出，退出码：%s", exit_code)

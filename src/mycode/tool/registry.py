@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mycode.tool.base import Tool, ToolDefinition
+from mycode.tool.base import Tool, ToolDefinition, ToolKind
 
 
 class ToolRegistry:
@@ -12,9 +12,13 @@ class ToolRegistry:
             self.register(tool)
 
     def register(self, tool: Tool) -> None:
-        name = tool.definition.name
+        definition = tool.definition
+        name = definition.name
         if name in self._tools:
             raise ValueError(f"duplicate tool name: {name}")
+        # Agent 调度只相信显式分类，不根据工具名称猜测读写属性。
+        if definition.kind not in (ToolKind.READ, ToolKind.WRITE):
+            raise ValueError(f"invalid tool kind: {definition.kind}")
         self._tools[name] = tool
 
     def get(self, name: str) -> Tool | None:

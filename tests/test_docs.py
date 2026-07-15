@@ -1,10 +1,10 @@
 from pathlib import Path
 
 
-def test_readme_documents_supported_protocols_and_stage_02_tool_scope():
+def test_readme_documents_supported_protocols_and_stage_03_agent_scope():
     readme = Path("README.md").read_text(encoding="utf-8")
 
-    assert "Stage 02" in readme
+    assert "Stage 03" in readme
     assert "anthropic" in readme
     assert "openai_responses" in readme
     assert "openai_chat" in readme
@@ -16,9 +16,15 @@ def test_readme_documents_supported_protocols_and_stage_02_tool_scope():
     assert "find_files" in readme
     assert "search_code" in readme
     assert "shell" in readme
-    assert "单轮工具调用" in readme
     assert "Agent Loop" in readme
-    assert "多工具连环调用" in readme
+    assert "事件流" in readme
+    assert "工具分批" in readme
+    assert "plan-only" in readme
+    assert "取消" in readme
+    assert "超时" in readme
+    assert "复杂权限策略" in readme
+    assert "Agent 递归调用" in readme
+    assert "复杂 system prompt" in readme
     assert "Anthropic 工具调用" in readme
 
 

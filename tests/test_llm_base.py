@@ -1,5 +1,5 @@
 from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType
-from mycode.tool import ToolCall, ToolDefinition, ToolResult
+from mycode.tool import ToolCall, ToolDefinition, ToolKind, ToolResult
 from tests.helpers import collect_async
 
 
@@ -54,6 +54,7 @@ def test_base_llm_stream_chat_accepts_optional_tool_definitions():
             name="read_file",
             description="Read file",
             parameters={"type": "object", "properties": {}, "required": []},
+            kind=ToolKind.READ,
         )
     ]
 

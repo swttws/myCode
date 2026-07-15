@@ -5,7 +5,7 @@ import httpx
 from mycode.config import LLMConfig, ThinkingConfig
 from mycode.llm import ChatMessage, StreamEvent, StreamEventType
 from mycode.protocols.anthropic import AnthropicLLM
-from mycode.tool import ToolDefinition
+from mycode.tool import ToolDefinition, ToolKind
 from tests.helpers import collect_async
 
 
@@ -81,6 +81,7 @@ def test_anthropic_accepts_tools_parameter_without_sending_tools():
             name="read_file",
             description="Read a file.",
             parameters={"type": "object", "properties": {}},
+            kind=ToolKind.READ,
         )
     ]
 

@@ -4,7 +4,7 @@ import fnmatch
 from pathlib import Path
 from typing import Any
 
-from mycode.tool.base import ToolArguments, ToolDefinition, ToolResult
+from mycode.tool.base import ToolArguments, ToolDefinition, ToolKind, ToolResult
 from mycode.tool.cache import FileTextCache
 from mycode.tool.pathing import PathGuard, ToolPathError
 
@@ -30,6 +30,7 @@ class ReadFileTool:
                 },
                 "required": ["path"],
             },
+            kind=ToolKind.READ,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -71,6 +72,7 @@ class WriteFileTool:
                 },
                 "required": ["path", "text"],
             },
+            kind=ToolKind.WRITE,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -120,6 +122,7 @@ class EditFileTool:
                 },
                 "required": ["path", "old_text", "new_text"],
             },
+            kind=ToolKind.WRITE,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -169,6 +172,7 @@ class FindFilesTool:
                 },
                 "required": ["pattern"],
             },
+            kind=ToolKind.READ,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -209,6 +213,7 @@ class SearchCodeTool:
                 },
                 "required": ["query"],
             },
+            kind=ToolKind.READ,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:

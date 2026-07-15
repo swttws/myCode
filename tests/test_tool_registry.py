@@ -8,6 +8,7 @@ from mycode.tool import (
     ToolResult,
     create_default_tool_registry,
     ToolDefinition,
+    ToolKind,
 )
 
 
@@ -21,6 +22,7 @@ class FakeTool:
                 "properties": {"value": {"type": "string"}},
                 "required": ["value"],
             },
+            kind=ToolKind.READ,
         )
 
     @property
@@ -38,11 +40,30 @@ def test_tool_registry_gets_registered_tool_by_name():
     assert registry.get("fake") is tool
 
 
+def test_tool_definition_declares_tool_kind():
+    assert FakeTool().definition.kind == ToolKind.READ
+
+
 def test_tool_registry_rejects_duplicate_tool_names():
     registry = ToolRegistry([FakeTool("fake")])
 
     with pytest.raises(ValueError, match="duplicate tool name"):
         registry.register(FakeTool("fake"))
+
+
+def test_tool_registry_rejects_invalid_tool_kind():
+    class InvalidKindTool(FakeTool):
+        @property
+        def definition(self):
+            return ToolDefinition(
+                name="invalid",
+                description="Invalid kind test tool.",
+                parameters={"type": "object", "properties": {}, "required": []},
+                kind="mutating",
+            )
+
+    with pytest.raises(ValueError, match="invalid tool kind"):
+        ToolRegistry([InvalidKindTool()])
 
 
 def test_tool_registry_returns_tool_definitions():
@@ -102,6 +123,18 @@ def test_default_tool_registry_registers_core_tools(tmp_path):
         "find_files",
         "search_code",
     ]
+
+
+def test_default_tool_registry_declares_tool_kinds(tmp_path):
+    registry = create_default_tool_registry(tmp_path)
+    definitions = {definition.name: definition for definition in registry.definitions()}
+
+    assert definitions["read_file"].kind == ToolKind.READ
+    assert definitions["find_files"].kind == ToolKind.READ
+    assert definitions["search_code"].kind == ToolKind.READ
+    assert definitions["write_file"].kind == ToolKind.WRITE
+    assert definitions["edit_file"].kind == ToolKind.WRITE
+    assert definitions["run_command"].kind == ToolKind.WRITE
 
 
 def test_default_tool_registry_uses_chinese_tool_definitions(tmp_path):

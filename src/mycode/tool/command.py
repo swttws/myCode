@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from mycode.tool.base import ToolArguments, ToolDefinition, ToolResult
+from mycode.tool.base import ToolArguments, ToolDefinition, ToolKind, ToolResult
 
 
 class RunCommandTool:
@@ -31,6 +31,7 @@ class RunCommandTool:
                 },
                 "required": ["command"],
             },
+            kind=ToolKind.WRITE,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:

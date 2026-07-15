@@ -2,25 +2,39 @@ from io import StringIO
 
 from rich.console import Console
 
+from mycode.agent import (
+    AgentEvent,
+    AgentEventType,
+    ApprovalDecisionType,
+    ApprovalRequest,
+)
 from mycode import tui as tui_module
-from mycode.llm import StreamEvent, StreamEventType
 from mycode.tui import ChatTUI
-from mycode.tool import ToolResult
+from mycode.tool import ToolCall, ToolResult
 
 
 class FakeSession:
     def __init__(self, scripts=None):
         self.scripts = list(scripts or [])
         self.sent: list[str] = []
+        self.send_kwargs = []
         self.clear_count = 0
+        self.plan_only = False
 
-    async def send(self, user_text):
+    async def send(self, user_text, **kwargs):
         self.sent.append(user_text)
+        self.send_kwargs.append(kwargs)
         for event in self.scripts.pop(0):
             yield event
 
     def clear(self):
         self.clear_count += 1
+
+    def set_plan_only(self, enabled):
+        self.plan_only = enabled
+
+    def is_plan_only(self):
+        return self.plan_only
 
 
 def make_console():
@@ -32,7 +46,7 @@ def make_console():
 def test_tui_streams_assistant_text_and_exits():
     console, output = make_console()
     session = FakeSession(
-        [[StreamEvent(StreamEventType.TEXT_DELTA, "hi"), StreamEvent(StreamEventType.DONE)]]
+        [[AgentEvent(AgentEventType.TEXT_DELTA, "hi"), AgentEvent(AgentEventType.FINAL_RESPONSE, "hi")]]
     )
     inputs = iter(["hello", "/exit"])
     tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
@@ -46,7 +60,7 @@ def test_tui_streams_assistant_text_and_exits():
     assert "hi" in output.getvalue()
 
 
-def test_tui_announces_stage_02_tool_mode():
+def test_tui_announces_stage_03_agent_mode():
     console, output = make_console()
     session = FakeSession()
     inputs = iter(["/exit"])
@@ -56,8 +70,8 @@ def test_tui_announces_stage_02_tool_mode():
 
     assert asyncio.run(tui.run()) == 0
     text = output.getvalue()
-    assert "Stage 02" in text
-    assert "工具" in text
+    assert "Stage 03" in text
+    assert "Agent" in text
     assert "纯对话模式" not in text
 
 
@@ -74,6 +88,47 @@ def test_tui_clear_command_clears_memory_without_llm_request():
     assert session.sent == []
 
 
+def test_tui_plan_only_status_command_does_not_send_to_llm():
+    console, output = make_console()
+    session = FakeSession()
+    session.set_plan_only(True)
+    inputs = iter(["/plan-only", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    assert session.sent == []
+    assert "开启" in output.getvalue()
+
+
+def test_tui_plan_only_on_command_enables_mode():
+    console, output = make_console()
+    session = FakeSession()
+    inputs = iter(["/plan-only on", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    assert session.plan_only is True
+    assert "开启" in output.getvalue()
+
+
+def test_tui_plan_only_off_command_disables_mode():
+    console, output = make_console()
+    session = FakeSession()
+    session.set_plan_only(True)
+    inputs = iter(["/plan-only off", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    assert session.plan_only is False
+    assert "关闭" in output.getvalue()
+
+
 def test_tui_ignores_empty_input():
     console, _ = make_console()
     session = FakeSession()
@@ -88,7 +143,7 @@ def test_tui_ignores_empty_input():
 
 def test_tui_prints_error_event_and_continues():
     console, output = make_console()
-    session = FakeSession([[StreamEvent(StreamEventType.ERROR, "network failed")]])
+    session = FakeSession([[AgentEvent(AgentEventType.ERROR, "network failed")]])
     inputs = iter(["hello", "/exit"])
     tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
 
@@ -103,9 +158,9 @@ def test_tui_hides_thinking_by_default():
     session = FakeSession(
         [
             [
-                StreamEvent(StreamEventType.THINKING_DELTA, "hidden"),
-                StreamEvent(StreamEventType.TEXT_DELTA, "visible"),
-                StreamEvent(StreamEventType.DONE),
+                AgentEvent(AgentEventType.THINKING_DELTA, "hidden"),
+                AgentEvent(AgentEventType.TEXT_DELTA, "visible"),
+                AgentEvent(AgentEventType.FINAL_RESPONSE, "visible"),
             ]
         ]
     )
@@ -125,8 +180,8 @@ def test_tui_can_show_thinking_when_enabled():
     session = FakeSession(
         [
             [
-                StreamEvent(StreamEventType.THINKING_DELTA, "thinking"),
-                StreamEvent(StreamEventType.DONE),
+                AgentEvent(AgentEventType.THINKING_DELTA, "thinking"),
+                AgentEvent(AgentEventType.FINAL_RESPONSE, ""),
             ]
         ]
     )
@@ -144,10 +199,26 @@ def test_tui_can_show_thinking_when_enabled():
     assert "thinking" in output.getvalue()
 
 
+def test_tui_prints_tool_call_started():
+    console, output = make_console()
+    session = FakeSession(
+        [[AgentEvent(AgentEventType.TOOL_CALL_STARTED, tool_call=ToolCall(id="call-1", name="read_file", arguments={}))]]
+    )
+    inputs = iter(["hello", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    text = output.getvalue()
+    assert "read_file" in text
+    assert "开始" in text
+
+
 def test_tui_prints_successful_tool_result():
     console, output = make_console()
     session = FakeSession(
-        [[StreamEvent(StreamEventType.TOOL_RESULT, tool_result=ToolResult(True, "read_file", {}))]]
+        [[AgentEvent(AgentEventType.TOOL_RESULT, tool_result=ToolResult(True, "read_file", {}))]]
     )
     inputs = iter(["hello", "/exit"])
     tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
@@ -165,8 +236,8 @@ def test_tui_prints_failed_tool_result():
     session = FakeSession(
         [
             [
-                StreamEvent(
-                    StreamEventType.TOOL_RESULT,
+                AgentEvent(
+                    AgentEventType.TOOL_RESULT,
                     tool_result=ToolResult(False, "edit_file", {}, "expected exactly one match"),
                 )
             ]
@@ -181,6 +252,87 @@ def test_tui_prints_failed_tool_result():
     text = output.getvalue()
     assert "edit_file" in text
     assert "expected exactly one match" in text
+
+
+def test_tui_prints_cancelled_event():
+    console, output = make_console()
+    session = FakeSession([[AgentEvent(AgentEventType.CANCELLED, "cancelled")]])
+    inputs = iter(["hello", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    assert "取消" in output.getvalue()
+
+
+def test_tui_send_passes_approval_provider():
+    console, _ = make_console()
+    session = FakeSession([[AgentEvent(AgentEventType.FINAL_RESPONSE, "")]])
+    inputs = iter(["hello", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    assert session.send_kwargs[0]["approval_provider"] == tui._approval_provider
+
+
+def test_tui_approval_provider_accepts_yes():
+    console, _ = make_console()
+    inputs = iter(["y"])
+    tui = ChatTUI(session=FakeSession(), console=console, input_func=lambda: next(inputs))
+    request = ApprovalRequest(
+        id="approval-call-1",
+        tool_call=ToolCall(id="call-1", name="write_file", arguments={}),
+        reason="plan-only",
+        plan_only=True,
+        round_index=1,
+    )
+
+    import asyncio
+
+    decision = asyncio.run(tui._approval_provider(request))
+
+    assert decision.type == ApprovalDecisionType.APPROVE_ONCE
+
+
+def test_tui_approval_provider_accepts_no():
+    console, _ = make_console()
+    inputs = iter(["n"])
+    tui = ChatTUI(session=FakeSession(), console=console, input_func=lambda: next(inputs))
+    request = ApprovalRequest(
+        id="approval-call-1",
+        tool_call=ToolCall(id="call-1", name="write_file", arguments={}),
+        reason="plan-only",
+        plan_only=True,
+        round_index=1,
+    )
+
+    import asyncio
+
+    decision = asyncio.run(tui._approval_provider(request))
+
+    assert decision.type == ApprovalDecisionType.REJECT
+
+
+def test_tui_approval_provider_accepts_cancel():
+    console, _ = make_console()
+    inputs = iter(["c"])
+    tui = ChatTUI(session=FakeSession(), console=console, input_func=lambda: next(inputs))
+    request = ApprovalRequest(
+        id="approval-call-1",
+        tool_call=ToolCall(id="call-1", name="write_file", arguments={}),
+        reason="plan-only",
+        plan_only=True,
+        round_index=1,
+    )
+
+    import asyncio
+
+    decision = asyncio.run(tui._approval_provider(request))
+
+    assert decision.type == ApprovalDecisionType.CANCEL
 
 
 def test_tui_falls_back_to_plain_input_when_prompt_toolkit_has_no_console(monkeypatch):
