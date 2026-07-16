@@ -547,3 +547,40 @@ README.md                          # 记录 Stage 04 能力和明确非目标
 | N1-N5 | `prompt`、`llm`、`agent`、`protocols` 的单向依赖和职责划分 |
 | N6-N8 | 测试文件组织、fake/fixture 策略、保持现有 Agent 和工具契约 |
 | AC1-AC13 | 新增 prompt 单元测试、协议 fixture、Agent/e2e 回归和 README 文档测试 |
+
+## 中文提示词与工具并发调用补充设计
+
+### 提示词文本边界
+
+`src/mycode/prompt/modules.py` 保持六个模块的 ID、优先级和保护属性不变，只将稳定文本替换为中文。`src/mycode/prompt/reminder.py` 将 `plan-only` 的完整与精简提醒改为中文。`src/mycode/prompt/environment.py` 保持 `<environment-context>` 标签、字段顺序、XML 转义和截断行为不变，只将字段显示名改为中文。`<system-reminder>` 和 `<environment-context>` 是结构化协议标签，不翻译；原始用户输入、工具定义、异常信息和日志不改动。
+
+### 配置模型与 YAML
+
+`src/mycode/config.py` 新增 `ToolConfig(parallel_calls: bool = True)`，并在 `LLMConfig` 中以 `field(default_factory=ToolConfig)` 提供 `tools` 字段。`load_config()` 调用 `_parse_tools(raw.get("tools"))`；缺失的 `tools` 段返回默认值，非映射或 `parallel_calls` 非布尔值保持现有 `ConfigError` 失败模式。YAML 形状为：
+
+```yaml
+tools:
+  parallel_calls: false
+```
+
+该名称描述模型能力，不携带 OpenAI 专用字段名，也不进入 `prompt` 包。
+
+### 协议映射
+
+`OpenAIChatLLM.stream_chat()` 与 `OpenAIResponsesLLM.stream_chat()` 在 `tools` 非空时读取 `self.config.tools.parallel_calls`，将其写入各自 payload 的 `parallel_tool_calls`。没有工具定义时继续省略该字段。Anthropic 不读取此字段，也不增加供应商特有参数。
+
+### 测试策略
+
+`tests/test_prompt_registry.py` 断言所有稳定模块文本为中文；`tests/test_prompt_reminder.py` 断言完整与精简提醒为中文；`tests/test_prompt_environment.py` 断言环境字段名为中文且 XML 标签不变。`tests/test_config.py` 覆盖工具并发默认开启、YAML 显式关闭和非法值拒绝。两个 OpenAI 协议测试分别覆盖默认 payload 为 `parallel_tool_calls: true`、显式关闭为 `false`，以及无工具时继续省略该字段。
+
+| 决策点 | 选择 | 理由 |
+|---|---|---|
+| 模型可见提示词语言 | 仅替换 `prompt` 包发送给模型的自然语言文本 | 满足中文交互要求且不影响程序错误与外部数据 |
+| XML 标签 | 保留既有英文标签 | 标签是稳定的结构边界，避免破坏协议映射与已有测试 |
+| 工具并发配置 | `ToolConfig.parallel_calls`，默认 `True` | 使用协议无关的能力名称，避免向配置泄漏供应商字段 |
+| 协议支持 | 两个 OpenAI 适配器映射开关，Anthropic 保持不变 | 只向支持该请求参数的供应商发送字段 |
+
+| F11 | `prompt/modules.py`、`prompt/reminder.py`、`prompt/environment.py` 的模型可见中文文本 |
+| F12 | `ToolConfig`、YAML 解析与 OpenAI 工具请求映射 |
+| N9 | `ToolConfig` 位于配置边界，`prompt` 包不依赖协议配置 |
+| AC14-AC15 | 中文提示词断言、并发默认值和显式关闭的协议 fixture |

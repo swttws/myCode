@@ -151,6 +151,30 @@ def test_find_files_tool_returns_matching_relative_paths(tmp_path):
     assert result.content == {"matches": ["a.py", "nested/b.py"]}
 
 
+def test_find_files_tool_matches_file_stem_when_extension_is_omitted(tmp_path):
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "spec.md").write_text("specification", encoding="utf-8")
+    tool = FindFilesTool(PathGuard(tmp_path))
+
+    # 用户和模型常会省略文件扩展名，仍应能找到对应文件。
+    result = tool.execute({"pattern": "spec"})
+
+    assert result.ok is True
+    assert result.content == {"matches": ["nested/spec.md"]}
+
+
+def test_find_files_tool_matches_relative_path_without_leading_directory(tmp_path):
+    (tmp_path / "doc" / "stage").mkdir(parents=True)
+    (tmp_path / "doc" / "stage" / "spec.md").write_text("specification", encoding="utf-8")
+    tool = FindFilesTool(PathGuard(tmp_path))
+
+    # 顶层文档目录被省略时，仍应在工作区内递归匹配。
+    result = tool.execute({"pattern": "stage/spec"})
+
+    assert result.ok is True
+    assert result.content == {"matches": ["doc/stage/spec.md"]}
+
+
 def test_find_files_tool_rejects_root_outside_workspace(tmp_path):
     tool = FindFilesTool(PathGuard(tmp_path))
 

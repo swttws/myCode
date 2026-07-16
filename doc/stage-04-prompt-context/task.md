@@ -345,6 +345,57 @@
 
 **提交：** 不单独提交；该任务只汇总前序任务的验证证据。
 
+## T15：将模型可见提示词改为中文
+
+**文件：** `src/mycode/prompt/modules.py`、`src/mycode/prompt/reminder.py`、`src/mycode/prompt/environment.py`、`tests/test_prompt_registry.py`、`tests/test_prompt_reminder.py`、`tests/test_prompt_environment.py`
+
+**依赖：** T3、T4、T5
+
+**步骤：**
+
+1. 在 `tests/test_prompt_registry.py` 增加断言：六个默认稳定模块的渲染文本均为中文，模块 ID、优先级和 `protected` 属性保持现有值。
+2. 在 `tests/test_prompt_reminder.py` 增加断言：`plan-only` 的完整提醒和精简提醒均为中文；提醒周期与 XML 转义行为保持原有断言。
+3. 在 `tests/test_prompt_environment.py` 增加断言：环境上下文的六个字段显示名为中文，同时 `<environment-context>` 标签、字段顺序和 XML 转义结果保持不变。
+4. 运行 `python -m pytest tests/test_prompt_registry.py tests/test_prompt_reminder.py tests/test_prompt_environment.py -q`，预期新增中文文本断言在实现修改前失败。
+5. 修改 `modules.py`、`reminder.py` 和 `environment.py` 中发送给模型的自然语言文本为中文；保留 `<system-reminder>`、`<environment-context>`、模块 ID 和所有异常信息不变。
+6. 为解释“标签不翻译但字段显示名翻译”的边界保留或新增简洁中文注释；不要为直观字符串替换添加重复注释。
+7. 再次运行 `python -m pytest tests/test_prompt_registry.py tests/test_prompt_reminder.py tests/test_prompt_environment.py -q`，预期所有提示词与环境回归通过。
+
+**验证：** `python -m pytest tests/test_prompt_registry.py tests/test_prompt_reminder.py tests/test_prompt_environment.py -q` 通过。
+
+## T16：配置模型工具并发调用能力并映射到 OpenAI 请求
+
+**文件：** `src/mycode/config.py`、`src/mycode/protocols/openai_chat.py`、`src/mycode/protocols/openai_responses.py`、`tests/test_config.py`、`tests/test_openai_chat_protocol.py`、`tests/test_openai_responses_protocol.py`
+
+**依赖：** T8
+
+**步骤：**
+
+1. 在 `tests/test_config.py` 增加失败测试：缺失 `tools` 配置时 `config.tools.parallel_calls is True`；`tools.parallel_calls: false` 解析为 `False`；非映射 `tools` 或非布尔 `parallel_calls` 抛出 `ConfigError`。
+2. 在两个 OpenAI 协议测试中增加失败断言：携带工具定义且未显式配置时 payload 包含 `parallel_tool_calls: true`；构造 `LLMConfig(..., tools=ToolConfig(parallel_calls=False))` 时 payload 包含 `false`；没有工具定义时继续不包含该字段。
+3. 运行 `python -m pytest tests/test_config.py tests/test_openai_chat_protocol.py tests/test_openai_responses_protocol.py -q`，预期默认并发和显式关闭断言失败。
+4. 在 `config.py` 定义冻结的 `ToolConfig`，字段 `parallel_calls: bool = True`；将其作为 `LLMConfig.tools` 默认字段，新增 `_parse_tools()`，并在 `load_config()` 中装配。配置解析的中文注释只解释默认允许并发的原因。
+5. 在 `openai_chat.py` 和 `openai_responses.py` 的工具定义分支中，将 `self.config.tools.parallel_calls` 写入 `parallel_tool_calls`；不改变无工具、消息序列化、流解析或 Anthropic 行为。
+6. 运行 `python -m pytest tests/test_config.py tests/test_openai_chat_protocol.py tests/test_openai_responses_protocol.py -q`，预期配置和两个协议测试通过。
+
+**验证：** `python -m pytest tests/test_config.py tests/test_openai_chat_protocol.py tests/test_openai_responses_protocol.py -q` 通过。
+
+## T17：执行本次变更的集成回归
+
+**文件：** 不新增实现文件；读取 `doc/stage-04-prompt-context/spec.md`、`doc/stage-04-prompt-context/plan.md`、`doc/stage-04-prompt-context/task.md` 和 `doc/stage-04-prompt-context/checklist.md`
+
+**依赖：** T15、T16
+
+**步骤：**
+
+1. 运行 `python -m pytest tests/test_prompt_registry.py tests/test_prompt_reminder.py tests/test_prompt_environment.py tests/test_config.py tests/test_openai_chat_protocol.py tests/test_openai_responses_protocol.py -q`。
+2. 使用项目 `.venv` 运行 `python -m compileall -q src`，确认修改后的 Python 源码可编译。
+3. 执行 `git diff --check -- src/mycode/prompt src/mycode/config.py src/mycode/protocols/openai_chat.py src/mycode/protocols/openai_responses.py tests/test_prompt_registry.py tests/test_prompt_reminder.py tests/test_prompt_environment.py tests/test_config.py tests/test_openai_chat_protocol.py tests/test_openai_responses_protocol.py`。
+4. 运行全量 `python -m pytest -q`；若被用户已有配置或现有测试阻断，记录失败文件和根因，不修改不在本任务范围内的文件。
+5. 检查 `git status --short`，确认只新增本任务指定的代码、测试和 Stage 04 文档改动，且不修改 `examples/` 中的用户已有配置。
+
+**验证：** 定向回归、编译和本任务路径的差异检查通过；全量回归结果如实记录。
+
 ## 执行顺序
 
 ```text
@@ -357,3 +408,5 @@ T1 -> T2
 ```
 
 T3 和 T4 都依赖 T2，可并行完成。T9、T10、T11 共享 T8 的 LLM 配置契约，其中 T10 与 T11 可以并行；T12 依赖三种协议适配全部完成。
+
+本次补充任务在既有 Stage 04 工作完成后执行：`T15` 与 `T16` 可并行，二者完成后执行 `T17`。每个任务均先运行新增失败测试，再写最小实现；代码注释使用中文。

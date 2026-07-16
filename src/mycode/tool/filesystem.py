@@ -182,7 +182,7 @@ class FindFilesTool:
             matches = [
                 _relative_path(self._path_guard.workspace_root, path)
                 for path in sorted(root.rglob("*"))
-                if path.is_file() and fnmatch.fnmatch(path.name, pattern)
+                if path.is_file() and _matches_file_pattern(self._path_guard.workspace_root, path, pattern)
             ]
             return ToolResult(ok=True, tool_name=self.definition.name, content={"matches": matches})
         except Exception as exc:
@@ -239,6 +239,19 @@ def _required_str(arguments: ToolArguments, name: str) -> str:
 
 def _relative_path(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def _matches_file_pattern(workspace_root: Path, path: Path, pattern: str) -> bool:
+    relative_path = _relative_path(workspace_root, path)
+    if fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(relative_path, pattern):
+        return True
+
+    if Path(pattern).suffix:
+        return relative_path.endswith(f"/{pattern}")
+
+    # 兼容模型省略顶层目录或文件扩展名的文件查询。
+    relative_stem = Path(relative_path).with_suffix("").as_posix()
+    return relative_stem == pattern or relative_stem.endswith(f"/{pattern}")
 
 
 def _failure(tool_name: str, exc: Exception, content: dict[str, Any]) -> ToolResult:
