@@ -21,6 +21,13 @@ class StreamEventType(str, Enum):
     ERROR = "error"
 
 
+class MessageOrigin(str, Enum):
+    CONVERSATION = "conversation"
+    SYSTEM_INSTRUCTION = "system_instruction"
+    SYSTEM_REMINDER = "system_reminder"
+    ENVIRONMENT_CONTEXT = "environment_context"
+
+
 @dataclass(frozen=True)
 class ChatMessage:
     role: str
@@ -28,6 +35,19 @@ class ChatMessage:
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_arguments: str | None = None
+    # 来源仅供内部构建和测试区分，协议层不能把它序列化给供应商。
+    origin: MessageOrigin = MessageOrigin.CONVERSATION
+
+
+@dataclass(frozen=True)
+class UsageObservation:
+    provider: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +56,7 @@ class StreamEvent:
     content: str = ""
     tool_call: ToolCall | None = None
     tool_result: ToolResult | None = None
+    usage: UsageObservation | None = None
 
 
 class BaseLLM(ABC):

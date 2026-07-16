@@ -1,4 +1,11 @@
-from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType
+from mycode.llm import (
+    BaseLLM,
+    ChatMessage,
+    MessageOrigin,
+    StreamEvent,
+    StreamEventType,
+    UsageObservation,
+)
 from mycode.tool import ToolCall, ToolDefinition, ToolKind, ToolResult
 from tests.helpers import collect_async
 
@@ -45,6 +52,31 @@ def test_chat_message_defaults_tool_history_fields_to_none():
     assert message.tool_call_id is None
     assert message.tool_name is None
     assert message.tool_arguments is None
+
+
+def test_chat_message_origin_defaults_without_shifting_tool_history_positions():
+    message = ChatMessage("assistant", "", "call-1", "read_file", "{}")
+
+    assert message.tool_call_id == "call-1"
+    assert message.tool_name == "read_file"
+    assert message.tool_arguments == "{}"
+    assert message.origin is MessageOrigin.CONVERSATION
+
+
+def test_stream_done_event_can_carry_usage_observation():
+    observation = UsageObservation(
+        provider="openai_chat",
+        input_tokens=10,
+        output_tokens=5,
+        total_tokens=15,
+        cache_read_tokens=8,
+        request_id="req-1",
+    )
+
+    event = StreamEvent(StreamEventType.DONE, usage=observation)
+
+    assert event.usage == observation
+    assert observation.cache_write_tokens is None
 
 
 def test_base_llm_stream_chat_accepts_optional_tool_definitions():
