@@ -1,6 +1,7 @@
 import pytest
 
 from mycode.prompt.models import PromptConfig, PromptModuleDefinition
+from mycode.prompt.modules import create_builtin_modules
 from mycode.prompt.registry import PromptConfigurationError, PromptRegistry
 
 
@@ -69,3 +70,19 @@ def test_registry_can_disable_and_override_regular_module_but_not_protected_modu
         registry.disable("safety")
     with pytest.raises(PromptConfigurationError, match="protected"):
         registry.override(FakeModule("safety", 50, protected=True))
+
+
+def test_builtin_modules_have_expected_stable_order_and_protection():
+    modules = create_builtin_modules()
+
+    assert [module.definition.id for module in modules] == [
+        "safety-boundaries",
+        "identity",
+        "behavior",
+        "tool-usage",
+        "coding-standards",
+        "output-style",
+    ]
+    assert [module.definition.priority for module in modules] == [100, 200, 300, 400, 500, 600]
+    assert modules[0].definition.protected is True
+    assert all(not module.definition.protected for module in modules[1:])
