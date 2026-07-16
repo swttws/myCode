@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from mycode.agent.approval import ApprovalRequest
+from mycode.llm import UsageObservation
 from mycode.tool import ToolCall, ToolResult
 
 
@@ -17,6 +18,7 @@ class AgentEventType(str, Enum):
     ERROR = "error"
     CANCELLED = "cancelled"
     APPROVAL_REQUIRED = "approval_required"
+    USAGE = "usage"
 
 
 class AgentErrorCode(str, Enum):
@@ -30,6 +32,7 @@ class AgentErrorCode(str, Enum):
     RUN_TIMEOUT = "run_timeout"
     CANCELLED = "cancelled"
     APPROVAL_CANCELLED = "approval_cancelled"
+    PROMPT_ERROR = "prompt_error"
 
 
 @dataclass(frozen=True)
@@ -41,3 +44,4 @@ class AgentEvent:
     tool_result: ToolResult | None = None
     approval_request: ApprovalRequest | None = None
     error_code: AgentErrorCode | None = None
+    usage: UsageObservation | None = None

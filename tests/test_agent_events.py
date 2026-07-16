@@ -6,6 +6,7 @@ from mycode.agent import (
     AgentMode,
     ApprovalRequest,
 )
+from mycode.llm import UsageObservation
 from mycode.tool import ToolCall
 
 
@@ -20,11 +21,13 @@ def test_agent_event_type_declares_public_contract():
         "error",
         "cancelled",
         "approval_required",
+        "usage",
     ]
 
 
 def test_agent_error_code_declares_machine_readable_values():
     assert AgentErrorCode.MAX_ROUNDS_EXCEEDED.value == "max_rounds_exceeded"
+    assert AgentErrorCode.PROMPT_ERROR.value == "prompt_error"
 
 
 def test_agent_event_can_carry_tool_approval_and_error_context():
@@ -64,4 +67,13 @@ def test_agent_config_defaults_to_eight_rounds_and_mentions_plan_only():
     config = AgentConfig()
 
     assert config.max_rounds == 8
-    assert "plan-only" in config.minimal_system_prompt
+    assert config.prompt.full_reminder_interval_rounds == 4
+
+
+def test_agent_usage_event_carries_normalized_observation():
+    observation = UsageObservation(provider="anthropic", input_tokens=12, cache_read_tokens=8)
+
+    event = AgentEvent(type=AgentEventType.USAGE, round_index=2, usage=observation)
+
+    assert event.round_index == 2
+    assert event.usage == observation

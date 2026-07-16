@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 
-from mycode.llm import ChatMessage
+from mycode.llm import ChatMessage, MessageOrigin
 from mycode.tool import ToolCall, ToolResult
 
 
 def make_system_message(prompt: str) -> ChatMessage:
-    return ChatMessage(role="system", content=prompt)
+    return ChatMessage(role="system", content=prompt, origin=MessageOrigin.SYSTEM_INSTRUCTION)
 
 
 def make_user_message(text: str) -> ChatMessage:
