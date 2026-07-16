@@ -172,3 +172,30 @@ thinking:
     assert config.thinking.enabled is True
     assert config.thinking.budget_tokens == 2048
     assert config.thinking.show is True
+
+
+def test_loads_optional_usage_config_and_rejects_invalid_values(tmp_path):
+    config_path = tmp_path / "mycode.yaml"
+    write_config(
+        config_path,
+        """
+protocol: openai_chat
+model: gpt-test
+base_url: https://api.openai.com/v1
+api_key: sk-test
+usage:
+  request_stream_usage: true
+""",
+    )
+
+    assert load_config(config_path, cwd=tmp_path, home=tmp_path, environ={}).usage.request_stream_usage is True
+
+    write_config(config_path, """
+protocol: openai_chat
+model: gpt-test
+base_url: https://api.openai.com/v1
+api_key: sk-test
+usage: true
+""")
+    with pytest.raises(ConfigError, match="usage"):
+        load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})

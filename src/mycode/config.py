@@ -21,12 +21,18 @@ class ThinkingConfig:
 
 
 @dataclass(frozen=True)
+class UsageConfig:
+    request_stream_usage: bool = False
+
+
+@dataclass(frozen=True)
 class LLMConfig:
     protocol: str
     model: str
     base_url: str
     api_key: str
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
+    usage: UsageConfig = field(default_factory=UsageConfig)
 
 
 ENV_VAR_PATTERN = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
@@ -47,6 +53,7 @@ def load_config(
     env = os.environ if environ is None else environ
     api_key = _resolve_api_key(str(raw["api_key"]), env)
     thinking = _parse_thinking(raw.get("thinking"))
+    usage = _parse_usage(raw.get("usage"))
 
     return LLMConfig(
         protocol=str(raw["protocol"]),
@@ -54,6 +61,7 @@ def load_config(
         base_url=str(raw["base_url"]),
         api_key=api_key,
         thinking=thinking,
+        usage=usage,
     )
 
 
@@ -123,6 +131,17 @@ def _parse_thinking(raw: object) -> ThinkingConfig:
         budget_tokens=_optional_int(raw.get("budget_tokens")),
         show=bool(raw.get("show", False)),
     )
+
+
+def _parse_usage(raw: object) -> UsageConfig:
+    if raw is None:
+        return UsageConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError("usage must be a YAML mapping.")
+    value = raw.get("request_stream_usage", False)
+    if not isinstance(value, bool):
+        raise ConfigError("usage.request_stream_usage must be a boolean.")
+    return UsageConfig(request_stream_usage=value)
 
 
 def _optional_int(value: object) -> int | None:
