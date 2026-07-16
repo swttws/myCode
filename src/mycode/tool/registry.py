@@ -25,7 +25,8 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def definitions(self) -> list[ToolDefinition]:
-        return [tool.definition for tool in self._tools.values()]
+        # 稳定工具顺序让相同工具集合保持可缓存的请求前缀。
+        return sorted((tool.definition for tool in self._tools.values()), key=lambda definition: definition.name)
 
     def openai_tool_specs(self) -> list[dict[str, object]]:
         return self.openai_chat_tool_specs()

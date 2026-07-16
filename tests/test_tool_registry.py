@@ -73,6 +73,15 @@ def test_tool_registry_returns_tool_definitions():
     assert registry.definitions() == [definition]
 
 
+def test_tool_registry_returns_definitions_in_name_order_without_affecting_lookup():
+    first = FakeTool("zeta")
+    second = FakeTool("alpha")
+    registry = ToolRegistry([first, second])
+
+    assert [definition.name for definition in registry.definitions()] == ["alpha", "zeta"]
+    assert registry.get("zeta") is first
+
+
 def test_tool_registry_converts_definitions_to_openai_chat_tool_specs():
     registry = ToolRegistry([FakeTool()])
 
@@ -116,12 +125,12 @@ def test_default_tool_registry_registers_core_tools(tmp_path):
     registry = create_default_tool_registry(tmp_path)
 
     assert [definition.name for definition in registry.definitions()] == [
-        "read_file",
-        "write_file",
         "edit_file",
-        "run_command",
         "find_files",
+        "read_file",
+        "run_command",
         "search_code",
+        "write_file",
     ]
 
 

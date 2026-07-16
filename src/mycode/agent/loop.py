@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterable
+from pathlib import Path
 
 from mycode.agent.approval import ApprovalDecisionType, ApprovalProvider, ApprovalRequest
 from mycode.agent.config import AgentConfig
@@ -10,7 +11,6 @@ from mycode.agent.events import AgentErrorCode, AgentEvent, AgentEventType
 from mycode.agent.history import (
     make_assistant_text_message,
     make_assistant_tool_call_message,
-    make_system_message,
     make_tool_result_message,
     make_user_message,
 )
@@ -19,6 +19,7 @@ from mycode.agent.scheduler import ToolScheduleError, build_tool_batches
 from mycode.agent.state import AgentMode
 from mycode.llm import BaseLLM, LLMError, StreamEventType
 from mycode.memory import ConversationMemory
+from mycode.prompt import PromptBuildError, PromptConfigurationError, PromptBuilder, create_default_prompt_builder
 from mycode.tool import ToolExecutor, ToolKind, ToolRegistry, ToolResult
 
 
@@ -33,6 +34,7 @@ class AgentLoop:
         tool_registry: ToolRegistry,
         config: AgentConfig | None = None,
         interceptor: ToolInterceptor | None = None,
+        prompt_builder: PromptBuilder | None = None,
     ) -> None:
         self._llm = llm
         self._memory = memory
@@ -40,6 +42,8 @@ class AgentLoop:
         self._tool_registry = tool_registry
         self.config = config or AgentConfig()
         self._interceptor = interceptor or PlanOnlyInterceptor()
+        self._prompt_builder = prompt_builder or create_default_prompt_builder(Path.cwd(), self.config.prompt)
+        self._next_turn_id = 0
 
     def clear_memory(self) -> None:
         # /clear 只清会话历史，不重建模型、工具注册中心或运行配置。
@@ -54,6 +58,7 @@ class AgentLoop:
     ) -> AsyncIterable[AgentEvent]:
         self._memory.append(make_user_message(user_text))
         yield AgentEvent(AgentEventType.USER_MESSAGE, content=user_text)
+        self._next_turn_id += 1
         # 整次 run 共用一个截止时间，模型等待和工具执行都不能越过它。
         run_deadline = (
             time.monotonic() + self.config.run_timeout_seconds
@@ -62,12 +67,23 @@ class AgentLoop:
         )
 
         try:
+            turn_context = self._prompt_builder.begin_turn(
+                turn_id=self._next_turn_id,
+                plan_only=mode.plan_only,
+            )
             for round_index in range(1, self.config.max_rounds + 1):
                 assistant_parts: list[str] = []
                 tool_calls = []
-                # system prompt 每轮临时注入，不写入普通会话 memory。
-                messages = [make_system_message(self.config.minimal_system_prompt), *self._memory.messages()]
-                stream = self._llm.stream_chat(messages, tools=self._tool_executor.definitions()).__aiter__()
+                prompt_request = self._prompt_builder.build(
+                    history=self._memory.messages(),
+                    tools=self._tool_executor.definitions(),
+                    turn=turn_context,
+                    round_index=round_index,
+                )
+                stream = self._llm.stream_chat(
+                    list(prompt_request.messages),
+                    tools=list(prompt_request.tools),
+                ).__aiter__()
 
                 while True:
                     run_remaining = None
@@ -122,6 +138,12 @@ class AgentLoop:
                         )
                         return
                     elif event.type == StreamEventType.DONE:
+                        if event.usage is not None:
+                            yield AgentEvent(
+                                AgentEventType.USAGE,
+                                round_index=round_index,
+                                usage=event.usage,
+                            )
                         break
                 try:
                     await stream.aclose()
@@ -302,6 +324,12 @@ class AgentLoop:
                 content=f"max rounds exceeded: {self.config.max_rounds}",
                 round_index=self.config.max_rounds,
                 error_code=AgentErrorCode.MAX_ROUNDS_EXCEEDED,
+            )
+        except (PromptBuildError, PromptConfigurationError) as exc:
+            yield AgentEvent(
+                AgentEventType.ERROR,
+                content=str(exc),
+                error_code=AgentErrorCode.PROMPT_ERROR,
             )
         except LLMError as exc:
             yield AgentEvent(

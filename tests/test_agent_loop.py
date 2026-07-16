@@ -152,7 +152,8 @@ def test_agent_history_helpers_create_expected_messages():
     )
     result = ToolResult(ok=True, tool_name="read_file", content={"text": "hello"})
 
-    assert make_system_message("prompt") == ChatMessage(role="system", content="prompt")
+    assert make_system_message("prompt").role == "system"
+    assert make_system_message("prompt").content == "prompt"
     assert make_user_message("hi") == ChatMessage(role="user", content="hi")
     assert make_assistant_text_message("ok") == ChatMessage(role="assistant", content="ok")
     assert make_assistant_tool_call_message(call) == ChatMessage(
@@ -201,10 +202,9 @@ def test_agent_loop_streams_text_and_final_response():
         ChatMessage(role="user", content="hello"),
         ChatMessage(role="assistant", content="hi there"),
     ]
-    assert llm.requests[0] == [
-        ChatMessage(role="system", content=loop.config.minimal_system_prompt),
-        ChatMessage(role="user", content="hello"),
-    ]
+    assert llm.requests[0][0].role == "system"
+    assert llm.requests[0][1] == ChatMessage(role="user", content="hello")
+    assert llm.requests[0][-1].content.startswith("<environment-context>")
 
 
 def test_agent_loop_streams_thinking_without_storing_it():
@@ -289,25 +289,24 @@ def test_agent_loop_executes_tool_and_continues_to_final_response():
     assert events[1].tool_call == tool_call
     assert events[2].tool_result == ToolResult(ok=True, tool_name="echo", content={"text": "hi"})
     assert len(llm.requests) == 2
-    assert llm.requests[1] == [
-        ChatMessage(role="system", content=loop.config.minimal_system_prompt),
-        ChatMessage(role="user", content="hello"),
-        ChatMessage(
+    assert llm.requests[1][0].role == "system"
+    assert llm.requests[1][1] == ChatMessage(role="user", content="hello")
+    assert llm.requests[1][2] == ChatMessage(
             role="assistant",
             content="",
             tool_call_id="call-1",
             tool_name="echo",
             tool_arguments='{"text":"hi"}',
-        ),
-        ChatMessage(
+        )
+    assert llm.requests[1][3] == ChatMessage(
             role="tool",
             content=json.dumps(
                 {"ok": True, "tool_name": "echo", "content": {"text": "hi"}, "error": None},
                 ensure_ascii=False,
             ),
             tool_call_id="call-1",
-        ),
-    ]
+        )
+    assert llm.requests[1][-1].content.startswith("<environment-context>")
 
 
 def test_agent_loop_errors_when_max_rounds_exceeded():
