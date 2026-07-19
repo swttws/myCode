@@ -32,6 +32,7 @@ class RunCommandTool:
                 "required": ["command"],
             },
             kind=ToolKind.WRITE,
+            grant_arguments=("command",),
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:

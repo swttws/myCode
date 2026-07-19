@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from mycode.permission.pathing import PathGuard, ToolPathError
 from mycode.tool.cache import FileTextCache
 from mycode.tool.filesystem import (
     EditFileTool,
@@ -10,7 +11,6 @@ from mycode.tool.filesystem import (
     SearchCodeTool,
     WriteFileTool,
 )
-from mycode.tool.pathing import PathGuard, ToolPathError
 
 
 def test_path_guard_resolves_relative_path_inside_workspace(tmp_path):
@@ -22,7 +22,7 @@ def test_path_guard_resolves_relative_path_inside_workspace(tmp_path):
 def test_path_guard_rejects_parent_traversal_outside_workspace(tmp_path):
     guard = PathGuard(tmp_path)
 
-    with pytest.raises(ToolPathError, match="outside workspace"):
+    with pytest.raises(ToolPathError, match="工作区"):
         guard.resolve("../outside.txt")
 
 
@@ -30,7 +30,7 @@ def test_path_guard_rejects_absolute_path_outside_workspace(tmp_path):
     guard = PathGuard(tmp_path)
     outside = tmp_path.parent / "outside.txt"
 
-    with pytest.raises(ToolPathError, match="outside workspace"):
+    with pytest.raises(ToolPathError, match="工作区"):
         guard.resolve(str(outside))
 
 
@@ -53,7 +53,7 @@ def test_read_file_tool_rejects_path_outside_workspace(tmp_path):
 
     assert result.ok is False
     assert result.tool_name == "read_file"
-    assert "outside workspace" in result.error
+    assert "工作区" in result.error
 
 
 def test_write_file_tool_writes_text_and_creates_parent(tmp_path):
@@ -73,7 +73,7 @@ def test_write_file_tool_rejects_path_outside_workspace(tmp_path):
 
     assert result.ok is False
     assert result.tool_name == "write_file"
-    assert "outside workspace" in result.error
+    assert "工作区" in result.error
 
 
 def test_read_and_write_file_tools_define_required_schema_fields(tmp_path):
@@ -84,6 +84,8 @@ def test_read_and_write_file_tools_define_required_schema_fields(tmp_path):
     assert read_tool.definition.parameters["required"] == ["path"]
     assert write_tool.definition.name == "write_file"
     assert write_tool.definition.parameters["required"] == ["path", "text"]
+    assert read_tool.definition.grant_arguments == ("path",)
+    assert write_tool.definition.grant_arguments == ("path",)
 
 
 def test_edit_file_tool_replaces_unique_text(tmp_path):
@@ -128,7 +130,7 @@ def test_edit_file_tool_rejects_path_outside_workspace(tmp_path):
 
     assert result.ok is False
     assert result.tool_name == "edit_file"
-    assert "outside workspace" in result.error
+    assert "工作区" in result.error
 
 
 def test_edit_file_tool_defines_required_schema_fields(tmp_path):
@@ -136,6 +138,7 @@ def test_edit_file_tool_defines_required_schema_fields(tmp_path):
 
     assert tool.definition.name == "edit_file"
     assert tool.definition.parameters["required"] == ["path", "old_text", "new_text"]
+    assert tool.definition.grant_arguments == ("path",)
 
 
 def test_find_files_tool_returns_matching_relative_paths(tmp_path):
@@ -182,7 +185,7 @@ def test_find_files_tool_rejects_root_outside_workspace(tmp_path):
 
     assert result.ok is False
     assert result.tool_name == "find_files"
-    assert "outside workspace" in result.error
+    assert "工作区" in result.error
 
 
 def test_search_code_tool_returns_matching_lines(tmp_path):
@@ -215,6 +218,52 @@ def test_search_code_tool_skips_non_utf8_files(tmp_path):
     }
 
 
+class RejectCandidateGuard(PathGuard):
+    def __init__(self, workspace_root, rejected_name):
+        super().__init__(workspace_root)
+        self.rejected_name = rejected_name
+        self.inspected = []
+
+    def inspect(self, path):
+        guarded = super().inspect(path)
+        self.inspected.append(guarded.relative)
+        if guarded.resolved.name == self.rejected_name:
+            raise ToolPathError("候选文件已越过工作区边界")
+        return guarded
+
+
+def test_find_files_rechecks_every_candidate_and_fails_closed(tmp_path):
+    (tmp_path / "allowed.txt").write_text("ok", encoding="utf-8")
+    (tmp_path / "blocked.txt").write_text("secret", encoding="utf-8")
+    guard = RejectCandidateGuard(tmp_path, "blocked.txt")
+
+    result = FindFilesTool(guard).execute({"pattern": "*.txt"})
+
+    assert result.ok is False
+    assert "候选文件" in result.error
+    assert "blocked.txt" in guard.inspected
+
+
+def test_search_code_rechecks_candidate_before_reading(tmp_path, monkeypatch):
+    blocked = tmp_path / "blocked.txt"
+    blocked.write_text("needle secret", encoding="utf-8")
+    guard = RejectCandidateGuard(tmp_path, "blocked.txt")
+    original_read_text = Path.read_text
+
+    def fail_if_blocked(self, *args, **kwargs):
+        if self.name == "blocked.txt":
+            raise AssertionError("越界候选不应被读取")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_if_blocked)
+
+    result = SearchCodeTool(guard).execute({"query": "needle"})
+
+    assert result.ok is False
+    assert "候选文件" in result.error
+    assert "blocked.txt" in guard.inspected
+
+
 def test_find_and_search_tools_define_required_schema_fields(tmp_path):
     find_tool = FindFilesTool(PathGuard(tmp_path))
     search_tool = SearchCodeTool(PathGuard(tmp_path))
@@ -223,3 +272,5 @@ def test_find_and_search_tools_define_required_schema_fields(tmp_path):
     assert find_tool.definition.parameters["required"] == ["pattern"]
     assert search_tool.definition.name == "search_code"
     assert search_tool.definition.parameters["required"] == ["query"]
+    assert find_tool.definition.grant_arguments == ("root",)
+    assert search_tool.definition.grant_arguments == ("root",)

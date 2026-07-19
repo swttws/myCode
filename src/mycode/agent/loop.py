@@ -5,7 +5,6 @@ import time
 from collections.abc import AsyncIterable
 from pathlib import Path
 
-from mycode.agent.approval import ApprovalDecisionType, ApprovalProvider, ApprovalRequest
 from mycode.agent.config import AgentConfig
 from mycode.agent.events import AgentErrorCode, AgentEvent, AgentEventType
 from mycode.agent.history import (
@@ -14,12 +13,19 @@ from mycode.agent.history import (
     make_tool_result_message,
     make_user_message,
 )
-from mycode.agent.interceptor import InterceptDecisionType, PlanOnlyInterceptor, ToolInterceptor
 from mycode.agent.scheduler import ToolScheduleError, build_tool_batches
 from mycode.agent.state import AgentMode
 from mycode.llm import BaseLLM, LLMError, StreamEventType
 from mycode.memory import ConversationMemory
 from mycode.prompt import PromptBuildError, PromptConfigurationError, PromptBuilder, create_default_prompt_builder
+from mycode.permission.models import (
+    ApprovalDecision,
+    ApprovalDecisionType,
+    ApprovalOutcome,
+    ApprovalProvider,
+    PermissionEffect,
+)
+from mycode.permission.service import PermissionInterceptor
 from mycode.tool import ToolExecutor, ToolKind, ToolRegistry, ToolResult
 
 
@@ -32,8 +38,8 @@ class AgentLoop:
         memory: ConversationMemory,
         tool_executor: ToolExecutor,
         tool_registry: ToolRegistry,
+        permission: PermissionInterceptor,
         config: AgentConfig | None = None,
-        interceptor: ToolInterceptor | None = None,
         prompt_builder: PromptBuilder | None = None,
     ) -> None:
         self._llm = llm
@@ -41,7 +47,7 @@ class AgentLoop:
         self._tool_executor = tool_executor
         self._tool_registry = tool_registry
         self.config = config or AgentConfig()
-        self._interceptor = interceptor or PlanOnlyInterceptor()
+        self._permission = permission
         self._prompt_builder = prompt_builder or create_default_prompt_builder(Path.cwd(), self.config.prompt)
         self._next_turn_id = 0
 
@@ -183,7 +189,7 @@ class AgentLoop:
 
                 for batch in batches:
                     for call in batch.calls:
-                        # 先通知 UI 工具已开始，结果稍后单独通过 TOOL_RESULT 事件返回。
+                        # 先通知 UI 收到工具请求，只有权限检查通过后才会进入真实执行器。
                         yield AgentEvent(
                             AgentEventType.TOOL_CALL_STARTED,
                             round_index=round_index,
@@ -202,22 +208,19 @@ class AgentLoop:
                             )
                             return
 
-                        intercept_decision = await self._interceptor.before_tool(
+                        permission_decision = await self._permission.before_tool(
                             call,
                             tool.definition,
-                            mode,
-                            round_index,
+                            plan_only=mode.plan_only,
+                            round_index=round_index,
                         )
-                        if intercept_decision.type == InterceptDecisionType.ALLOW:
+                        if permission_decision.effect is PermissionEffect.ALLOW:
                             executable_calls.append(call)
-                        elif intercept_decision.type == InterceptDecisionType.DENY:
-                            # 拦截器拒绝也回填结构化结果，让模型能读取失败原因继续决策。
-                            result = intercept_decision.result or ToolResult(
-                                ok=False,
-                                tool_name=call.name,
-                                content={"tool_call_id": call.id, "denied": True},
-                                error=intercept_decision.reason or "tool denied",
-                            )
+                        elif permission_decision.effect in {
+                            PermissionEffect.DENY,
+                            PermissionEffect.FORBIDDEN,
+                        }:
+                            result = self._permission.denied_result(call, permission_decision)
                             yield AgentEvent(
                                 AgentEventType.TOOL_RESULT,
                                 round_index=round_index,
@@ -225,41 +228,51 @@ class AgentLoop:
                                 tool_result=result,
                             )
                             self._memory.append(make_tool_result_message(call, result))
-                        elif intercept_decision.type == InterceptDecisionType.REQUIRE_APPROVAL:
-                            if approval_provider is None:
+                        elif permission_decision.effect is PermissionEffect.ASK:
+                            try:
+                                approval_request = self._permission.create_approval_request(
+                                    call,
+                                    permission_decision,
+                                    plan_only=mode.plan_only,
+                                    round_index=round_index,
+                                )
+                            except Exception:
+                                # 审批上下文异常时沿用当前 ASK 的安全拒绝结果，绝不跳过检查执行工具。
+                                result = self._permission.denied_result(call, permission_decision)
                                 yield AgentEvent(
-                                    AgentEventType.ERROR,
-                                    content=intercept_decision.reason or "approval required",
+                                    AgentEventType.TOOL_RESULT,
                                     round_index=round_index,
                                     tool_call=call,
-                                    error_code=AgentErrorCode.APPROVAL_CANCELLED,
+                                    tool_result=result,
                                 )
-                                return
-
-                            approval_request = ApprovalRequest(
-                                id=f"approval-{call.id}",
-                                tool_call=call,
-                                reason=intercept_decision.reason,
-                                plan_only=mode.plan_only,
-                                round_index=round_index,
-                            )
+                                self._memory.append(make_tool_result_message(call, result))
+                                continue
                             yield AgentEvent(
                                 AgentEventType.APPROVAL_REQUIRED,
-                                content=intercept_decision.reason,
+                                content=permission_decision.message_zh,
                                 round_index=round_index,
                                 tool_call=call,
                                 approval_request=approval_request,
                             )
-                            approval_decision = await approval_provider(approval_request)
-                            if approval_decision.type == ApprovalDecisionType.APPROVE_ONCE:
-                                # 批准只放行当前工具一次，不改变会话的 plan-only 状态。
+                            if approval_provider is None:
+                                approval_decision = ApprovalDecision(ApprovalDecisionType.REJECT)
+                            else:
+                                try:
+                                    approval_decision = await approval_provider(approval_request)
+                                except Exception:
+                                    approval_decision = ApprovalDecision(ApprovalDecisionType.REJECT)
+                            resolution = await self._permission.resolve_approval(
+                                approval_request,
+                                approval_decision,
+                            )
+                            if resolution.outcome is ApprovalOutcome.EXECUTE:
                                 executable_calls.append(call)
-                            elif approval_decision.type == ApprovalDecisionType.REJECT:
-                                result = ToolResult(
-                                    ok=False,
-                                    tool_name=call.name,
-                                    content={"tool_call_id": call.id, "rejected": True},
-                                    error="tool rejected by user",
+                            elif resolution.outcome in {
+                                ApprovalOutcome.REJECTED,
+                                ApprovalOutcome.ERROR,
+                            }:
+                                result = resolution.tool_result or self._permission.denied_result(
+                                    call, permission_decision
                                 )
                                 yield AgentEvent(
                                     AgentEventType.TOOL_RESULT,
@@ -268,10 +281,10 @@ class AgentLoop:
                                     tool_result=result,
                                 )
                                 self._memory.append(make_tool_result_message(call, result))
-                            elif approval_decision.type == ApprovalDecisionType.CANCEL:
+                            elif resolution.outcome is ApprovalOutcome.CANCELLED:
                                 yield AgentEvent(
                                     AgentEventType.CANCELLED,
-                                    content="approval cancelled",
+                                    content="用户取消了工具审批。",
                                     round_index=round_index,
                                     tool_call=call,
                                     error_code=AgentErrorCode.CANCELLED,
@@ -310,7 +323,7 @@ class AgentLoop:
                         return
 
                     for call, result in zip(executable_calls, results):
-                        result = await self._interceptor.after_tool(call, result, mode, round_index)
+                        result = await self._permission.after_tool(call, result)
                         yield AgentEvent(
                             AgentEventType.TOOL_RESULT,
                             round_index=round_index,

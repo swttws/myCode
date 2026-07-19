@@ -4,9 +4,9 @@ import fnmatch
 from pathlib import Path
 from typing import Any
 
+from mycode.permission.pathing import PathGuard, ToolPathError
 from mycode.tool.base import ToolArguments, ToolDefinition, ToolKind, ToolResult
 from mycode.tool.cache import FileTextCache
-from mycode.tool.pathing import PathGuard, ToolPathError
 
 
 class ReadFileTool:
@@ -31,6 +31,7 @@ class ReadFileTool:
                 "required": ["path"],
             },
             kind=ToolKind.READ,
+            grant_arguments=("path",),
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -73,6 +74,7 @@ class WriteFileTool:
                 "required": ["path", "text"],
             },
             kind=ToolKind.WRITE,
+            grant_arguments=("path",),
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -123,6 +125,7 @@ class EditFileTool:
                 "required": ["path", "old_text", "new_text"],
             },
             kind=ToolKind.WRITE,
+            grant_arguments=("path",),
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -173,17 +176,21 @@ class FindFilesTool:
                 "required": ["pattern"],
             },
             kind=ToolKind.READ,
+            grant_arguments=("root",),
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
         try:
             pattern = _required_str(arguments, "pattern")
             root = self._path_guard.resolve(str(arguments.get("root", ".")))
-            matches = [
-                _relative_path(self._path_guard.workspace_root, path)
-                for path in sorted(root.rglob("*"))
-                if path.is_file() and _matches_file_pattern(self._path_guard.workspace_root, path, pattern)
-            ]
+            matches = []
+            for candidate in sorted(root.rglob("*")):
+                # 遍历结果可能在检查后被替换成链接，每个候选都要重新确认真实边界。
+                path = self._path_guard.inspect(str(candidate)).resolved
+                if path.is_file() and _matches_file_pattern(
+                    self._path_guard.workspace_root, path, pattern
+                ):
+                    matches.append(_relative_path(self._path_guard.workspace_root, path))
             return ToolResult(ok=True, tool_name=self.definition.name, content={"matches": matches})
         except Exception as exc:
             return _failure(self.definition.name, exc, {"pattern": arguments.get("pattern")})
@@ -214,6 +221,7 @@ class SearchCodeTool:
                 "required": ["query"],
             },
             kind=ToolKind.READ,
+            grant_arguments=("root",),
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -221,7 +229,9 @@ class SearchCodeTool:
             query = _required_str(arguments, "query")
             root = self._path_guard.resolve(str(arguments.get("root", ".")))
             matches: list[dict[str, object]] = []
-            for path in sorted(root.rglob("*")):
+            for candidate in sorted(root.rglob("*")):
+                # 搜索在读取正文前复检候选，边界不确定时整次调用失败而不是静默跳过。
+                path = self._path_guard.inspect(str(candidate)).resolved
                 if not path.is_file():
                     continue
                 matches.extend(_search_file(self._path_guard.workspace_root, path, query))

@@ -7,6 +7,12 @@ from mycode.agent import (
     ApprovalRequest,
 )
 from mycode.llm import UsageObservation
+from mycode.permission.models import (
+    ApprovalDecisionType,
+    PermissionDecision,
+    PermissionEffect,
+    PermissionMode,
+)
 from mycode.tool import ToolCall
 
 
@@ -35,7 +41,19 @@ def test_agent_event_can_carry_tool_approval_and_error_context():
     request = ApprovalRequest(
         id="approval-call-1",
         tool_call=call,
-        reason="plan-only write tool requires approval",
+        decision=PermissionDecision(
+            effect=PermissionEffect.ASK,
+            reason_code="plan_only_write",
+            message_zh="只规划模式下写工具需要确认。",
+            mode=PermissionMode.DEFAULT,
+            display_arguments={"path": "README.md"},
+        ),
+        options=(
+            ApprovalDecisionType.APPROVE_ONCE,
+            ApprovalDecisionType.REJECT,
+            ApprovalDecisionType.CANCEL,
+        ),
+        candidate_grant=None,
         plan_only=True,
         round_index=2,
     )

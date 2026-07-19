@@ -3,8 +3,7 @@ from io import StringIO
 from rich.console import Console
 
 from mycode import cli
-from mycode.agent import AgentConfig
-from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType
+from mycode.llm import BaseLLM, ChatMessage, MessageOrigin, StreamEvent, StreamEventType
 from mycode.tui import ChatTUI
 from mycode.tool import ToolCall
 
@@ -34,7 +33,14 @@ api_key: sk-test
     )
 
 
-def patch_tui(monkeypatch, inputs, output):
+def patch_tui(monkeypatch, inputs, output, home):
+    real_create = cli.PermissionService.create
+
+    class IsolatedPermissionService:
+        @classmethod
+        def create(cls, workspace_root):
+            return real_create(workspace_root, home=home)
+
     def fake_tui_factory(*, session, show_thinking):
         console = Console(file=output, force_terminal=False, color_system=None, width=100)
         return ChatTUI(
@@ -45,6 +51,11 @@ def patch_tui(monkeypatch, inputs, output):
         )
 
     monkeypatch.setattr(cli, "ChatTUI", fake_tui_factory)
+    monkeypatch.setattr(cli, "PermissionService", IsolatedPermissionService)
+
+
+def conversation_messages(request):
+    return [message for message in request if message.origin is MessageOrigin.CONVERSATION]
 
 
 def test_e2e_cli_tui_session_memory_streams_and_sends_previous_context(tmp_path, monkeypatch):
@@ -59,18 +70,19 @@ def test_e2e_cli_tui_session_memory_streams_and_sends_previous_context(tmp_path,
         ]
     )
     monkeypatch.setattr(cli, "create_llm", lambda config: llm)
-    patch_tui(monkeypatch, inputs, output)
+    patch_tui(monkeypatch, inputs, output, tmp_path / "home")
 
     exit_code = cli.main(["--config", str(config_path)])
 
     assert exit_code == 0
     assert "hi" in output.getvalue()
-    assert llm.requests[1] == [
-        ChatMessage(role="system", content=AgentConfig().minimal_system_prompt),
+    assert conversation_messages(llm.requests[1]) == [
         ChatMessage(role="user", content="hello"),
         ChatMessage(role="assistant", content="hi"),
         ChatMessage(role="user", content="second"),
     ]
+    assert llm.requests[1][0].origin is MessageOrigin.SYSTEM_INSTRUCTION
+    assert llm.requests[1][-1].origin is MessageOrigin.ENVIRONMENT_CONTEXT
     assert llm.tool_requests[0] is not None
 
 
@@ -86,13 +98,12 @@ def test_e2e_clear_removes_previous_context_before_next_request(tmp_path, monkey
         ]
     )
     monkeypatch.setattr(cli, "create_llm", lambda config: llm)
-    patch_tui(monkeypatch, inputs, output)
+    patch_tui(monkeypatch, inputs, output, tmp_path / "home")
 
     exit_code = cli.main(["--config", str(config_path)])
 
     assert exit_code == 0
-    assert llm.requests[1] == [
-        ChatMessage(role="system", content=AgentConfig().minimal_system_prompt),
+    assert conversation_messages(llm.requests[1]) == [
         ChatMessage(role="user", content="after clear"),
     ]
 
@@ -122,25 +133,24 @@ def test_e2e_tool_call_result_is_stored_for_next_request(tmp_path, monkeypatch):
         ]
     )
     monkeypatch.setattr(cli, "create_llm", lambda config: llm)
-    patch_tui(monkeypatch, inputs, output)
+    patch_tui(monkeypatch, inputs, output, tmp_path / "home")
 
     exit_code = cli.main(["--config", str(config_path)])
 
     assert exit_code == 0
     assert "工具已执行" in output.getvalue()
-    second_request = llm.requests[1]
-    assert second_request[0] == ChatMessage(role="system", content=AgentConfig().minimal_system_prompt)
-    assert second_request[1] == ChatMessage(role="user", content="read note")
-    assert second_request[2] == ChatMessage(
+    second_request = conversation_messages(llm.requests[1])
+    assert second_request[0] == ChatMessage(role="user", content="read note")
+    assert second_request[1] == ChatMessage(
         role="assistant",
         content="",
         tool_call_id="call-1",
         tool_name="read_file",
         tool_arguments='{"path":"note.txt"}',
     )
-    assert second_request[3].role == "tool"
-    assert second_request[3].tool_call_id == "call-1"
-    assert "tool text" in second_request[3].content
+    assert second_request[2].role == "tool"
+    assert second_request[2].tool_call_id == "call-1"
+    assert "tool text" in second_request[2].content
 
 
 def test_e2e_failed_edit_tool_call_returns_structured_error_and_continues(tmp_path, monkeypatch):
@@ -149,7 +159,7 @@ def test_e2e_failed_edit_tool_call_returns_structured_error_and_continues(tmp_pa
     write_config(config_path)
     (tmp_path / "note.txt").write_text("same\nsame\n", encoding="utf-8")
     output = StringIO()
-    inputs = iter(["edit note", "/exit"])
+    inputs = iter(["edit note", "o", "/exit"])
     llm = ScriptedLLM(
         [
             [
@@ -172,7 +182,7 @@ def test_e2e_failed_edit_tool_call_returns_structured_error_and_continues(tmp_pa
         ]
     )
     monkeypatch.setattr(cli, "create_llm", lambda config: llm)
-    patch_tui(monkeypatch, inputs, output)
+    patch_tui(monkeypatch, inputs, output, tmp_path / "home")
 
     exit_code = cli.main(["--config", str(config_path)])
 
@@ -211,26 +221,25 @@ def test_e2e_next_turn_sends_previous_tool_history_to_llm(tmp_path, monkeypatch)
         ]
     )
     monkeypatch.setattr(cli, "create_llm", lambda config: llm)
-    patch_tui(monkeypatch, inputs, output)
+    patch_tui(monkeypatch, inputs, output, tmp_path / "home")
 
     exit_code = cli.main(["--config", str(config_path)])
 
     assert exit_code == 0
     assert len(llm.requests) == 3
-    second_request = llm.requests[1]
-    assert second_request[0] == ChatMessage(role="system", content=AgentConfig().minimal_system_prompt)
-    assert second_request[1] == ChatMessage(role="user", content="read note")
-    assert second_request[2] == ChatMessage(
+    second_request = conversation_messages(llm.requests[1])
+    assert second_request[0] == ChatMessage(role="user", content="read note")
+    assert second_request[1] == ChatMessage(
         role="assistant",
         content="",
         tool_call_id="call-1",
         tool_name="read_file",
         tool_arguments='{"path":"note.txt"}',
     )
-    assert second_request[3].role == "tool"
-    assert second_request[3].tool_call_id == "call-1"
-    assert "tool text" in second_request[3].content
-    third_request = llm.requests[2]
+    assert second_request[2].role == "tool"
+    assert second_request[2].tool_call_id == "call-1"
+    assert "tool text" in second_request[2].content
+    third_request = conversation_messages(llm.requests[2])
     assert third_request[-2] == ChatMessage(role="assistant", content="summary")
     assert third_request[-1] == ChatMessage(role="user", content="summarize result")
 
@@ -261,12 +270,11 @@ def test_e2e_clear_removes_tool_history_before_next_request(tmp_path, monkeypatc
         ]
     )
     monkeypatch.setattr(cli, "create_llm", lambda config: llm)
-    patch_tui(monkeypatch, inputs, output)
+    patch_tui(monkeypatch, inputs, output, tmp_path / "home")
 
     exit_code = cli.main(["--config", str(config_path)])
 
     assert exit_code == 0
-    assert llm.requests[2] == [
-        ChatMessage(role="system", content=AgentConfig().minimal_system_prompt),
+    assert conversation_messages(llm.requests[2]) == [
         ChatMessage(role="user", content="after clear"),
     ]

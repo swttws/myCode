@@ -1,4 +1,4 @@
-from mycode.agent.approval import (
+from mycode.permission.models import (
     ApprovalDecision,
     ApprovalDecisionType,
     ApprovalProvider,
@@ -13,12 +13,6 @@ from mycode.agent.history import (
     make_tool_result_message,
     make_user_message,
     serialize_tool_result,
-)
-from mycode.agent.interceptor import (
-    InterceptDecision,
-    InterceptDecisionType,
-    PlanOnlyInterceptor,
-    ToolInterceptor,
 )
 from mycode.agent.loop import AgentLoop
 from mycode.agent.scheduler import ToolBatch, ToolScheduleError, build_tool_batches
@@ -35,11 +29,7 @@ __all__ = [
     "ApprovalDecisionType",
     "ApprovalProvider",
     "ApprovalRequest",
-    "InterceptDecision",
-    "InterceptDecisionType",
-    "PlanOnlyInterceptor",
     "ToolBatch",
-    "ToolInterceptor",
     "ToolScheduleError",
     "build_tool_batches",
     "make_assistant_text_message",

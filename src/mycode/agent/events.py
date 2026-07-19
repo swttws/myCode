@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from mycode.agent.approval import ApprovalRequest
 from mycode.llm import UsageObservation
+from mycode.permission.models import ApprovalRequest
 from mycode.tool import ToolCall, ToolResult
 
 

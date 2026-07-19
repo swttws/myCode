@@ -2,6 +2,8 @@ import json
 import asyncio
 import time
 
+import pytest
+
 from mycode.agent import (
     AgentConfig,
     AgentLoop,
@@ -16,6 +18,14 @@ from mycode.agent import (
 )
 from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType
 from mycode.memory import InMemoryConversationMemory
+from mycode.permission.models import (
+    ApprovalDecision,
+    ApprovalDecisionType,
+    PermissionDecision,
+    PermissionEffect,
+    PermissionMode,
+)
+from mycode.permission.service import PermissionInterceptor, PermissionService
 from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
 
 
@@ -115,6 +125,42 @@ class StaticResultTool:
         return self.result
 
 
+class RecordingTool(StaticResultTool):
+    def __init__(self, name="write_a", kind=ToolKind.WRITE):
+        super().__init__(name, ToolResult(True, name, {"executed": True}), kind=kind)
+        self.calls = []
+
+    def execute(self, arguments):
+        self.calls.append(arguments)
+        return self.result
+
+
+class FakePermission:
+    def __init__(self, effects=None):
+        self.effects = effects or {}
+
+    async def before_tool(self, call, definition, *, plan_only, round_index):
+        effect = self.effects.get(call.name, PermissionEffect.ALLOW)
+        return PermissionDecision(
+            effect=effect,
+            reason_code=f"fake_{effect.value}",
+            message_zh=f"测试权限决定：{effect.value}",
+            mode=PermissionMode.DEFAULT,
+            display_arguments={},
+        )
+
+    def denied_result(self, call, decision):
+        return ToolResult(
+            ok=False,
+            tool_name=call.name,
+            content={"tool_call_id": call.id, "reason_code": decision.reason_code},
+            error=decision.message_zh,
+        )
+
+    async def after_tool(self, call, result):
+        return result
+
+
 async def collect_async(async_iterable):
     items = []
     async for item in async_iterable:
@@ -122,17 +168,18 @@ async def collect_async(async_iterable):
     return items
 
 
-def make_loop(llm, memory=None, tools=None):
+def make_loop(llm, memory=None, tools=None, permission=None):
     registry = ToolRegistry(tools or [NoopTool()])
     return AgentLoop(
         llm=llm,
         memory=memory or InMemoryConversationMemory(),
         tool_executor=ToolExecutor(registry),
         tool_registry=registry,
+        permission=permission or FakePermission(),
     )
 
 
-def make_configured_loop(llm, memory=None, tools=None, config=None):
+def make_configured_loop(llm, memory=None, tools=None, config=None, permission=None):
     registry = ToolRegistry(tools or [NoopTool()])
     return AgentLoop(
         llm=llm,
@@ -140,6 +187,7 @@ def make_configured_loop(llm, memory=None, tools=None, config=None):
         tool_executor=ToolExecutor(registry),
         tool_registry=registry,
         config=config,
+        permission=permission or FakePermission(),
     )
 
 
@@ -364,6 +412,49 @@ def test_agent_loop_batches_read_tools_and_serializes_writes():
     assert records["read_c"]["start"] >= records["write_a"]["end"]
 
 
+def test_agent_loop_serializes_read_approvals_then_runs_approved_reads_concurrently(tmp_path):
+    records: dict[str, dict[str, float]] = {}
+    calls = [
+        ToolCall(id="call-a", name="read_a", arguments={}, raw_arguments="{}"),
+        ToolCall(id="call-b", name="read_b", arguments={}, raw_arguments="{}"),
+    ]
+    llm = ScriptedLLM(
+        [
+            [*(StreamEvent(StreamEventType.TOOL_CALL, tool_call=call) for call in calls), StreamEvent(StreamEventType.DONE)],
+            [StreamEvent(StreamEventType.TEXT_DELTA, "done"), StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    service = PermissionService.create(tmp_path, home=tmp_path / "home")
+    service.set_session_mode(PermissionMode.STRICT)
+    loop = make_loop(
+        llm,
+        tools=[
+            TimedTool("read_a", ToolKind.READ, records),
+            TimedTool("read_b", ToolKind.READ, records),
+        ],
+        permission=PermissionInterceptor(service),
+    )
+    approval_order = []
+    active = 0
+    max_active = 0
+
+    async def approve(request):
+        nonlocal active, max_active
+        approval_order.append(request.tool_call.name)
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return ApprovalDecision(ApprovalDecisionType.APPROVE_ONCE)
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode(), approval_provider=approve)))
+
+    assert approval_order == ["read_a", "read_b"]
+    assert max_active == 1
+    assert records["read_b"]["start"] < records["read_a"]["end"]
+    assert events[-1].content == "done"
+
+
 def test_agent_loop_reports_unknown_tool_as_error():
     llm = ScriptedLLM(
         [
@@ -382,6 +473,30 @@ def test_agent_loop_reports_unknown_tool_as_error():
 
     assert events[-1].type == AgentEventType.ERROR
     assert events[-1].error_code == AgentErrorCode.UNKNOWN_TOOL
+
+
+@pytest.mark.parametrize("effect", [PermissionEffect.DENY, PermissionEffect.FORBIDDEN])
+def test_agent_loop_never_executes_denied_or_forbidden_tool_and_continues(effect):
+    tool = RecordingTool()
+    call = ToolCall(id="call-1", name="write_a", arguments={}, raw_arguments="{}")
+    llm = ScriptedLLM(
+        [
+            [StreamEvent(StreamEventType.TOOL_CALL, tool_call=call), StreamEvent(StreamEventType.DONE)],
+            [StreamEvent(StreamEventType.TEXT_DELTA, "adjusted"), StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    loop = make_loop(
+        llm,
+        tools=[tool],
+        permission=FakePermission({"write_a": effect}),
+    )
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    denied = next(event for event in events if event.type is AgentEventType.TOOL_RESULT)
+    assert tool.calls == []
+    assert denied.tool_result.content["reason_code"] == f"fake_{effect.value}"
+    assert events[-1].content == "adjusted"
 
 
 def test_agent_loop_records_failed_write_tool_result_and_continues():

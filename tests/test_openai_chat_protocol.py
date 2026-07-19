@@ -106,6 +106,7 @@ def test_openai_chat_includes_tools_when_provided():
         description="Read file",
         parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         kind=ToolKind.READ,
+        grant_arguments=("path",),
     )
 
     import asyncio
@@ -128,6 +129,7 @@ def test_openai_chat_includes_tools_when_provided():
         }
     ]
     assert "kind" not in payload["tools"][0]["function"]
+    assert "grant_arguments" not in payload["tools"][0]["function"]
     assert payload["parallel_tool_calls"] is False
 
 

@@ -21,6 +21,7 @@ class ToolDefinition:
     description: str
     parameters: JSONSchema
     kind: ToolKind
+    grant_arguments: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

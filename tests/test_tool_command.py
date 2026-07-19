@@ -58,3 +58,4 @@ def test_run_command_tool_defines_required_schema_fields(tmp_path):
     assert tool.definition.name == "run_command"
     assert tool.definition.parameters["required"] == ["command"]
     assert "timeout_seconds" in tool.definition.parameters["properties"]
+    assert tool.definition.grant_arguments == ("command",)

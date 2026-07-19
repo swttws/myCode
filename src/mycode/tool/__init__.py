@@ -10,14 +10,12 @@ from mycode.tool.filesystem import (
     SearchCodeTool,
     WriteFileTool,
 )
-from mycode.tool.pathing import PathGuard, ToolPathError
 from mycode.tool.registry import ToolRegistry
 
 __all__ = [
     "EditFileTool",
     "FileTextCache",
     "FindFilesTool",
-    "PathGuard",
     "ReadFileTool",
     "RunCommandTool",
     "SearchCodeTool",
@@ -27,7 +25,6 @@ __all__ = [
     "ToolDefinition",
     "ToolExecutor",
     "ToolKind",
-    "ToolPathError",
     "ToolRegistry",
     "ToolResult",
     "WriteFileTool",

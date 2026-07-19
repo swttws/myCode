@@ -1,5 +1,6 @@
 import pytest
 
+from mycode.permission.pathing import PathGuard
 from mycode.tool import (
     FileTextCache,
     ToolCall,
@@ -42,6 +43,10 @@ def test_tool_registry_gets_registered_tool_by_name():
 
 def test_tool_definition_declares_tool_kind():
     assert FakeTool().definition.kind == ToolKind.READ
+
+
+def test_tool_definition_defaults_to_no_persistable_grant_arguments():
+    assert FakeTool().definition.grant_arguments == ()
 
 
 def test_tool_registry_rejects_duplicate_tool_names():
@@ -134,6 +139,16 @@ def test_default_tool_registry_registers_core_tools(tmp_path):
     ]
 
 
+def test_default_tool_registry_reuses_injected_path_guard(tmp_path):
+    guard = PathGuard(tmp_path)
+
+    registry = create_default_tool_registry(tmp_path, path_guard=guard)
+
+    assert registry.get("read_file")._path_guard is guard
+    assert registry.get("write_file")._path_guard is guard
+    assert registry.get("find_files")._path_guard is guard
+
+
 def test_default_tool_registry_declares_tool_kinds(tmp_path):
     registry = create_default_tool_registry(tmp_path)
     definitions = {definition.name: definition for definition in registry.definitions()}
@@ -144,6 +159,18 @@ def test_default_tool_registry_declares_tool_kinds(tmp_path):
     assert definitions["write_file"].kind == ToolKind.WRITE
     assert definitions["edit_file"].kind == ToolKind.WRITE
     assert definitions["run_command"].kind == ToolKind.WRITE
+
+
+def test_default_tool_registry_declares_exact_grant_arguments(tmp_path):
+    registry = create_default_tool_registry(tmp_path)
+    definitions = {definition.name: definition for definition in registry.definitions()}
+
+    assert definitions["read_file"].grant_arguments == ("path",)
+    assert definitions["write_file"].grant_arguments == ("path",)
+    assert definitions["edit_file"].grant_arguments == ("path",)
+    assert definitions["find_files"].grant_arguments == ("root",)
+    assert definitions["search_code"].grant_arguments == ("root",)
+    assert definitions["run_command"].grant_arguments == ("command",)
 
 
 def test_default_tool_registry_uses_chinese_tool_definitions(tmp_path):

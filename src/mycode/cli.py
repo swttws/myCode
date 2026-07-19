@@ -10,6 +10,8 @@ from mycode.config import ConfigError, load_config
 from mycode.dev_logging import configure_dev_logging_from_env
 from mycode.agent import AgentLoop
 from mycode.memory import InMemoryConversationMemory
+from mycode.permission.models import PermissionConfigError
+from mycode.permission.service import PermissionInterceptor, PermissionService
 from mycode.protocols import ProtocolError, create_llm
 from mycode.session import ChatSession
 from mycode.tool import ToolExecutor, create_default_tool_registry
@@ -42,17 +44,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"myCode 配置错误：{exc}", file=sys.stderr)
         return 1
 
-    # 主流程只组装抽象依赖，具体协议和记忆实现都被包在各自边界里。
+    try:
+        permissions = PermissionService.create(Path.cwd())
+    except PermissionConfigError as exc:
+        logger.error("myCode 权限配置错误：%s", exc)
+        print(f"myCode 权限配置错误：{exc}", file=sys.stderr)
+        return 1
+
+    # 权限服务和文件工具必须共享同一 PathGuard，避免策略检查与实际执行使用不同边界。
     memory = InMemoryConversationMemory()
-    tool_registry = create_default_tool_registry(Path.cwd())
+    tool_registry = create_default_tool_registry(Path.cwd(), path_guard=permissions.path_guard)
     tool_executor = ToolExecutor(tool_registry)
+    permission_interceptor = PermissionInterceptor(permissions)
     agent = AgentLoop(
         llm=llm,
         memory=memory,
         tool_executor=tool_executor,
         tool_registry=tool_registry,
+        permission=permission_interceptor,
     )
-    session = ChatSession(agent=agent)
+    session = ChatSession(agent=agent, permissions=permissions)
     tui = ChatTUI(session=session, show_thinking=config.thinking.show)
     exit_code = asyncio.run(tui.run())
     logger.info("myCode CLI 退出，退出码：%s", exit_code)

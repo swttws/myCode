@@ -1,6 +1,6 @@
 # myCode
 
-myCode 是一个使用 Python 开发的终端 AI 编程助手。当前处于 Stage 03：Agent Loop 与事件流。
+myCode 是一个使用 Python 开发的终端 AI 编程助手。当前推进至 Stage 05：纵深权限与安全检查，并保留 Stage 03 的 Agent Loop、Stage 04 的 Prompt Pipeline 与事件流契约。
 
 用户启动 `mycode` 后输入问题，程序会把请求交给独立 Agent Loop。Agent 会调用配置中的大模型 API，通过稳定事件流向 TUI 输出用户消息、thinking、文本增量、工具开始、工具结果、最终回复、错误、取消和等待审批状态。对于 `openai_responses` 和 `openai_chat`，模型可以在同一用户回合中发起工具调用；myCode 会执行工具、把结构化结果写回对话历史，并自动进入下一轮 LLM 调用，直到模型输出最终文本或触发错误、取消、超时、最大轮数等终止条件。
 
@@ -125,7 +125,7 @@ Stage 03 新增 `src/mycode/agent` 包作为 Agent 主边界。Agent Loop 每轮
 - `user_message`：用户消息进入本轮。
 - `thinking_delta`：模型 thinking 增量，可由 TUI 配置决定是否显示。
 - `text_delta`：assistant 文本增量。
-- `tool_call_started`：工具开始执行。
+- `tool_call_started`：收到工具请求，尚不表示工具已经通过权限检查或开始执行。
 - `tool_result`：工具执行结果，成功和失败都以结构化结果输出。
 - `final_response`：本轮最终回复。
 - `approval_required`：`plan-only` 下写工具等待用户审批。
@@ -144,16 +144,43 @@ Stage 03 新增 `src/mycode/agent` 包作为 Agent 主边界。Agent Loop 每轮
 
 `/plan-only off` 关闭该模式，`/plan-only` 显示当前状态。`/clear` 会清空会话历史并复位 plan-only 状态。
 
+## Stage 05 权限系统
+
+所有合法工具调用在进入真实执行器前都经过统一权限入口。最终决定分为 `ALLOW`、`DENY`、`ASK` 和 `FORBIDDEN`。`FORBIDDEN` 是不可覆盖的内置安全底线，用于阻止删除工作区根或系统根、磁盘破坏以及同一命令链中的远程下载即执行；它不能被权限档位、普通规则或 HITL 审批放宽。
+
+权限档位只处理没有规则和内置风险命中的调用：
+
+- `strict`：未显式允许的调用都进入 `ASK`。
+- `default`：普通读工具默认允许，写工具和命令工具进入 `ASK`。
+- `permissive`：普通未命中调用默认允许，但仍不能覆盖 `DENY`、内置高风险 `ASK` 或 `FORBIDDEN`。
+
+普通规则按以下优先级选择首个存在匹配项的来源：
+
+1. 当前会话规则。
+2. 用户目录中按工作区隔离的本地项目授权。
+3. 工作区内的仓库项目策略。
+4. 用户全局默认规则。
+
+用户全局配置位于 `~/.mycode/permissions.yaml`。本地项目授权位于 `~/.mycode/projects/<workspace_sha256>/permissions.yaml`，可以由 HITL 创建当前项目永久允许。仓库项目策略位于 `<workspace>/mycode.permissions.yaml`，属于不可信工作区内容，只能包含 `DENY/ASK`，不能声明 `ALLOW`、设置 mode 或接收 HITL 持久授权。合法仓库策略示例见 `examples/mycode.permissions.yaml`。
+
+当决定为 `ASK` 时，终端使用中文展示工具、脱敏参数、风险原因、规则来源和当前档位。普通审批支持本次允许、本会话允许、当前项目永久允许、拒绝和取消；未声明安全授权参数或开启 `plan-only` 时只提供本次允许、拒绝和取消。项目授权只有原子写入成功后才执行当前调用，失败时原文件和工具均保持不变。
+
+内置文件读取、写入、编辑、查找和搜索工具具有独立的工作区路径沙箱，并在策略判断前和实际文件访问前复检真实路径与符号链接。`run_command` 只把 shell 的工作目录设为工作区，它不是操作系统级进程沙箱；shell 子进程仍可能访问工作区外资源，因此命令还要经过危险命令分析和权限审批。本阶段不实现网络隔离、容器隔离或工具失败后的自动回滚。
+
+本阶段信任 myCode 进程、本地用户、内置工具实现，以及本地用户持有的权限配置和 HITL 授权；不防御恶意插件、恶意工具实现或已经控制本机账户的攻击者。权限面向用户的提示均使用中文，稳定英文原因码只用于结构化结果和机器判断。
+
 ## 交互命令
 
 - `/clear`：清空当前进程内的对话上下文，包括工具调用历史和工具结果历史。
 - `/plan-only`：显示当前 plan-only 状态。
 - `/plan-only on`：开启写工具审批模式。
 - `/plan-only off`：关闭写工具审批模式。
+- `/permission`：显示当前有效权限档位和来源。
+- `/permission strict|default|permissive`：设置当前会话权限档位。
 - `/exit`：退出 myCode。
 
 ## 当前阶段不做
 
-Stage 03 不做复杂 system prompt 组装，不做完整复杂权限策略，不做 Agent 递归调用、子任务委派或多 Agent 调度，不做项目索引、RAG、长期记忆、代码符号图谱或上下文压缩，也不做复杂 TUI 全屏面板。
+当前阶段不做 Agent 递归调用、子任务委派或多 Agent 调度，不做项目索引、RAG、长期记忆、代码符号图谱或上下文压缩，也不做复杂 TUI 全屏面板。
 
 本阶段也不实现 Anthropic 工具调用，不做真实网络或真实 API key 依赖的验收，不做工具失败后的自动回滚。后续能力会基于当前的 LLM、protocols、memory、tool 和 agent 边界继续扩展。

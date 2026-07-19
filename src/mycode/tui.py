@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from collections.abc import Callable
 
 from prompt_toolkit import PromptSession
 from rich.console import Console
 
 from mycode.agent import ApprovalDecision, ApprovalDecisionType, ApprovalRequest, AgentEventType
+from mycode.permission.models import PermissionMode, RuleSource
 from mycode.session import ChatSession
 
 try:
@@ -33,7 +35,9 @@ class ChatTUI:
         self._input_func = input_func or self._prompt
 
     async def run(self) -> int:
-        self._console.print("[bold cyan]myCode[/bold cyan] Stage 03 Agent 模式，输入 /exit 退出，/clear 清空上下文。")
+        self._console.print(
+            "[bold cyan]myCode[/bold cyan] Stage 05 Agent 权限模式，输入 /exit 退出，/clear 清空上下文。"
+        )
         while True:
             try:
                 user_text = await self._read_input()
@@ -62,6 +66,28 @@ class ChatTUI:
             if command == "/plan-only off":
                 self._session.set_plan_only(False)
                 self._console.print("[dim]plan-only 已关闭。[/dim]")
+                continue
+            if command.startswith("/permission"):
+                parts = command.split()
+                if len(parts) == 1:
+                    mode, source = self._session.permission_mode()
+                    self._console.print(
+                        f"[dim]当前权限档位：{_mode_label(mode)}；来源：{_source_label(source)}。[/dim]"
+                    )
+                elif len(parts) == 2 and parts[1].lower() in {
+                    "strict",
+                    "default",
+                    "permissive",
+                }:
+                    mode = PermissionMode(parts[1].lower())
+                    self._session.set_permission_mode(mode)
+                    self._console.print(f"[dim]会话权限档位已设置为：{_mode_label(mode)}。[/dim]")
+                else:
+                    self._console.print(
+                        "用法：/permission [strict|default|permissive]",
+                        style="yellow",
+                        markup=False,
+                    )
                 continue
 
             await self._render_stream(command)
@@ -98,7 +124,7 @@ class ChatTUI:
                 self._console.print(event.content, style="dim italic", end="")
             elif event.type == AgentEventType.TOOL_CALL_STARTED and event.tool_call is not None:
                 self._console.print(
-                    f"\n[dim]工具开始：{event.tool_call.name}[/dim]",
+                    f"\n[dim]工具请求：{event.tool_call.name}[/dim]",
                     end="",
                 )
             elif event.type == AgentEventType.TOOL_RESULT and event.tool_result is not None:
@@ -124,13 +150,58 @@ class ChatTUI:
         self._console.print()
 
     async def _approval_provider(self, request: ApprovalRequest) -> ApprovalDecision:
-        # Agent 在写工具需要审批时调用这里；TUI 负责把用户输入翻译成审批决定。
+        # 候选授权范围由权限服务给出，TUI 只展示并翻译选择，避免界面生成过宽规则。
+        decision = request.decision
+        arguments = json.dumps(dict(decision.display_arguments), ensure_ascii=False, sort_keys=True)
+        source = _source_label(decision.source)
+        rule = f"，规则：{decision.rule_id}" if decision.rule_id else ""
+        self._console.print(f"\n[yellow]工具：{request.tool_call.name}[/yellow]")
+        self._console.print(f"[yellow]参数：{arguments}[/yellow]")
+        self._console.print(f"[yellow]原因：{decision.message_zh}[/yellow]")
         self._console.print(
-            f"\n[yellow]plan-only 请求执行写工具：{request.tool_call.name}。批准？[y/n/c][/yellow]"
+            f"[yellow]档位：{_mode_label(decision.mode)}；来源：{source}{rule}[/yellow]"
         )
+        option_text = []
+        if ApprovalDecisionType.APPROVE_ONCE in request.options:
+            option_text.append("o/y 本次允许")
+        if ApprovalDecisionType.APPROVE_SESSION in request.options:
+            option_text.append("s 本会话允许")
+        if ApprovalDecisionType.APPROVE_PROJECT in request.options:
+            option_text.append("p 当前项目永久允许")
+        if ApprovalDecisionType.REJECT in request.options:
+            option_text.append("n 拒绝")
+        if ApprovalDecisionType.CANCEL in request.options:
+            option_text.append("c 取消")
+        self._console.print("[yellow]请选择：" + "；".join(option_text) + "[/yellow]")
         answer = (await self._read_input()).strip().lower()
-        if answer == "y":
-            return ApprovalDecision(ApprovalDecisionType.APPROVE_ONCE)
-        if answer == "n":
-            return ApprovalDecision(ApprovalDecisionType.REJECT)
+        mapping = {
+            "o": ApprovalDecisionType.APPROVE_ONCE,
+            "y": ApprovalDecisionType.APPROVE_ONCE,
+            "s": ApprovalDecisionType.APPROVE_SESSION,
+            "p": ApprovalDecisionType.APPROVE_PROJECT,
+            "n": ApprovalDecisionType.REJECT,
+            "c": ApprovalDecisionType.CANCEL,
+        }
+        selected = mapping.get(answer)
+        if selected is not None and selected in request.options:
+            return ApprovalDecision(selected)
+        self._console.print("[yellow]无效审批选项，已取消本次工具调用。[/yellow]")
         return ApprovalDecision(ApprovalDecisionType.CANCEL)
+
+
+def _mode_label(mode: PermissionMode) -> str:
+    return {
+        PermissionMode.STRICT: "严格（strict）",
+        PermissionMode.DEFAULT: "默认（default）",
+        PermissionMode.PERMISSIVE: "放行（permissive）",
+    }[mode]
+
+
+def _source_label(source: RuleSource | None) -> str:
+    return {
+        RuleSource.SESSION: "当前会话",
+        RuleSource.LOCAL_PROJECT: "本地项目",
+        RuleSource.REPOSITORY_PROJECT: "仓库项目",
+        RuleSource.USER_GLOBAL: "用户全局",
+        None: "内置默认",
+    }[source]

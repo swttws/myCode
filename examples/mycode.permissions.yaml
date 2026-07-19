@@ -1,0 +1,12 @@
+version: 1
+rules:
+  - id: protect-environment-files
+    effect: deny
+    tool: write_file
+    arguments:
+      path: ".env*"
+  - id: review-release-commands
+    effect: ask
+    tool: run_command
+    arguments:
+      command: "git push *"
