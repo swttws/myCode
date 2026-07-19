@@ -64,8 +64,16 @@ def test_environment_context_escapes_and_truncates_values_without_exposing_extra
 
     assert content.startswith("<environment-context>\n")
     assert content.endswith("\n</environment-context>")
+    assert [line.split(":", 1)[0] for line in content.splitlines()[1:-1]] == [
+        "工作区",
+        "操作系统",
+        "当前时间",
+        "时区",
+        "Git 分支",
+        "Git 状态",
+    ]
     assert "&lt;workspace&gt;&amp;" in content
     assert "&lt;branch&gt;&amp;" in content
-    assert "git_status: " + "a" * 24 + "..." in content
+    assert "Git 状态: " + "a" * 24 + "..." in content
     assert "API_KEY" not in content
     assert "diff --git" not in content

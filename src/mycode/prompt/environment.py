@@ -60,13 +60,14 @@ class DefaultEnvironmentCollector:
 
 def format_environment_context(snapshot: EnvironmentSnapshot, config: PromptConfig) -> str:
     fields = (
-        ("workspace", snapshot.workspace),
-        ("operating_system", snapshot.operating_system),
-        ("current_time", snapshot.current_time),
-        ("timezone", snapshot.timezone),
-        ("git_branch", snapshot.git_branch),
-        ("git_status", snapshot.git_status),
+        ("工作区", snapshot.workspace),
+        ("操作系统", snapshot.operating_system),
+        ("当前时间", snapshot.current_time),
+        ("时区", snapshot.timezone),
+        ("Git 分支", snapshot.git_branch),
+        ("Git 状态", snapshot.git_status),
     )
+    # XML 标签是稳定的结构边界，保持不翻译；字段显示名面向模型使用中文。
     lines = ["<environment-context>"]
     for name, value in fields:
         rendered, _ = _escape_and_truncate(value or "unknown", config.environment_value_limit)

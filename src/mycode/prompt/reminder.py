@@ -18,9 +18,9 @@ class ReminderPolicy:
         return SystemReminder(
             id="plan-only",
             full_content=(
-                "Plan-only mode is active. Read tools are allowed; write tools require user approval."
+                "当前处于仅计划模式。允许使用读取工具；写入工具需要用户批准。"
             ),
-            concise_content="Plan-only mode remains active; do not assume write approval.",
+            concise_content="仅计划模式仍处于启用状态；不要假定已获写入批准。",
         )
 
     def render(self, reminders: Sequence[SystemReminder], round_index: int) -> str | None:
