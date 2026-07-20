@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterable
+from dataclasses import replace
 from pathlib import Path
 
 from mycode.agent.config import AgentConfig
@@ -17,7 +18,13 @@ from mycode.agent.scheduler import ToolScheduleError, build_tool_batches
 from mycode.agent.state import AgentMode
 from mycode.llm import BaseLLM, LLMError, StreamEventType
 from mycode.memory import ConversationMemory
-from mycode.prompt import PromptBuildError, PromptConfigurationError, PromptBuilder, create_default_prompt_builder
+from mycode.prompt import (
+    PromptBuildError,
+    PromptConfigurationError,
+    PromptBuilder,
+    create_default_prompt_builder,
+)
+from mycode.prompt.models import SystemReminder
 from mycode.permission.models import (
     ApprovalDecision,
     ApprovalDecisionType,
@@ -80,10 +87,21 @@ class AgentLoop:
             for round_index in range(1, self.config.max_rounds + 1):
                 assistant_parts: list[str] = []
                 tool_calls = []
+                deferred_reminder = _make_deferred_tool_reminder(
+                    self._tool_registry.deferred_summaries()
+                )
+                round_turn_context = (
+                    replace(
+                        turn_context,
+                        reminders=turn_context.reminders + (deferred_reminder,),
+                    )
+                    if deferred_reminder is not None
+                    else turn_context
+                )
                 prompt_request = self._prompt_builder.build(
                     history=self._memory.messages(),
-                    tools=self._tool_executor.definitions(),
-                    turn=turn_context,
+                    tools=self._tool_registry.model_definitions(),
+                    turn=round_turn_context,
                     round_index=round_index,
                 )
                 stream = self._llm.stream_chat(
@@ -386,3 +404,21 @@ async def _execute_tool_with_run_deadline(
     if remaining <= 0:
         raise asyncio.TimeoutError
     return await asyncio.wait_for(executor.execute(call), timeout=remaining)
+
+
+def _make_deferred_tool_reminder(summaries) -> SystemReminder | None:
+    if not summaries:
+        return None
+    lines = [
+        "以下 MCP 工具可按完整名称发现；需要使用时先调用 tool_search 获取完整定义：",
+        *(
+            f"- {summary.name}: {' '.join(summary.description.split())}"
+            for summary in summaries
+        ),
+    ]
+    content = "\n".join(lines)
+    return SystemReminder(
+        id="mcp-deferred-tools",
+        full_content=content,
+        concise_content=content,
+    )
