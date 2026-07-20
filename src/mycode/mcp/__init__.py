@@ -8,6 +8,7 @@ from mycode.mcp.models import (
     MCPTransportKind,
     RemoteTool,
 )
+from mycode.mcp.tools import MCPToolWrapper, ToolSearch, register_mcp_tools
 
 __all__ = [
     "DeferredToolSummary",
@@ -17,6 +18,9 @@ __all__ = [
     "MCPServerConfig",
     "MCPServerState",
     "MCPTransportKind",
+    "MCPToolWrapper",
     "RemoteTool",
+    "ToolSearch",
     "load_mcp_config",
+    "register_mcp_tools",
 ]
