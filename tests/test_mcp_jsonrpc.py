@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from mycode.mcp.connection import MCPConnection, MCPConnectionError, MCPRemoteError
 from mycode.mcp.jsonrpc import (
     JSONRPCError,
     JSONRPCMessageKind,
@@ -13,6 +16,8 @@ from mycode.mcp.jsonrpc import (
     make_success_response,
     parse_message,
 )
+from mycode.tool import ToolKind
+from tests.mcp_helpers import MemoryMCPTransport
 
 
 def test_builds_jsonrpc_request_and_notification():
@@ -126,3 +131,158 @@ def test_error_builder_rejects_boolean_error_code():
     with pytest.raises(ValueError, match="error code"):
         make_error_response(1, True, "bad")
 
+
+async def initialize_connection(connection: MCPConnection, transport: MemoryMCPTransport):
+    initialization = asyncio.create_task(connection.initialize())
+    initialize_request = await transport.next_sent()
+    assert initialize_request["method"] == "initialize"
+    await transport.push(
+        {
+            "jsonrpc": "2.0",
+            "id": initialize_request["id"],
+            "result": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "memory", "version": "1"},
+            },
+        }
+    )
+    initialized_notification = await transport.next_sent()
+    assert initialized_notification == {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {},
+    }
+    list_request = await transport.next_sent()
+    assert list_request["method"] == "tools/list"
+    await transport.push(
+        {
+            "jsonrpc": "2.0",
+            "id": list_request["id"],
+            "result": {
+                "tools": [
+                    {
+                        "name": "echo",
+                        "description": "Echo arguments.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                        },
+                    }
+                ]
+            },
+        }
+    )
+    return await initialization
+
+
+def test_connection_initializes_in_protocol_order_and_discovers_tools():
+    async def scenario():
+        transport = MemoryMCPTransport()
+        connection = MCPConnection(transport, server_name="memory", timeout_seconds=0.5)
+        try:
+            tools = await initialize_connection(connection, transport)
+
+            assert connection.protocol_version == "2025-11-25"
+            assert transport.protocol_version == "2025-11-25"
+            assert connection.capabilities == {"tools": {"listChanged": False}}
+            assert connection.is_initialized is True
+            assert len(tools) == 1
+            assert tools[0].remote_name == "echo"
+            assert tools[0].public_name == "memory__echo"
+            assert tools[0].kind is ToolKind.WRITE
+        finally:
+            await connection.close()
+
+        assert transport.open_count == 1
+        assert transport.close_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_connection_matches_out_of_order_success_and_error_responses_by_id():
+    async def scenario():
+        transport = MemoryMCPTransport()
+        connection = MCPConnection(transport, server_name="memory", timeout_seconds=0.5)
+        try:
+            await initialize_connection(connection, transport)
+            first_task = asyncio.create_task(connection.request("first", {"value": 1}))
+            second_task = asyncio.create_task(connection.request("second", {"value": 2}))
+            first_request = await transport.next_sent()
+            second_request = await transport.next_sent()
+
+            await transport.push(
+                {
+                    "jsonrpc": "2.0",
+                    "id": second_request["id"],
+                    "error": {"code": -32001, "message": "second failed"},
+                }
+            )
+            await transport.push(
+                {
+                    "jsonrpc": "2.0",
+                    "id": first_request["id"],
+                    "result": {"request": "first"},
+                }
+            )
+
+            assert await first_task == {"request": "first"}
+            with pytest.raises(MCPRemoteError) as captured:
+                await second_task
+            assert captured.value.code == -32001
+            assert connection.pending_request_count == 0
+        finally:
+            await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_rejects_incompatible_protocol_version():
+    async def scenario():
+        transport = MemoryMCPTransport()
+        connection = MCPConnection(transport, server_name="memory", timeout_seconds=0.5)
+        initialization = asyncio.create_task(connection.initialize())
+        request = await transport.next_sent()
+        await transport.push(
+            {
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {"protocolVersion": "1900-01-01", "capabilities": {}},
+            }
+        )
+        try:
+            with pytest.raises(MCPConnectionError) as captured:
+                await initialization
+            assert captured.value.category == "unsupported_version"
+        finally:
+            await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_rejects_invalid_tool_list():
+    async def scenario():
+        transport = MemoryMCPTransport()
+        connection = MCPConnection(transport, server_name="memory", timeout_seconds=0.5)
+        initialization = asyncio.create_task(connection.initialize())
+        initialize_request = await transport.next_sent()
+        await transport.push(
+            {
+                "jsonrpc": "2.0",
+                "id": initialize_request["id"],
+                "result": {"protocolVersion": "2025-11-25", "capabilities": {}},
+            }
+        )
+        await transport.next_sent()
+        list_request = await transport.next_sent()
+        await transport.push(
+            {"jsonrpc": "2.0", "id": list_request["id"], "result": {"tools": "bad"}}
+        )
+        try:
+            with pytest.raises(MCPConnectionError) as captured:
+                await initialization
+            assert captured.value.category == "invalid_tool_list"
+        finally:
+            await connection.close()
+
+    asyncio.run(scenario())

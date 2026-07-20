@@ -7,6 +7,7 @@ import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import asyncio
 
 
 STDIO_SERVER_SOURCE = r'''
@@ -152,3 +153,45 @@ def run_http_server():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+class MemoryMCPTransport:
+    def __init__(self) -> None:
+        self.incoming: asyncio.Queue[object] = asyncio.Queue()
+        self.sent: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        self.open_count = 0
+        self.close_count = 0
+        self.is_open = False
+        self.protocol_version: str | None = None
+
+    async def open(self) -> None:
+        self.open_count += 1
+        self.is_open = True
+
+    async def send(self, message) -> None:
+        if not self.is_open:
+            raise RuntimeError("memory transport is closed")
+        await self.sent.put(dict(message))
+
+    async def receive(self):
+        while self.is_open:
+            item = await self.incoming.get()
+            if isinstance(item, BaseException):
+                raise item
+            if item is None:
+                return
+            yield item
+
+    async def close(self) -> None:
+        self.close_count += 1
+        self.is_open = False
+        await self.incoming.put(None)
+
+    def set_protocol_version(self, version: str) -> None:
+        self.protocol_version = version
+
+    async def next_sent(self) -> dict[str, object]:
+        return await asyncio.wait_for(self.sent.get(), timeout=1)
+
+    async def push(self, message: object) -> None:
+        await self.incoming.put(message)
