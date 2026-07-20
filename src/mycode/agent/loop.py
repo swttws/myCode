@@ -87,6 +87,7 @@ class AgentLoop:
             for round_index in range(1, self.config.max_rounds + 1):
                 assistant_parts: list[str] = []
                 tool_calls = []
+                # 只注入延迟工具摘要；模型通过 tool_search 发现后，完整 schema 才进入下一轮。
                 deferred_reminder = _make_deferred_tool_reminder(
                     self._tool_registry.deferred_summaries()
                 )

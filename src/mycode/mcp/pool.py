@@ -27,6 +27,7 @@ ToolListListener = Callable[[str, tuple[RemoteTool, ...]], None]
 @dataclass
 class _ServerEntry:
     config: MCPServerConfig
+    # 锁只保护单个 server，同一池中的其他 server 仍可并行连接和调用。
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     state: MCPServerState = MCPServerState.NEW
     connection: MCPConnection | None = None
@@ -80,6 +81,7 @@ class MCPServerPool:
         self._tool_listeners.append(listener)
 
     async def initialize_all(self) -> tuple[MCPDiagnostic, ...]:
+        # 各 server 并行初始化并各自返回诊断，单点失败不会阻断可用 server。
         results = await asyncio.gather(
             *(self._initialize_entry(entry) for entry in self._entries.values())
         )
@@ -121,8 +123,10 @@ class MCPServerPool:
                 {"name": remote_name, "arguments": dict(arguments)},
             )
         except MCPRemoteError:
+            # 合法的 JSON-RPC 远端错误只代表本次调用失败，连接本身仍可继续复用。
             return _tool_failure(public_name, "remote_error")
         except MCPConnectionError as exc:
+            # 传输或协议错误会污染连接状态，清空工具快照并等待后续惰性重连。
             await self._mark_failed(entry, connection)
             return _tool_failure(public_name, exc.category)
         except Exception:
@@ -154,6 +158,7 @@ class MCPServerPool:
             if entry.state is MCPServerState.CLOSED:
                 return False
 
+            # 工具搜索或调用可触发失败 server 的惰性重连；锁保证只创建一个新连接。
             old_connection = entry.connection
             if old_connection is not None and entry.state is not MCPServerState.FAILED:
                 await old_connection.close()
@@ -212,6 +217,7 @@ class MCPServerPool:
 
         entry.tools, diagnostics = _normalize_tools(entry.config, discovered)
         entry.state = MCPServerState.READY
+        # READY 后再同步注册中心，监听器即使失败也只产生诊断，不回滚连接。
         listener_diagnostics = self._notify_tools_changed(entry)
         return diagnostics + listener_diagnostics
 
@@ -271,6 +277,7 @@ def _normalize_tools(
             continue
 
         public_names.add(public_name)
+        # 读权限必须由本地配置按远端原名显式授予，未声明工具一律保守视为写操作。
         kind = ToolKind.READ if tool.remote_name in config.read_tools else ToolKind.WRITE
         tools.append(
             replace(

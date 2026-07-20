@@ -44,6 +44,7 @@ class MCPToolWrapper:
         return self._remote_tool.remote_name
 
     def should_defer(self) -> bool:
+        # 远端 schema 不直接塞入每轮模型上下文，由 tool_search 按需展开以节省 token。
         return True
 
     async def execute_async(self, arguments: ToolArguments) -> ToolResult:
@@ -93,6 +94,7 @@ class ToolSearch:
     async def execute_async(self, arguments: ToolArguments) -> ToolResult:
         wrapper, failure = self._resolve(arguments)
         if wrapper is None:
+            # 注册中心暂无该工具时，先尝试恢复对应 server，再用最新工具列表重新解析。
             server_name = self._configured_server_for(arguments.get("name"))
             if server_name is not None:
                 if not await self._pool.ensure_available(server_name):
@@ -158,6 +160,7 @@ class ToolSearch:
                 "parameters": dict(definition.parameters),
             }
         }
+        # 标记后该完整定义会从下一轮开始进入模型可调用工具列表。
         if not self._registry.mark_discovered(definition.name):
             return _search_failure("not_found")
         return ToolResult(
@@ -181,6 +184,7 @@ def register_mcp_tools(
             )
 
     def reconcile(server_name: str, remote_tools: tuple[RemoteTool, ...]) -> None:
+        # 重连后的工具列表可能变化；按 server 做差量同步，避免留下失效 wrapper。
         desired = {
             tool.public_name: MCPToolWrapper(tool, pool)
             for tool in remote_tools
@@ -205,6 +209,7 @@ def register_mcp_tools(
 
     pool.add_tools_listener(reconcile)
     if getattr(pool, "server_names", ()):
+        # 即使初始连接全部失败也保留搜索入口，使后续搜索能够触发惰性重连。
         ensure_search_tool()
     grouped: dict[str, list[RemoteTool]] = {}
     for remote_tool in pool.tools:

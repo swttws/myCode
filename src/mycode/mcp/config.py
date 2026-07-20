@@ -36,6 +36,7 @@ def load_mcp_config(
 ) -> tuple[MCPConfig, tuple[MCPDiagnostic, ...]]:
     path = _resolve_config_path(explicit_path, cwd=cwd, home=home)
     if path is None:
+        # MCP 是可选能力；未发现配置时保持原有本地工具流程，不视为错误。
         return MCPConfig(servers=()), ()
 
     raw = _read_config(path)
@@ -44,6 +45,7 @@ def load_mcp_config(
     diagnostics: list[MCPDiagnostic] = []
     known_names: set[str] = set()
 
+    # 单个 server 配置无效时只跳过该项，避免一个错误配置拖垮其他 server。
     for index, item in enumerate(raw["servers"]):
         server_name = _diagnostic_server_name(item)
         try:
@@ -79,6 +81,7 @@ def _resolve_config_path(
             raise MCPConfigError(f"MCP config file not found: {path}")
         return path
 
+    # 自动发现时工作区配置优先于用户级配置，便于项目覆盖全局设置。
     current_dir = Path.cwd() if cwd is None else Path(cwd)
     workspace_path = current_dir / "mycode.mcp.yaml"
     if workspace_path.is_file():
@@ -192,6 +195,7 @@ def _parse_string_mapping(
 
 
 def _resolve_environment_references(value: str, environ: Mapping[str, str]) -> str:
+    # 凭据只从运行环境注入，配置文件中保留 ${NAME} 引用，避免落盘明文 secret。
     def replace(match: re.Match[str]) -> str:
         name = match.group(1)
         replacement = environ.get(name)

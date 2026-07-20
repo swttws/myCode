@@ -28,6 +28,7 @@ class StreamableHTTPTransport:
         self._enable_get_stream = enable_get_stream
         self._client = client
         self._owns_client = client is None
+        # POST JSON、POST SSE 和可选 GET SSE 最终都汇入同一队列，供连接层顺序消费。
         self._messages: asyncio.Queue[dict[str, object] | MCPTransportError] = asyncio.Queue()
         self._get_task: asyncio.Task[None] | None = None
         self._post_tasks: set[asyncio.Task[None]] = set()
@@ -59,6 +60,7 @@ class StreamableHTTPTransport:
         if self._owns_client:
             self._client = httpx.AsyncClient(
                 timeout=self._config.timeout_seconds,
+                # 不读取系统代理环境，避免本地 MCP 流量被意外转发并泄露请求头。
                 trust_env=False,
             )
         if self._client is None or self._client.is_closed:
@@ -94,6 +96,7 @@ class StreamableHTTPTransport:
 
         self._update_session(response)
         if response.status_code in {202, 204}:
+            # 通知类请求可以只确认接收，不要求返回 JSON-RPC 消息体。
             await response.aclose()
             return
         if response.is_error:
@@ -112,6 +115,7 @@ class StreamableHTTPTransport:
                 await response.aclose()
             return
         if content_type == "text/event-stream":
+            # POST 响应流可能晚于 send 返回才产生消息，因此交给后台任务持续消费。
             task = asyncio.create_task(
                 self._consume_post_stream(response),
                 name=f"mcp-http-post-{self._config.name}",
@@ -181,6 +185,7 @@ class StreamableHTTPTransport:
         except asyncio.CancelledError:
             raise
         except MCPTransportError as exc:
+            # 后台流无法直接向调用方抛错，放入消息队列后由 receive 循环统一处理。
             await self._messages.put(exc)
         except (httpx.HTTPError, OSError):
             await self._messages.put(
@@ -238,6 +243,7 @@ class StreamableHTTPTransport:
 
     def _headers(self, *, accept: str) -> httpx.Headers:
         headers = httpx.Headers(self._config.headers)
+        # 协议保留头由 transport 管理，禁止用户配置覆盖协商版本、会话和内容协商。
         for reserved_name in (
             "Accept",
             "Content-Type",
@@ -276,6 +282,7 @@ async def _iter_sse_data(lines: AsyncIterator[str]) -> AsyncIterator[str]:
     data_lines: list[str] = []
     async for line in lines:
         if not line:
+            # SSE 以空行结束事件，多行 data 字段按规范用换行拼接。
             if data_lines:
                 yield "\n".join(data_lines)
                 data_lines.clear()

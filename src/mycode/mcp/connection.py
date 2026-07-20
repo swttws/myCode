@@ -49,6 +49,7 @@ class MCPConnection:
         self._server_name = server_name
         self._timeout_seconds = timeout_seconds
         self._next_request_id = 1
+        # 接收循环按 JSON-RPC id 找回等待中的 Future，使多个并发请求可复用同一连接。
         self._pending: dict[int | str, asyncio.Future[dict[str, object]]] = {}
         self._receiver_task: asyncio.Task[None] | None = None
         self._initialize_lock = asyncio.Lock()
@@ -85,6 +86,7 @@ class MCPConnection:
 
             await self._transport.open()
             self._transport_closed = False
+            # 必须先启动接收循环，initialize 请求的响应才有消费者负责分发。
             self._receiver_task = asyncio.create_task(
                 self._receive_loop(),
                 name=f"mcp-receive-{self._server_name}",
@@ -99,6 +101,7 @@ class MCPConnection:
             )
             self._apply_initialization_result(result)
             await self.notify("notifications/initialized", {})
+            # Streamable HTTP 的独立 GET 流要等握手完成后再启动，以携带协商后的版本和会话。
             start_event_stream = getattr(self._transport, "start_event_stream", None)
             if callable(start_event_stream):
                 start_event_stream()
@@ -136,6 +139,7 @@ class MCPConnection:
                 ) from exc
 
             try:
+                # shield 防止 wait_for 直接取消 Future；超时分支会统一清理并通知 server。
                 return await asyncio.wait_for(
                     asyncio.shield(future),
                     timeout=self._timeout_seconds,
@@ -182,6 +186,7 @@ class MCPConnection:
 
     async def _receive_loop(self) -> None:
         try:
+            # 所有传输都归一化为消息流，连接层只处理 JSON-RPC 语义。
             async for raw_message in self._transport.receive():
                 message = parse_message(raw_message)
                 if message.kind is JSONRPCMessageKind.RESPONSE:
@@ -209,6 +214,7 @@ class MCPConnection:
         if message.method == "ping":
             response = make_success_response(message.id, {})
         else:
+            # 当前客户端不实现 sampling 等反向能力，未知 server 请求按 JSON-RPC 规范拒绝。
             response = make_error_response(message.id, -32601, "Method not found")
         await self._transport.send(response)
 
@@ -217,6 +223,7 @@ class MCPConnection:
             return
         future = self._pending.pop(message.id, None)
         if future is None or future.done():
+            # 请求可能已超时或被取消；迟到响应不能重新激活已结束的调用。
             logger.debug("忽略未知或迟到的 MCP 响应：server=%s", self._server_name)
             return
         if message.error is not None:
@@ -288,6 +295,7 @@ class MCPConnection:
                     public_name=f"{self._server_name}__{name}",
                     description=description,
                     parameters=dict(parameters),
+                    # 远端工具默认按写工具处理，只有配置显式声明后才会降为 READ。
                     kind=ToolKind.WRITE,
                 )
             )
@@ -297,6 +305,7 @@ class MCPConnection:
         tools: list[RemoteTool] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
+        # tools/list 支持分页；记录 cursor 可阻止异常 server 制造无限循环。
         while True:
             params = {"cursor": cursor} if cursor is not None else {}
             result = await self.request("tools/list", params)
@@ -345,10 +354,12 @@ class MCPConnection:
         reason: str,
     ) -> None:
         self._discard_pending(request_id, future)
+        # 本地取消已经生效，远端取消通知仅尽力发送，失败不能覆盖原始超时/取消原因。
         with contextlib.suppress(MCPTransportError, OSError, RuntimeError):
             await self._transport.send(make_cancel_notification(request_id, reason=reason))
 
     async def _fail_connection(self) -> None:
+        # 接收链路失败后统一终止所有等待者，避免请求永久悬挂。
         self._failed = True
         self._initialized = False
         self._fail_pending(

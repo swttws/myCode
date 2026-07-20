@@ -44,6 +44,7 @@ class StdioTransport:
         if not self._config.command:
             raise MCPTransportError("open_failed", "MCP stdio command is missing")
 
+        # 子进程继承基础环境，再用 MCP server 专属变量覆盖，保证命令仍能找到 PATH。
         environment = os.environ.copy()
         environment.update(self._config.env)
         try:
@@ -62,6 +63,7 @@ class StdioTransport:
             ) from exc
 
         self._process = process
+        # 持续排空 stderr，防止子进程因管道缓冲区写满而阻塞；内容不回显以免泄露凭据。
         self._stderr_task = asyncio.create_task(
             self._drain_stderr(process),
             name=f"mcp-stderr-{self._config.name}",
@@ -77,6 +79,7 @@ class StdioTransport:
             raise MCPTransportError("invalid_message", "MCP message is not JSON serializable") from exc
 
         try:
+            # stdio transport 使用一行一个 JSON-RPC 对象的消息边界。
             process.stdin.write(payload.encode("utf-8") + b"\n")
             await process.stdin.drain()
         except (BrokenPipeError, ConnectionError, RuntimeError) as exc:
@@ -123,6 +126,7 @@ class StdioTransport:
                     await process.stdin.wait_closed()
 
             if process.returncode is None:
+                # 先给 server 正常退出机会，再逐级升级为 terminate 和 kill。
                 try:
                     await asyncio.wait_for(
                         process.wait(), timeout=self._shutdown_timeout_seconds

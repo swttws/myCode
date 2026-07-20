@@ -98,6 +98,7 @@ async def _run_application(
 ) -> int:
     pool = MCPServerPool(mcp_config)
     try:
+        # 初始化失败以诊断形式上报；可用 server 和本地工具仍可继续启动。
         connection_diagnostics = await pool.initialize_all()
         _report_mcp_diagnostics(mcp_config_diagnostics + connection_diagnostics)
 
@@ -106,6 +107,7 @@ async def _run_application(
         tool_registry = create_default_tool_registry(
             Path.cwd(), path_guard=permissions.path_guard
         )
+        # 注册当前远端工具，并通过 pool listener 持续同步重连后的工具变化。
         register_mcp_tools(pool, tool_registry)
         tool_executor = ToolExecutor(tool_registry)
         permission_interceptor = PermissionInterceptor(permissions)
@@ -120,6 +122,7 @@ async def _run_application(
         tui = ChatTUI(session=session, show_thinking=config.thinking.show)
         return await tui.run()
     finally:
+        # 无论 TUI 正常退出、抛错还是被取消，都要回收 HTTP 流和 stdio 子进程。
         await pool.close()
 
 
