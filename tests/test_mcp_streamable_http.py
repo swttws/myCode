@@ -1,0 +1,151 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from mycode.mcp import MCPServerConfig, MCPTransportKind
+from mycode.mcp.streamable_http import StreamableHTTPTransport
+from mycode.mcp.transport import MCPTransportError
+from tests.mcp_helpers import run_http_server
+
+
+def make_config(url: str) -> MCPServerConfig:
+    return MCPServerConfig(
+        name="http_test",
+        transport=MCPTransportKind.STREAMABLE_HTTP,
+        timeout_seconds=1.0,
+        command=None,
+        args=(),
+        env={},
+        url=url,
+        headers={"Authorization": "Bearer configured-secret"},
+        read_tools=frozenset(),
+    )
+
+
+def test_streamable_http_posts_json_and_reuses_session_header():
+    async def scenario(server):
+        transport = StreamableHTTPTransport(make_config(server.url), enable_get_stream=False)
+        await transport.open()
+        try:
+            await transport.send({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+            initialize_response = await anext(transport.receive())
+            assert initialize_response["id"] == 1
+            assert transport.session_id == "session-123"
+
+            await transport.send({"jsonrpc": "2.0", "id": 2, "method": "test/json"})
+            assert (await anext(transport.receive()))["id"] == 2
+        finally:
+            await transport.close()
+
+        first = server.requests.get_nowait()
+        second = server.requests.get_nowait()
+        assert first["headers"]["Authorization"] == "Bearer configured-secret"
+        assert first["headers"]["MCP-Protocol-Version"] == "2025-11-25"
+        assert "MCP-Session-Id" not in first["headers"]
+        assert second["headers"]["MCP-Session-Id"] == "session-123"
+        assert second["headers"]["Content-Type"] == "application/json"
+        assert transport.is_open is False
+
+    with run_http_server() as server:
+        asyncio.run(scenario(server))
+
+
+def test_streamable_http_parses_multiple_sse_events_in_order():
+    async def scenario(server):
+        transport = StreamableHTTPTransport(make_config(server.url), enable_get_stream=False)
+        await transport.open()
+        try:
+            await transport.send({"jsonrpc": "2.0", "id": 3, "method": "test/sse"})
+            response = await anext(transport.receive())
+            notification = await anext(transport.receive())
+            assert response["id"] == 3
+            assert notification["method"] == "notifications/tools/list_changed"
+        finally:
+            await transport.close()
+
+    with run_http_server() as server:
+        asyncio.run(scenario(server))
+
+
+def test_streamable_http_accepts_notification_with_202():
+    async def scenario(server):
+        transport = StreamableHTTPTransport(make_config(server.url), enable_get_stream=False)
+        await transport.open()
+        try:
+            await transport.send(
+                {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+            )
+            assert transport.pending_message_count == 0
+        finally:
+            await transport.close()
+
+    with run_http_server() as server:
+        asyncio.run(scenario(server))
+
+
+def test_streamable_http_optional_get_stream_enqueues_server_message():
+    async def scenario(server):
+        transport = StreamableHTTPTransport(make_config(server.url), enable_get_stream=True)
+        await transport.open()
+        try:
+            message = await asyncio.wait_for(anext(transport.receive()), timeout=1)
+            assert message["method"] == "notifications/progress"
+        finally:
+            await transport.close()
+
+        record = server.requests.get_nowait()
+        assert record["method"] == "GET"
+        assert record["headers"]["Accept"] == "text/event-stream"
+
+    with run_http_server() as server:
+        asyncio.run(scenario(server))
+
+
+@pytest.mark.parametrize(
+    ("method", "category"),
+    [
+        ("test/http_error", "http_error"),
+        ("test/invalid_content_type", "invalid_content_type"),
+    ],
+)
+def test_streamable_http_returns_stable_errors_without_response_body(method, category):
+    async def scenario(server):
+        transport = StreamableHTTPTransport(make_config(server.url), enable_get_stream=False)
+        await transport.open()
+        try:
+            with pytest.raises(MCPTransportError) as captured:
+                await transport.send({"jsonrpc": "2.0", "id": 4, "method": method})
+            assert captured.value.category == category
+            assert "sensitive-response-body" not in str(captured.value)
+        finally:
+            await transport.close()
+
+    with run_http_server() as server:
+        asyncio.run(scenario(server))
+
+
+def test_streamable_http_rejects_send_before_open():
+    transport = StreamableHTTPTransport(
+        make_config("http://127.0.0.1:1/mcp"), enable_get_stream=False
+    )
+
+    with pytest.raises(MCPTransportError, match="not open"):
+        asyncio.run(transport.send({"jsonrpc": "2.0", "method": "ping"}))
+
+
+def test_streamable_http_wraps_connection_failure_as_stable_transport_error():
+    async def scenario():
+        transport = StreamableHTTPTransport(
+            make_config("http://127.0.0.1:1/mcp"), enable_get_stream=False
+        )
+        await transport.open()
+        try:
+            with pytest.raises(MCPTransportError) as captured:
+                await transport.send({"jsonrpc": "2.0", "id": 5, "method": "test/json"})
+            assert captured.value.category == "disconnected"
+        finally:
+            await transport.close()
+
+    asyncio.run(scenario())
