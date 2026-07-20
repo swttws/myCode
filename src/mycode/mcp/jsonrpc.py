@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 from typing import Mapping
 
 
@@ -13,7 +14,7 @@ JSONRPCId = int | str
 class JSONRPCError:
     code: int
     message: str
-    data: Mapping[str, object] | None = None
+    data: object | None = None
 
 
 class JSONRPCMessageKind(str, Enum):
@@ -75,7 +76,7 @@ def make_error_response(
     request_id: JSONRPCId | None,
     code: int,
     message: str,
-    data: Mapping[str, object] | None = None,
+    data: object | None = None,
 ) -> dict[str, object]:
     if request_id is not None:
         _validate_id(request_id)
@@ -86,7 +87,9 @@ def make_error_response(
 
     error: dict[str, object] = {"code": code, "message": message}
     if data is not None:
-        error["data"] = dict(data)
+        if not _is_json_value(data):
+            raise ValueError("JSON-RPC error data must be a JSON value")
+        error["data"] = data
     return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
@@ -186,8 +189,8 @@ def _parse_error(raw: object) -> JSONRPCError:
         raise MCPProtocolError("invalid_error", "JSON-RPC error code must be an integer")
     if not isinstance(message, str) or not message:
         raise MCPProtocolError("invalid_error", "JSON-RPC error message is invalid")
-    if data is not None and not isinstance(data, dict):
-        raise MCPProtocolError("invalid_error", "JSON-RPC error data must be an object")
+    if data is not None and not _is_json_value(data):
+        raise MCPProtocolError("invalid_error", "JSON-RPC error data must be a JSON value")
     return JSONRPCError(code=code, message=message, data=data)
 
 
@@ -199,3 +202,18 @@ def _validate_method(method: object) -> None:
 def _validate_id(request_id: object) -> None:
     if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
         raise ValueError("JSON-RPC id must be an integer or string")
+
+
+def _is_json_value(value: object) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _is_json_value(item)
+            for key, item in value.items()
+        )
+    return False

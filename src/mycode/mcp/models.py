@@ -74,6 +74,11 @@ class MCPDiagnostic:
     server_name: str | None
     category: str
     message: str
+    transport: MCPTransportKind | None = None
+
+    def __post_init__(self) -> None:
+        if self.transport is not None:
+            object.__setattr__(self, "transport", MCPTransportKind(self.transport))
 
 
 @dataclass(frozen=True)

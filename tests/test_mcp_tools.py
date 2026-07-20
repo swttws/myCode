@@ -22,12 +22,27 @@ def make_remote(server: str, name: str, *, kind=ToolKind.WRITE) -> RemoteTool:
 
 
 class FakePool:
-    def __init__(self, tools=(), *, available=(), ensure_result=True):
+    def __init__(
+        self,
+        tools=(),
+        *,
+        available=(),
+        ensure_result=True,
+        tools_after_ensure=None,
+        server_names=None,
+    ):
         self.tools = tuple(tools)
+        self.server_names = tuple(
+            server_names
+            if server_names is not None
+            else dict.fromkeys(tool.server_name for tool in self.tools)
+        )
         self.available = set(available)
         self.ensure_result = ensure_result
         self.calls = []
         self.ensure_calls = []
+        self.tools_after_ensure = tools_after_ensure
+        self.tool_listeners = []
 
     def is_available(self, server_name):
         return server_name in self.available
@@ -36,7 +51,14 @@ class FakePool:
         self.ensure_calls.append(server_name)
         if self.ensure_result:
             self.available.add(server_name)
+            if self.tools_after_ensure is not None:
+                self.tools = tuple(self.tools_after_ensure)
+                for listener in self.tool_listeners:
+                    listener(server_name, self.tools)
         return self.ensure_result
+
+    def add_tools_listener(self, listener):
+        self.tool_listeners.append(listener)
 
     async def call_tool(self, server_name, remote_name, arguments):
         self.calls.append((server_name, remote_name, arguments))
@@ -168,3 +190,74 @@ def test_register_mcp_tools_adds_wrappers_and_single_search_tool():
     assert registry.get("tool_search") is not None
     assert [definition.name for definition in registry.model_definitions()] == ["local", "tool_search"]
 
+
+def test_tool_search_recovers_server_that_failed_before_initial_discovery():
+    async def scenario():
+        remote = make_remote("files", "echo")
+        pool = FakePool(
+            server_names=("files",),
+            available=set(),
+            ensure_result=True,
+            tools_after_ensure=(remote,),
+        )
+        registry = ToolRegistry()
+        register_mcp_tools(pool, registry)
+
+        search = registry.get("tool_search")
+        assert isinstance(search, ToolSearch)
+        result = await search.execute_async({"name": "files__echo"})
+
+        assert result.ok is True
+        assert pool.ensure_calls == ["files"]
+        assert registry.get("files__echo") is not None
+        assert [definition.name for definition in registry.model_definitions()] == [
+            "files__echo",
+            "tool_search",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_tool_search_does_not_discover_tool_removed_during_server_reconnect():
+    async def scenario():
+        remote = make_remote("files", "echo")
+        pool = FakePool(
+            [remote],
+            available=set(),
+            ensure_result=True,
+            tools_after_ensure=(),
+        )
+        registry = ToolRegistry([MCPToolWrapper(remote, pool)])
+        search = ToolSearch(registry, pool)
+
+        result = await search.execute_async({"name": "files__echo"})
+
+        assert result.ok is False
+        assert result.content["category"] == "not_found"
+        assert [summary.name for summary in registry.deferred_summaries()] == ["files__echo"]
+
+    asyncio.run(scenario())
+
+
+def test_registered_mcp_catalog_reconciles_added_and_removed_tools_after_rediscovery():
+    async def scenario():
+        old = make_remote("files", "old")
+        new = make_remote("files", "new")
+        pool = FakePool(
+            [old],
+            available=set(),
+            ensure_result=True,
+            tools_after_ensure=(new,),
+        )
+        registry = ToolRegistry()
+        register_mcp_tools(pool, registry)
+        assert registry.mark_discovered("files__old") is True
+
+        assert await pool.ensure_available("files") is True
+
+        assert registry.get("files__old") is None
+        assert registry.get("files__new") is not None
+        assert [definition.name for definition in registry.model_definitions()] == ["tool_search"]
+        assert [summary.name for summary in registry.deferred_summaries()] == ["files__new"]
+
+    asyncio.run(scenario())

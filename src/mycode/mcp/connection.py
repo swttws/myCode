@@ -99,8 +99,10 @@ class MCPConnection:
             )
             self._apply_initialization_result(result)
             await self.notify("notifications/initialized", {})
-            tool_result = await self.request("tools/list", {})
-            self._tools = self._parse_tools(tool_result)
+            start_event_stream = getattr(self._transport, "start_event_stream", None)
+            if callable(start_event_stream):
+                start_event_stream()
+            self._tools = await self._list_tools()
             self._initialized = True
             return self._tools
 
@@ -124,30 +126,29 @@ class MCPConnection:
         future: asyncio.Future[dict[str, object]] = loop.create_future()
         self._pending[request_id] = future
         try:
-            await self._transport.send(make_request(request_id, method, params))
-        except (MCPTransportError, OSError) as exc:
-            self._pending.pop(request_id, None)
-            raise MCPConnectionError(
-                "send_failed",
-                f"unable to send MCP request: {self._server_name}",
-            ) from exc
+            try:
+                await self._transport.send(make_request(request_id, method, params))
+            except (MCPTransportError, OSError) as exc:
+                self._discard_pending(request_id, future)
+                raise MCPConnectionError(
+                    "send_failed",
+                    f"unable to send MCP request: {self._server_name}",
+                ) from exc
 
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(future),
-                timeout=self._timeout_seconds,
-            )
-        except asyncio.TimeoutError as exc:
-            self._pending.pop(request_id, None)
-            future.cancel()
-            with contextlib.suppress(MCPTransportError, OSError, RuntimeError):
-                await self._transport.send(
-                    make_cancel_notification(request_id, reason="timeout")
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(future),
+                    timeout=self._timeout_seconds,
                 )
-            raise MCPConnectionError(
-                "timeout",
-                f"MCP request timed out: {self._server_name}",
-            ) from exc
+            except asyncio.TimeoutError as exc:
+                await self._cancel_pending(request_id, future, reason="timeout")
+                raise MCPConnectionError(
+                    "timeout",
+                    f"MCP request timed out: {self._server_name}",
+                ) from exc
+        except asyncio.CancelledError:
+            await self._cancel_pending(request_id, future, reason="cancelled")
+            raise
 
     async def notify(self, method: str, params: Mapping[str, object]) -> None:
         if self._closed:
@@ -292,6 +293,26 @@ class MCPConnection:
             )
         return tuple(tools)
 
+    async def _list_tools(self) -> tuple[RemoteTool, ...]:
+        tools: list[RemoteTool] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            params = {"cursor": cursor} if cursor is not None else {}
+            result = await self.request("tools/list", params)
+            tools.extend(self._parse_tools(result))
+            if "nextCursor" not in result:
+                return tuple(tools)
+            next_cursor = result["nextCursor"]
+            if (
+                not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor in seen_cursors
+            ):
+                raise self._invalid_tool_list()
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
     def _invalid_tool_list(self) -> MCPConnectionError:
         return MCPConnectionError(
             "invalid_tool_list",
@@ -304,6 +325,28 @@ class MCPConnection:
         for future in pending:
             if not future.done():
                 future.set_exception(error)
+
+    def _discard_pending(
+        self,
+        request_id: int | str,
+        future: asyncio.Future[dict[str, object]],
+    ) -> None:
+        self._pending.pop(request_id, None)
+        if future.done() and not future.cancelled():
+            future.exception()
+        else:
+            future.cancel()
+
+    async def _cancel_pending(
+        self,
+        request_id: int | str,
+        future: asyncio.Future[dict[str, object]],
+        *,
+        reason: str,
+    ) -> None:
+        self._discard_pending(request_id, future)
+        with contextlib.suppress(MCPTransportError, OSError, RuntimeError):
+            await self._transport.send(make_cancel_notification(request_id, reason=reason))
 
     async def _fail_connection(self) -> None:
         self._failed = True

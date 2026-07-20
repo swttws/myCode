@@ -25,6 +25,12 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
+    def unregister(self, name: str) -> bool:
+        if self._tools.pop(name, None) is None:
+            return False
+        self._discovered.discard(name)
+        return True
+
     def definitions(self) -> list[ToolDefinition]:
         # 稳定工具顺序让相同工具集合保持可缓存的请求前缀。
         return sorted((tool.definition for tool in self._tools.values()), key=lambda definition: definition.name)

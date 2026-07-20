@@ -86,17 +86,44 @@ class ToolSearch:
         assert wrapper is not None
         if not self._pool.is_available(wrapper.server_name):
             return _search_failure("server_unavailable")
+        if not self._tool_is_current(wrapper):
+            return _search_failure("not_found")
         return self._discover(wrapper)
 
     async def execute_async(self, arguments: ToolArguments) -> ToolResult:
         wrapper, failure = self._resolve(arguments)
+        if wrapper is None:
+            server_name = self._configured_server_for(arguments.get("name"))
+            if server_name is not None:
+                if not await self._pool.ensure_available(server_name):
+                    return _search_failure("server_unavailable")
+                wrapper, failure = self._resolve(arguments)
         if failure is not None:
             return failure
         assert wrapper is not None
         if not self._pool.is_available(wrapper.server_name):
             if not await self._pool.ensure_available(wrapper.server_name):
                 return _search_failure("server_unavailable")
+        if not self._tool_is_current(wrapper):
+            return _search_failure("not_found")
         return self._discover(wrapper)
+
+    def _configured_server_for(self, public_name: object) -> str | None:
+        if not isinstance(public_name, str):
+            return None
+        server_name, separator, remote_name = public_name.partition("__")
+        if not separator or not remote_name:
+            return None
+        server_names = getattr(self._pool, "server_names", ())
+        return server_name if server_name in server_names else None
+
+    def _tool_is_current(self, wrapper: MCPToolWrapper) -> bool:
+        has_tool = getattr(self._pool, "has_tool", None)
+        if callable(has_tool):
+            return has_tool(wrapper.server_name, wrapper.remote_name)
+        return any(
+            tool.public_name == wrapper.definition.name for tool in self._pool.tools
+        )
 
     def _resolve(
         self,
@@ -144,15 +171,52 @@ def register_mcp_tools(
     pool: MCPServerPool,
     registry: ToolRegistry,
 ) -> tuple[MCPToolWrapper, ...]:
-    wrappers = tuple(
-        MCPToolWrapper(remote_tool, pool)
-        for remote_tool in sorted(pool.tools, key=lambda tool: tool.public_name)
+    def ensure_search_tool() -> None:
+        existing = registry.get(TOOL_SEARCH_NAME)
+        if existing is None:
+            registry.register(ToolSearch(registry, pool))
+        elif not isinstance(existing, ToolSearch):
+            raise ValueError(
+                f"reserved MCP tool name is already registered: {TOOL_SEARCH_NAME}"
+            )
+
+    def reconcile(server_name: str, remote_tools: tuple[RemoteTool, ...]) -> None:
+        desired = {
+            tool.public_name: MCPToolWrapper(tool, pool)
+            for tool in remote_tools
+            if tool.server_name == server_name
+        }
+        existing = {
+            definition.name: tool
+            for definition in registry.definitions()
+            if isinstance((tool := registry.get(definition.name)), MCPToolWrapper)
+            and tool.server_name == server_name
+        }
+
+        for name, wrapper in existing.items():
+            replacement = desired.get(name)
+            if replacement is None or replacement.definition != wrapper.definition:
+                registry.unregister(name)
+        for name, wrapper in desired.items():
+            if registry.get(name) is None:
+                registry.register(wrapper)
+        if desired:
+            ensure_search_tool()
+
+    pool.add_tools_listener(reconcile)
+    if getattr(pool, "server_names", ()):
+        ensure_search_tool()
+    grouped: dict[str, list[RemoteTool]] = {}
+    for remote_tool in pool.tools:
+        grouped.setdefault(remote_tool.server_name, []).append(remote_tool)
+    for server_name, remote_tools in grouped.items():
+        reconcile(server_name, tuple(remote_tools))
+
+    return tuple(
+        tool
+        for definition in registry.definitions()
+        if isinstance((tool := registry.get(definition.name)), MCPToolWrapper)
     )
-    for wrapper in wrappers:
-        registry.register(wrapper)
-    if wrappers and registry.get(TOOL_SEARCH_NAME) is None:
-        registry.register(ToolSearch(registry, pool))
-    return wrappers
 
 
 def _search_failure(category: str) -> ToolResult:

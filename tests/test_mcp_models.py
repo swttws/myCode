@@ -49,6 +49,18 @@ def test_mcp_domain_models_are_available_from_package_boundary():
     assert DeferredToolSummary("files__read_file", "Read a file.").name == remote_tool.public_name
 
 
+def test_mcp_diagnostic_accepts_optional_transport_metadata():
+    diagnostic = MCPDiagnostic(
+        "files",
+        "connection",
+        "connection failed",
+        transport=MCPTransportKind.STDIO,
+    )
+
+    assert diagnostic.transport is MCPTransportKind.STDIO
+    assert MCPDiagnostic(None, "config", "invalid entry").transport is None
+
+
 @pytest.mark.parametrize("name", ["", "with space", "bad/name", "__private"])
 def test_server_config_rejects_invalid_stable_names(name):
     with pytest.raises(ValueError, match="server name"):
@@ -87,4 +99,3 @@ def test_domain_models_are_frozen():
 
     with pytest.raises(FrozenInstanceError):
         config.name = "changed"
-

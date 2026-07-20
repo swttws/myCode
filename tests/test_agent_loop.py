@@ -167,6 +167,7 @@ class AgentFakeMCPPool:
     def __init__(self, *, available=True):
         self.available = available
         self.calls = []
+        self.tools = ()
 
     def is_available(self, server_name):
         return self.available
@@ -198,6 +199,7 @@ def make_remote_tool(name="echo", *, kind=ToolKind.WRITE):
 
 
 def make_mcp_loop(llm, memory, remote, pool, permission=None):
+    pool.tools = (remote,)
     registry = ToolRegistry()
     registry.register(MCPToolWrapper(remote, pool))
     registry.register(ToolSearch(registry, pool))

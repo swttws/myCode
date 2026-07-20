@@ -30,6 +30,7 @@ class StreamableHTTPTransport:
         self._owns_client = client is None
         self._messages: asyncio.Queue[dict[str, object] | MCPTransportError] = asyncio.Queue()
         self._get_task: asyncio.Task[None] | None = None
+        self._post_tasks: set[asyncio.Task[None]] = set()
         self._protocol_version = DEFAULT_PROTOCOL_VERSION
         self._session_id: str | None = None
         self._opened = False
@@ -63,20 +64,28 @@ class StreamableHTTPTransport:
         if self._client is None or self._client.is_closed:
             raise MCPTransportError("open_failed", "MCP HTTP client is unavailable")
         self._opened = True
-        if self._enable_get_stream:
-            self._get_task = asyncio.create_task(
-                self._consume_get_stream(),
-                name=f"mcp-http-get-{self._config.name}",
-            )
+
+    def start_event_stream(self) -> None:
+        self._require_client()
+        if not self._enable_get_stream:
+            return
+        if self._get_task is not None and not self._get_task.done():
+            return
+        self._get_task = asyncio.create_task(
+            self._consume_get_stream(),
+            name=f"mcp-http-get-{self._config.name}",
+        )
 
     async def send(self, message: Mapping[str, object]) -> None:
         client = self._require_client()
         try:
-            response = await client.post(
+            request = client.build_request(
+                "POST",
                 self._require_url(),
                 headers=self._headers(accept="application/json, text/event-stream"),
                 json=dict(message),
             )
+            response = await client.send(request, stream=True)
         except (httpx.HTTPError, OSError) as exc:
             raise MCPTransportError(
                 "disconnected",
@@ -85,8 +94,10 @@ class StreamableHTTPTransport:
 
         self._update_session(response)
         if response.status_code in {202, 204}:
+            await response.aclose()
             return
         if response.is_error:
+            await response.aclose()
             raise MCPTransportError(
                 "http_error",
                 f"MCP HTTP server returned status {response.status_code}: {self._config.name}",
@@ -94,11 +105,21 @@ class StreamableHTTPTransport:
 
         content_type = _content_type(response)
         if content_type == "application/json":
-            await self._enqueue_json_response(response)
+            try:
+                await response.aread()
+                await self._enqueue_json_response(response)
+            finally:
+                await response.aclose()
             return
         if content_type == "text/event-stream":
-            await self._enqueue_sse_lines(response.aiter_lines())
+            task = asyncio.create_task(
+                self._consume_post_stream(response),
+                name=f"mcp-http-post-{self._config.name}",
+            )
+            self._post_tasks.add(task)
+            task.add_done_callback(self._post_tasks.discard)
             return
+        await response.aclose()
         raise MCPTransportError(
             "invalid_content_type",
             f"MCP HTTP server returned an unsupported content type: {self._config.name}",
@@ -123,6 +144,14 @@ class StreamableHTTPTransport:
             if get_task is not None:
                 await asyncio.gather(get_task, return_exceptions=True)
             self._get_task = None
+
+            post_tasks = tuple(self._post_tasks)
+            for task in post_tasks:
+                if not task.done():
+                    task.cancel()
+            if post_tasks:
+                await asyncio.gather(*post_tasks, return_exceptions=True)
+            self._post_tasks.clear()
 
             if self._client is not None and self._owns_client and not self._client.is_closed:
                 await self._client.aclose()
@@ -161,6 +190,23 @@ class StreamableHTTPTransport:
                 )
             )
 
+    async def _consume_post_stream(self, response: httpx.Response) -> None:
+        try:
+            await self._enqueue_sse_lines(response.aiter_lines())
+        except asyncio.CancelledError:
+            raise
+        except MCPTransportError as exc:
+            await self._messages.put(exc)
+        except (httpx.HTTPError, OSError):
+            await self._messages.put(
+                MCPTransportError(
+                    "disconnected",
+                    f"MCP POST event stream disconnected: {self._config.name}",
+                )
+            )
+        finally:
+            await response.aclose()
+
     async def _enqueue_json_response(self, response: httpx.Response) -> None:
         try:
             message = response.json()
@@ -190,8 +236,16 @@ class StreamableHTTPTransport:
             )
         await self._messages.put(message)
 
-    def _headers(self, *, accept: str) -> dict[str, str]:
-        headers = dict(self._config.headers)
+    def _headers(self, *, accept: str) -> httpx.Headers:
+        headers = httpx.Headers(self._config.headers)
+        for reserved_name in (
+            "Accept",
+            "Content-Type",
+            "MCP-Protocol-Version",
+            "MCP-Session-Id",
+        ):
+            if reserved_name in headers:
+                del headers[reserved_name]
         headers["Accept"] = accept
         headers["MCP-Protocol-Version"] = self._protocol_version
         if self._session_id is not None:

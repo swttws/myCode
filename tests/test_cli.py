@@ -208,9 +208,19 @@ def test_cli_initializes_registers_reports_and_closes_mcp_in_same_loop(
     class FakePool:
         tools = (remote_tool,)
 
+        def add_tools_listener(self, listener):
+            created["tools_listener"] = listener
+
         async def initialize_all(self):
             created["initialize_loop"] = asyncio.get_running_loop()
-            return (MCPDiagnostic("broken", "connection", "safe failure"),)
+            return (
+                MCPDiagnostic(
+                    "broken",
+                    "connection",
+                    "safe failure",
+                    transport=MCPTransportKind.STDIO,
+                ),
+            )
 
         async def close(self):
             created["close_loop"] = asyncio.get_running_loop()
@@ -257,7 +267,14 @@ def test_cli_initializes_registers_reports_and_closes_mcp_in_same_loop(
         "load_mcp_config",
         lambda *args, **kwargs: (
             MCPConfig((server_config,)),
-            (MCPDiagnostic("invalid", "config", "safe config issue"),),
+            (
+                MCPDiagnostic(
+                    "invalid",
+                    "config",
+                    "safe config issue",
+                    transport=MCPTransportKind.STREAMABLE_HTTP,
+                ),
+            ),
         ),
     )
     monkeypatch.setattr(cli, "MCPServerPool", lambda config: pool)
@@ -268,10 +285,15 @@ def test_cli_initializes_registers_reports_and_closes_mcp_in_same_loop(
     assert exit_code == 0
     assert created["initialize_loop"] is created["tui_loop"] is created["close_loop"]
     assert created["closed"] is True
+    assert callable(created["tools_listener"])
     assert created["registry"].get("remote__echo") is not None
     assert created["registry"].get("tool_search") is not None
     assert "safe config issue" in captured.err
     assert "safe failure" in captured.err
+    assert "config" in captured.err
+    assert "streamable_http" in captured.err
+    assert "connection" in captured.err
+    assert "stdio" in captured.err
 
 
 def test_cli_closes_mcp_pool_when_tui_raises(tmp_path, monkeypatch):
@@ -282,6 +304,9 @@ def test_cli_closes_mcp_pool_when_tui_raises(tmp_path, monkeypatch):
 
     class FakePool:
         tools = ()
+
+        def add_tools_listener(self, listener):
+            pass
 
         async def initialize_all(self):
             return ()

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from mycode.mcp import (
     MCPConfig,
     MCPServerConfig,
@@ -9,7 +11,7 @@ from mycode.mcp import (
     MCPTransportKind,
     RemoteTool,
 )
-from mycode.mcp.connection import MCPConnectionError
+from mycode.mcp.connection import MCPConnectionError, MCPRemoteError
 from mycode.mcp.pool import MCPServerPool
 from mycode.tool import ToolKind
 
@@ -81,7 +83,8 @@ class FakeConnection:
         self.request_calls.append((method, params))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
-            self.is_failed = True
+            if not isinstance(response, MCPRemoteError):
+                self.is_failed = True
             raise response
         return response
 
@@ -143,6 +146,7 @@ def test_pool_isolates_failed_server_and_keeps_available_tools():
         assert [tool.public_name for tool in pool.tools] == ["healthy__echo"]
         assert diagnostics[0].server_name == "broken"
         assert diagnostics[0].category == "connect_failed"
+        assert diagnostics[0].transport is MCPTransportKind.STDIO
         assert "sensitive internal detail" not in diagnostics[0].message
 
     asyncio.run(scenario())
@@ -337,5 +341,115 @@ def test_pool_close_is_idempotent_and_closes_every_connection():
         assert pool.server_state("alpha") is MCPServerState.CLOSED
         assert pool.server_state("beta") is MCPServerState.CLOSED
         assert pool.tools == ()
+
+    asyncio.run(scenario())
+
+
+def test_pool_remote_jsonrpc_error_does_not_invalidate_healthy_connection():
+    async def scenario():
+        connection = FakeConnection(
+            [make_remote_tool("server", "echo")],
+            responses=[
+                MCPRemoteError(-32000, "remote rejected input"),
+                {"content": [{"type": "text", "text": "still connected"}]},
+            ],
+        )
+        pool = MCPServerPool(
+            MCPConfig((make_server_config("server"),)),
+            connection_factory=lambda config: connection,
+        )
+        await pool.initialize_all()
+
+        rejected = await pool.call_tool("server", "echo", {"bad": True})
+        succeeded = await pool.call_tool("server", "echo", {"bad": False})
+
+        assert rejected.ok is False
+        assert rejected.content["category"] == "remote_error"
+        assert succeeded.ok is True
+        assert connection.initialize_count == 1
+        assert connection.close_count == 0
+        assert pool.server_state("server") is MCPServerState.READY
+
+    asyncio.run(scenario())
+
+
+def test_pool_does_not_call_tool_removed_during_reconnect():
+    async def scenario():
+        first_connection = FakeConnection([make_remote_tool("server", "echo")])
+        second_connection = FakeConnection([], responses=[])
+        connections = [first_connection, second_connection]
+        pool = MCPServerPool(
+            MCPConfig((make_server_config("server"),)),
+            connection_factory=lambda config: connections.pop(0),
+        )
+        await pool.initialize_all()
+        first_connection.is_failed = True
+
+        result = await pool.call_tool("server", "echo", {})
+
+        assert result.ok is False
+        assert result.content["category"] == "tool_unavailable"
+        assert second_connection.request_calls == []
+        assert pool.server_state("server") is MCPServerState.READY
+
+    asyncio.run(scenario())
+
+
+def test_pool_notifies_listeners_with_replacement_catalog_after_rediscovery():
+    async def scenario():
+        first_connection = FakeConnection([make_remote_tool("server", "old")])
+        second_connection = FakeConnection([make_remote_tool("server", "new")])
+        connections = [first_connection, second_connection]
+        pool = MCPServerPool(
+            MCPConfig((make_server_config("server"),)),
+            connection_factory=lambda config: connections.pop(0),
+        )
+        catalogs = []
+        pool.add_tools_listener(
+            lambda server_name, tools: catalogs.append(
+                (server_name, tuple(tool.public_name for tool in tools))
+            )
+        )
+
+        await pool.initialize_all()
+        first_connection.is_failed = True
+        assert await pool.ensure_available("server") is True
+
+        assert catalogs == [
+            ("server", ("server__old",)),
+            ("server", ("server__new",)),
+        ]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"content": "not-a-list"},
+        {"content": [{"text": "missing type"}]},
+        {"content": [], "structuredContent": []},
+        {"content": [], "isError": "false"},
+    ],
+)
+def test_pool_rejects_malformed_call_tool_result(response):
+    async def scenario():
+        connection = FakeConnection(
+            [make_remote_tool("server", "echo")],
+            responses=[response],
+        )
+        pool = MCPServerPool(
+            MCPConfig((make_server_config("server"),)),
+            connection_factory=lambda config: connection,
+        )
+        await pool.initialize_all()
+
+        result = await pool.call_tool("server", "echo", {})
+
+        assert result.ok is False
+        assert result.content["category"] == "invalid_response"
+        assert connection.close_count == 1
+        assert pool.server_state("server") is MCPServerState.FAILED
 
     asyncio.run(scenario())

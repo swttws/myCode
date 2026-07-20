@@ -56,6 +56,7 @@ def load_mcp_config(
                     server_name=server_name,
                     category="config",
                     message=f"servers[{index}]: {exc}",
+                    transport=_diagnostic_transport(item),
                 )
             )
             continue
@@ -211,3 +212,12 @@ def _diagnostic_server_name(raw: object) -> str | None:
         return None
     name = raw.get("name")
     return name if isinstance(name, str) and name else None
+
+
+def _diagnostic_transport(raw: object) -> MCPTransportKind | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return MCPTransportKind(raw.get("transport"))
+    except (TypeError, ValueError):
+        return None

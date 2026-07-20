@@ -122,6 +122,18 @@ def test_tool_registry_marks_only_registered_deferred_tool_as_discovered():
     assert registry.deferred_summaries() == []
 
 
+def test_tool_registry_unregisters_tool_and_clears_discovery_state():
+    registry = ToolRegistry([DeferredFakeTool("remote")])
+    assert registry.mark_discovered("remote") is True
+
+    assert registry.unregister("remote") is True
+
+    assert registry.get("remote") is None
+    assert registry.model_definitions() == []
+    assert registry.deferred_summaries() == []
+    assert registry.unregister("remote") is False
+
+
 def test_tool_registry_converts_definitions_to_openai_chat_tool_specs():
     registry = ToolRegistry([FakeTool()])
 

@@ -126,10 +126,18 @@ async def _run_application(
 def _report_mcp_diagnostics(diagnostics: tuple[MCPDiagnostic, ...]) -> None:
     for diagnostic in diagnostics:
         server = diagnostic.server_name or "配置文件"
+        transport = (
+            diagnostic.transport.value if diagnostic.transport is not None else "unknown"
+        )
         logger.warning(
-            "MCP 诊断：server=%s，类别=%s，原因=%s",
+            "MCP 诊断：server=%s，类别=%s，transport=%s，原因=%s",
             server,
             diagnostic.category,
+            transport,
             diagnostic.message,
         )
-        print(f"myCode MCP 警告：{server}：{diagnostic.message}", file=sys.stderr)
+        print(
+            f"myCode MCP 警告：{server}：category={diagnostic.category}，"
+            f"transport={transport}，{diagnostic.message}",
+            file=sys.stderr,
+        )

@@ -4,6 +4,7 @@ import sys
 import json
 import queue
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,6 +52,8 @@ class ControlledMCPHTTPServer(ThreadingHTTPServer):
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), ControlledMCPHTTPHandler)
         self.requests: queue.Queue[dict[str, object]] = queue.Queue()
+        self.require_session_for_get = False
+        self.initialize_delay_seconds = 0.0
 
     @property
     def url(self) -> str:
@@ -65,7 +68,20 @@ class ControlledMCPHTTPHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         message = json.loads(self.rfile.read(length))
         self.server.requests.put(
-            {"method": "POST", "headers": dict(self.headers), "message": message}
+            {
+                "method": "POST",
+                "headers": dict(self.headers),
+                "header_values": {
+                    name: self.headers.get_all(name, [])
+                    for name in (
+                        "Accept",
+                        "Content-Type",
+                        "MCP-Protocol-Version",
+                        "MCP-Session-Id",
+                    )
+                },
+                "message": message,
+            }
         )
         method = message.get("method")
 
@@ -81,6 +97,8 @@ class ControlledMCPHTTPHandler(BaseHTTPRequestHandler):
 
         response = {"jsonrpc": "2.0", "id": message["id"], "result": {"ok": True}}
         if method == "initialize":
+            if self.server.initialize_delay_seconds:
+                time.sleep(self.server.initialize_delay_seconds)
             response["result"] = {
                 "protocolVersion": "2025-11-25",
                 "capabilities": {"tools": {}},
@@ -92,6 +110,10 @@ class ControlledMCPHTTPHandler(BaseHTTPRequestHandler):
                 json.dumps(response).encode("utf-8"),
                 extra_headers={"MCP-Session-Id": "session-123"},
             )
+            return
+        if method == "tools/list":
+            response["result"] = {"tools": []}
+            self._write_response(200, "application/json", json.dumps(response).encode("utf-8"))
             return
         if method == "test/sse":
             notification = {
@@ -111,6 +133,9 @@ class ControlledMCPHTTPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.server.requests.put({"method": "GET", "headers": dict(self.headers)})
+        if self.server.require_session_for_get and self.headers.get("MCP-Session-Id") != "session-123":
+            self._write_response(400, "text/plain", b"session required")
+            return
         notification = {
             "jsonrpc": "2.0",
             "method": "notifications/progress",
