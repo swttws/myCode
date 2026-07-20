@@ -1,6 +1,6 @@
 # myCode
 
-myCode 是一个使用 Python 开发的终端 AI 编程助手。当前推进至 Stage 05：纵深权限与安全检查，并保留 Stage 03 的 Agent Loop、Stage 04 的 Prompt Pipeline 与事件流契约。
+myCode 是一个使用 Python 开发的终端 AI 编程助手。当前推进至 Stage 06：MCP 远端工具接入，并保留 Stage 03 的 Agent Loop、Stage 04 的 Prompt Pipeline 与 Stage 05 的纵深权限和事件流契约。
 
 用户启动 `mycode` 后输入问题，程序会把请求交给独立 Agent Loop。Agent 会调用配置中的大模型 API，通过稳定事件流向 TUI 输出用户消息、thinking、文本增量、工具开始、工具结果、最终回复、错误、取消和等待审批状态。对于 `openai_responses` 和 `openai_chat`，模型可以在同一用户回合中发起工具调用；myCode 会执行工具、把结构化结果写回对话历史，并自动进入下一轮 LLM 调用，直到模型输出最终文本或触发错误、取消、超时、最大轮数等终止条件。
 
@@ -16,6 +16,12 @@ python -m pip install -e ".[dev]"
 
 ```powershell
 mycode --config examples/mycode.openai-responses.yaml
+```
+
+同时启用 MCP server：
+
+```powershell
+mycode --config examples/mycode.openai-responses.yaml --mcp-config examples/mycode.mcp.yaml
 ```
 
 也可以省略 `--config`，myCode 会按顺序查找：
@@ -65,6 +71,45 @@ api_key: ${OPENAI_API_KEY}
 ```
 
 `api_key` 可以直接写字面值，也可以使用 `${ENV_NAME}` 引用环境变量。建议使用环境变量。
+
+## Stage 06 MCP 远端工具
+
+MCP server 使用独立 YAML 配置，不与 LLM 配置混合。可以用 `--mcp-config path/to/file.yaml` 显式指定；省略参数时依次查找当前目录的 `mycode.mcp.yaml` 和用户目录的 `~/.mycode/mcp.yaml`。两处都不存在时 MCP 保持禁用，本地工具和普通聊天仍可使用。
+
+完整示例见 `examples/mycode.mcp.yaml`。每个 server 必须声明稳定 `name`、`transport` 和正数 `timeout_seconds`。当前支持本地子进程 `stdio` 与远程 Streamable HTTP：
+
+```yaml
+servers:
+  - name: local_tools
+    transport: stdio
+    timeout_seconds: 20
+    command: python
+    args: [-m, your_mcp_server]
+    env:
+      MCP_API_TOKEN: ${MCP_STDIO_TOKEN}
+    read_tools: [read_status]
+
+  - name: remote_tools
+    transport: streamable_http
+    timeout_seconds: 30
+    url: https://mcp.example.com/mcp
+    headers:
+      Authorization: Bearer ${MCP_HTTP_TOKEN}
+```
+
+stdio 的 `env` 和 HTTP 的 `headers` 支持 `${ENV_NAME}` 环境变量引用，也支持 `Bearer ${ENV_NAME}` 形式。缺少环境变量时只报告变量名；解析后的环境变量值、鉴权请求头和 URL 凭据不会进入系统提醒或普通日志。
+
+### 工具名称、延迟发现与权限
+
+远端工具以 `server_name__remote_name` 作为稳定公开名称，两个 server 的同名工具不会冲突。未发现工具默认只以“名称 + 描述”出现在运行时系统提醒中，完整参数 schema 不进入首轮模型工具列表。模型需要工具时先调用常驻读工具 `tool_search` 并传入完整公开名称；搜索成功后，该工具从下一轮起作为正常工具定义提供给模型。不存在、歧义、不可用或所属 server 失效的搜索返回结构化失败，不会标记发现。
+
+MCP 没有统一的读写语义，因此远端工具默认按写工具进入现有权限、HITL 和 `plan-only` 流程。只有该 server 的 `read_tools` 精确列出的原始工具名按读工具处理；通配符、前缀或相似名称不会放宽权限。远端工具不声明可持久化授权参数，业务参数和凭据不会保存为会话或项目授权规则。
+
+### 连接、故障与协议边界
+
+每个 server 在当前进程和事件循环内完成初始化、`notifications/initialized` 和 `tools/list`，随后执行连接复用与工具清单复用。一个 server 的配置、连接、发现、超时、断连或协议错误按 server 故障隔离，不影响本地工具和其他 MCP server；下次需要失效 server 时会在单 server 锁内重连并重新发现，多个等待者不会重复握手。退出时关闭 HTTP 资源和 stdio 输入流，并终止未退出的子进程。
+
+实现基于当前 MCP JSON-RPC 2.0 生命周期，只支持工具发现和工具调用。server 发来的通知会被记录；`ping` 请求返回成功，其他 server 请求返回“方法不支持”。本阶段明确不支持 MCP `resources`、`prompts`、`completions`、`tasks`、`sampling`、`elicitation`，不支持 OAuth、已废弃的 HTTP+SSE、配置热重载、跨进程连接池或持久化缓存。
 
 ## OpenAI Responses
 
