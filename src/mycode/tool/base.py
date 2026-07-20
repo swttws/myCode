@@ -40,10 +40,26 @@ class ToolResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class DeferredToolSummary:
+    name: str
+    description: str
+
+
 class Tool(Protocol):
     @property
     def definition(self) -> ToolDefinition:
         raise NotImplementedError
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
+        raise NotImplementedError
+
+
+class AsyncTool(Protocol):
+    async def execute_async(self, arguments: ToolArguments) -> ToolResult:
+        raise NotImplementedError
+
+
+class DeferredTool(Protocol):
+    def should_defer(self) -> bool:
         raise NotImplementedError

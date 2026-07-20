@@ -1,0 +1,17 @@
+servers:
+  - name: local_tools
+    transport: stdio
+    timeout_seconds: 20
+    command: python
+    args: [-m, your_mcp_server]
+    env:
+      MCP_API_TOKEN: ${MCP_STDIO_TOKEN}
+    read_tools: [read_status]
+
+  - name: remote_tools
+    transport: streamable_http
+    timeout_seconds: 30
+    url: https://mcp.example.com/mcp
+    headers:
+      Authorization: Bearer ${MCP_HTTP_TOKEN}
+    read_tools: [lookup]

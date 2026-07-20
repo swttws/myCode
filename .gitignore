@@ -8,3 +8,4 @@ __pycache__/
 .worktrees/
 /examples/*
 !/examples/mycode.permissions.yaml
+!/examples/mycode.mcp.yaml

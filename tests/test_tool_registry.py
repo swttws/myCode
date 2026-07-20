@@ -2,6 +2,7 @@ import pytest
 
 from mycode.permission.pathing import PathGuard
 from mycode.tool import (
+    DeferredToolSummary,
     FileTextCache,
     ToolCall,
     ToolExecutor,
@@ -32,6 +33,11 @@ class FakeTool:
 
     def execute(self, arguments):
         raise AssertionError("registry tests should not execute tools")
+
+
+class DeferredFakeTool(FakeTool):
+    def should_defer(self) -> bool:
+        return True
 
 
 def test_tool_registry_gets_registered_tool_by_name():
@@ -85,6 +91,47 @@ def test_tool_registry_returns_definitions_in_name_order_without_affecting_looku
 
     assert [definition.name for definition in registry.definitions()] == ["alpha", "zeta"]
     assert registry.get("zeta") is first
+
+
+def test_tool_registry_separates_full_model_and_deferred_views():
+    local = FakeTool("local")
+    deferred_zeta = DeferredFakeTool("zeta_remote")
+    deferred_alpha = DeferredFakeTool("alpha_remote")
+    registry = ToolRegistry([deferred_zeta, local, deferred_alpha])
+
+    assert [definition.name for definition in registry.definitions()] == [
+        "alpha_remote",
+        "local",
+        "zeta_remote",
+    ]
+    assert [definition.name for definition in registry.model_definitions()] == ["local"]
+    assert registry.deferred_summaries() == [
+        DeferredToolSummary("alpha_remote", "Fake test tool."),
+        DeferredToolSummary("zeta_remote", "Fake test tool."),
+    ]
+
+
+def test_tool_registry_marks_only_registered_deferred_tool_as_discovered():
+    registry = ToolRegistry([FakeTool("local"), DeferredFakeTool("remote")])
+
+    assert registry.mark_discovered("missing") is False
+    assert registry.mark_discovered("local") is False
+    assert registry.mark_discovered("remote") is True
+    assert registry.mark_discovered("remote") is True
+    assert [definition.name for definition in registry.model_definitions()] == ["local", "remote"]
+    assert registry.deferred_summaries() == []
+
+
+def test_tool_registry_unregisters_tool_and_clears_discovery_state():
+    registry = ToolRegistry([DeferredFakeTool("remote")])
+    assert registry.mark_discovered("remote") is True
+
+    assert registry.unregister("remote") is True
+
+    assert registry.get("remote") is None
+    assert registry.model_definitions() == []
+    assert registry.deferred_summaries() == []
+    assert registry.unregister("remote") is False
 
 
 def test_tool_registry_converts_definitions_to_openai_chat_tool_specs():

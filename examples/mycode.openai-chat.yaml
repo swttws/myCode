@@ -3,4 +3,4 @@
 protocol: openai_chat
 model: 
 base_url: 
-api_key: 
+api_key: ${OPENAI_API_KEY}
