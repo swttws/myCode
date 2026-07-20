@@ -18,6 +18,7 @@ from mycode.mcp.jsonrpc import (
 )
 from mycode.tool import ToolKind
 from tests.mcp_helpers import MemoryMCPTransport
+from mycode.mcp.transport import MCPTransportError
 
 
 def test_builds_jsonrpc_request_and_notification():
@@ -284,5 +285,132 @@ def test_connection_rejects_invalid_tool_list():
             assert captured.value.category == "invalid_tool_list"
         finally:
             await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_notification_does_not_complete_pending_request():
+    async def scenario():
+        transport = MemoryMCPTransport()
+        connection = MCPConnection(transport, server_name="memory", timeout_seconds=0.5)
+        try:
+            await initialize_connection(connection, transport)
+            task = asyncio.create_task(connection.request("waiting", {}))
+            request = await transport.next_sent()
+            await transport.push(
+                {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"value": 1}}
+            )
+            await asyncio.sleep(0)
+            assert task.done() is False
+            await transport.push(
+                {"jsonrpc": "2.0", "id": request["id"], "result": {"done": True}}
+            )
+            assert await task == {"done": True}
+        finally:
+            await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_responds_to_ping_and_rejects_unsupported_server_request():
+    async def scenario():
+        transport = MemoryMCPTransport()
+        connection = MCPConnection(transport, server_name="memory", timeout_seconds=0.5)
+        try:
+            await initialize_connection(connection, transport)
+            await transport.push({"jsonrpc": "2.0", "id": "ping-1", "method": "ping"})
+            assert await transport.next_sent() == {
+                "jsonrpc": "2.0",
+                "id": "ping-1",
+                "result": {},
+            }
+
+            await transport.push(
+                {"jsonrpc": "2.0", "id": "roots-1", "method": "roots/list", "params": {}}
+            )
+            assert await transport.next_sent() == {
+                "jsonrpc": "2.0",
+                "id": "roots-1",
+                "error": {"code": -32601, "message": "Method not found"},
+            }
+        finally:
+            await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_timeout_sends_cancel_and_ignores_late_response():
+    async def scenario():
+        transport = MemoryMCPTransport()
+        connection = MCPConnection(transport, server_name="memory", timeout_seconds=0.02)
+        try:
+            await initialize_connection(connection, transport)
+            timed_out = asyncio.create_task(connection.request("slow", {}))
+            slow_request = await transport.next_sent()
+            with pytest.raises(MCPConnectionError) as captured:
+                await timed_out
+            assert captured.value.category == "timeout"
+            assert await transport.next_sent() == {
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": slow_request["id"], "reason": "timeout"},
+            }
+            assert connection.pending_request_count == 0
+
+            await transport.push(
+                {"jsonrpc": "2.0", "id": slow_request["id"], "result": {"late": True}}
+            )
+            next_task = asyncio.create_task(connection.request("next", {}))
+            next_request = await transport.next_sent()
+            await transport.push(
+                {"jsonrpc": "2.0", "id": next_request["id"], "result": {"next": True}}
+            )
+            assert await next_task == {"next": True}
+        finally:
+            await connection.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MCPTransportError("disconnected", "transport disconnected"),
+        {"jsonrpc": "1.0", "id": 99, "result": {}},
+    ],
+)
+def test_connection_failure_finishes_all_pending_and_closes_transport_once(failure):
+    async def scenario():
+        transport = MemoryMCPTransport()
+        connection = MCPConnection(transport, server_name="memory", timeout_seconds=0.5)
+        await initialize_connection(connection, transport)
+        first = asyncio.create_task(connection.request("first", {}))
+        second = asyncio.create_task(connection.request("second", {}))
+        await transport.next_sent()
+        await transport.next_sent()
+
+        await transport.push(failure)
+        for task in (first, second):
+            with pytest.raises(MCPConnectionError) as captured:
+                await task
+            assert captured.value.category == "receive_failed"
+
+        await asyncio.sleep(0)
+        assert connection.is_failed is True
+        assert connection.pending_request_count == 0
+        assert transport.close_count == 1
+        await connection.close()
+        assert transport.close_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_connection_rejects_tool_call_before_initialization():
+    async def scenario():
+        transport = MemoryMCPTransport()
+        connection = MCPConnection(transport, server_name="memory", timeout_seconds=0.5)
+        with pytest.raises(MCPConnectionError) as captured:
+            await connection.request("tools/call", {"name": "echo", "arguments": {}})
+        assert captured.value.category == "not_initialized"
 
     asyncio.run(scenario())

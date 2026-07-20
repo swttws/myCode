@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Mapping
 
@@ -8,8 +9,11 @@ from mycode.mcp.jsonrpc import (
     JSONRPCMessageKind,
     MCPProtocolError,
     ParsedJSONRPCMessage,
+    make_cancel_notification,
+    make_error_response,
     make_notification,
     make_request,
+    make_success_response,
     parse_message,
 )
 from mycode.mcp.models import RemoteTool
@@ -51,6 +55,8 @@ class MCPConnection:
         self._close_lock = asyncio.Lock()
         self._initialized = False
         self._closed = False
+        self._failed = False
+        self._transport_closed = False
         self._tools: tuple[RemoteTool, ...] = ()
         self.protocol_version: str | None = None
         self.capabilities: dict[str, object] = {}
@@ -64,14 +70,21 @@ class MCPConnection:
     def pending_request_count(self) -> int:
         return len(self._pending)
 
+    @property
+    def is_failed(self) -> bool:
+        return self._failed
+
     async def initialize(self) -> tuple[RemoteTool, ...]:
         async with self._initialize_lock:
             if self._initialized:
                 return self._tools
             if self._closed:
                 raise MCPConnectionError("closed", "MCP connection is closed")
+            if self._failed:
+                raise MCPConnectionError("failed", "MCP connection has failed")
 
             await self._transport.open()
+            self._transport_closed = False
             self._receiver_task = asyncio.create_task(
                 self._receive_loop(),
                 name=f"mcp-receive-{self._server_name}",
@@ -98,6 +111,13 @@ class MCPConnection:
     ) -> dict[str, object]:
         if self._closed:
             raise MCPConnectionError("closed", "MCP connection is closed")
+        if self._failed:
+            raise MCPConnectionError("failed", "MCP connection has failed")
+        if method == "tools/call" and not self._initialized:
+            raise MCPConnectionError(
+                "not_initialized",
+                "MCP tools cannot be called before initialization",
+            )
         request_id = self._next_request_id
         self._next_request_id += 1
         loop = asyncio.get_running_loop()
@@ -119,6 +139,11 @@ class MCPConnection:
             )
         except asyncio.TimeoutError as exc:
             self._pending.pop(request_id, None)
+            future.cancel()
+            with contextlib.suppress(MCPTransportError, OSError, RuntimeError):
+                await self._transport.send(
+                    make_cancel_notification(request_id, reason="timeout")
+                )
             raise MCPConnectionError(
                 "timeout",
                 f"MCP request timed out: {self._server_name}",
@@ -127,6 +152,8 @@ class MCPConnection:
     async def notify(self, method: str, params: Mapping[str, object]) -> None:
         if self._closed:
             raise MCPConnectionError("closed", "MCP connection is closed")
+        if self._failed:
+            raise MCPConnectionError("failed", "MCP connection has failed")
         try:
             await self._transport.send(make_notification(method, params))
         except (MCPTransportError, OSError) as exc:
@@ -150,7 +177,7 @@ class MCPConnection:
             if receiver_task is not None:
                 await asyncio.gather(receiver_task, return_exceptions=True)
             self._receiver_task = None
-            await self._transport.close()
+            await self._close_transport()
 
     async def _receive_loop(self) -> None:
         try:
@@ -165,29 +192,24 @@ class MCPConnection:
                         self._server_name,
                     )
                 else:
-                    logger.info(
-                        "收到 MCP server 请求：%s，server=%s",
-                        message.method,
-                        self._server_name,
-                    )
+                    await self._handle_server_request(message)
         except asyncio.CancelledError:
             raise
         except (MCPTransportError, MCPProtocolError) as exc:
-            self._fail_pending(
-                MCPConnectionError(
-                    "receive_failed",
-                    f"MCP receive loop failed: {self._server_name}",
-                )
-            )
+            await self._fail_connection()
             logger.warning("MCP 接收循环失败：%s，类别：%s", self._server_name, exc.category)
         except Exception:
-            self._fail_pending(
-                MCPConnectionError(
-                    "receive_failed",
-                    f"MCP receive loop failed: {self._server_name}",
-                )
-            )
-            logger.exception("MCP 接收循环异常：%s", self._server_name)
+            await self._fail_connection()
+            logger.warning("MCP 接收循环异常：%s", self._server_name)
+
+    async def _handle_server_request(self, message: ParsedJSONRPCMessage) -> None:
+        if message.id is None:
+            return
+        if message.method == "ping":
+            response = make_success_response(message.id, {})
+        else:
+            response = make_error_response(message.id, -32601, "Method not found")
+        await self._transport.send(response)
 
     def _dispatch_response(self, message: ParsedJSONRPCMessage) -> None:
         if message.id is None:
@@ -282,3 +304,20 @@ class MCPConnection:
         for future in pending:
             if not future.done():
                 future.set_exception(error)
+
+    async def _fail_connection(self) -> None:
+        self._failed = True
+        self._initialized = False
+        self._fail_pending(
+            MCPConnectionError(
+                "receive_failed",
+                f"MCP receive loop failed: {self._server_name}",
+            )
+        )
+        await self._close_transport()
+
+    async def _close_transport(self) -> None:
+        if self._transport_closed:
+            return
+        self._transport_closed = True
+        await self._transport.close()
