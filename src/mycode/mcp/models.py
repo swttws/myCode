@@ -7,7 +7,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Mapping
 
-from mycode.tool.base import JSONSchema, ToolKind
+from mycode.tool.base import DeferredToolSummary, JSONSchema, ToolKind
 
 
 SERVER_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
@@ -84,9 +84,3 @@ class RemoteTool:
     description: str
     parameters: JSONSchema
     kind: ToolKind
-
-
-@dataclass(frozen=True)
-class DeferredToolSummary:
-    name: str
-    description: str

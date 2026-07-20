@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mycode.tool.base import Tool, ToolDefinition, ToolKind
+from mycode.tool.base import DeferredToolSummary, Tool, ToolDefinition, ToolKind
 
 
 class ToolRegistry:
@@ -8,6 +8,7 @@ class ToolRegistry:
 
     def __init__(self, tools: list[Tool] | None = None) -> None:
         self._tools: dict[str, Tool] = {}
+        self._discovered: set[str] = set()
         for tool in tools or []:
             self.register(tool)
 
@@ -27,6 +28,33 @@ class ToolRegistry:
     def definitions(self) -> list[ToolDefinition]:
         # 稳定工具顺序让相同工具集合保持可缓存的请求前缀。
         return sorted((tool.definition for tool in self._tools.values()), key=lambda definition: definition.name)
+
+    def model_definitions(self) -> list[ToolDefinition]:
+        return sorted(
+            (
+                tool.definition
+                for name, tool in self._tools.items()
+                if not _is_deferred(tool) or name in self._discovered
+            ),
+            key=lambda definition: definition.name,
+        )
+
+    def deferred_summaries(self) -> list[DeferredToolSummary]:
+        return sorted(
+            (
+                DeferredToolSummary(name=tool.definition.name, description=tool.definition.description)
+                for name, tool in self._tools.items()
+                if _is_deferred(tool) and name not in self._discovered
+            ),
+            key=lambda summary: summary.name,
+        )
+
+    def mark_discovered(self, name: str) -> bool:
+        tool = self._tools.get(name)
+        if tool is None or not _is_deferred(tool):
+            return False
+        self._discovered.add(name)
+        return True
 
     def openai_tool_specs(self) -> list[dict[str, object]]:
         return self.openai_chat_tool_specs()
@@ -55,3 +83,8 @@ class ToolRegistry:
             }
             for definition in self.definitions()
         ]
+
+
+def _is_deferred(tool: Tool) -> bool:
+    should_defer = getattr(tool, "should_defer", None)
+    return callable(should_defer) and should_defer() is True

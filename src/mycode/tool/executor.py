@@ -42,8 +42,14 @@ class ToolExecutor:
 
         try:
             logger.info("开始执行工具：%s", call.name)
+            execute_async = getattr(tool, "execute_async", None)
+            operation = (
+                execute_async(call.arguments)
+                if callable(execute_async)
+                else asyncio.to_thread(tool.execute, call.arguments)
+            )
             result = await asyncio.wait_for(
-                asyncio.to_thread(tool.execute, call.arguments),
+                operation,
                 timeout=self._timeout_seconds,
             )
             logger.info("工具执行完成：%s，成功：%s", call.name, result.ok)
