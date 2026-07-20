@@ -8,6 +8,7 @@ from mycode.mcp.models import (
     MCPTransportKind,
     RemoteTool,
 )
+from mycode.mcp.pool import MCPServerPool
 from mycode.mcp.tools import MCPToolWrapper, ToolSearch, register_mcp_tools
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "MCPConfigError",
     "MCPDiagnostic",
     "MCPServerConfig",
+    "MCPServerPool",
     "MCPServerState",
     "MCPTransportKind",
     "MCPToolWrapper",
