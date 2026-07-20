@@ -1,3 +1,4 @@
+from mycode.mcp.config import MCPConfigError, load_mcp_config
 from mycode.mcp.models import (
     DeferredToolSummary,
     MCPConfig,
@@ -11,9 +12,11 @@ from mycode.mcp.models import (
 __all__ = [
     "DeferredToolSummary",
     "MCPConfig",
+    "MCPConfigError",
     "MCPDiagnostic",
     "MCPServerConfig",
     "MCPServerState",
     "MCPTransportKind",
     "RemoteTool",
+    "load_mcp_config",
 ]
