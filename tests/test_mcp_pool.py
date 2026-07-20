@@ -40,7 +40,15 @@ def make_remote_tool(server_name: str, name: str) -> RemoteTool:
 
 
 class FakeConnection:
-    def __init__(self, tools=(), *, error: Exception | None = None, gate=None, activity=None):
+    def __init__(
+        self,
+        tools=(),
+        *,
+        error: Exception | None = None,
+        gate=None,
+        activity=None,
+        responses=(),
+    ):
         self.tools = tuple(tools)
         self.error = error
         self.gate = gate
@@ -48,6 +56,8 @@ class FakeConnection:
         self.initialize_count = 0
         self.close_count = 0
         self.is_failed = False
+        self.responses = list(responses)
+        self.request_calls = []
 
     async def initialize(self):
         self.initialize_count += 1
@@ -66,6 +76,14 @@ class FakeConnection:
 
     async def close(self):
         self.close_count += 1
+
+    async def request(self, method, params):
+        self.request_calls.append((method, params))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            self.is_failed = True
+            raise response
+        return response
 
 
 def test_pool_initializes_servers_concurrently_and_caches_prefixed_tools():
@@ -172,5 +190,152 @@ def test_pool_skips_only_invalid_or_duplicate_remote_tool_names():
         assert pool.server_state("server") is MCPServerState.READY
         assert len(diagnostics) == 2
         assert all(diagnostic.category == "tool_definition" for diagnostic in diagnostics)
+
+    asyncio.run(scenario())
+
+
+def test_pool_reuses_initialized_connection_for_consecutive_tool_calls():
+    async def scenario():
+        connection = FakeConnection(
+            [make_remote_tool("server", "echo")],
+            responses=[
+                {"content": [{"type": "text", "text": "first"}]},
+                {"content": [{"type": "text", "text": "second"}]},
+            ],
+        )
+        pool = MCPServerPool(
+            MCPConfig((make_server_config("server"),)),
+            connection_factory=lambda config: connection,
+        )
+        await pool.initialize_all()
+
+        first = await pool.call_tool("server", "echo", {"value": 1})
+        second = await pool.call_tool("server", "echo", {"value": 2})
+
+        assert first.ok is True
+        assert second.ok is True
+        assert connection.initialize_count == 1
+        assert connection.request_calls == [
+            ("tools/call", {"name": "echo", "arguments": {"value": 1}}),
+            ("tools/call", {"name": "echo", "arguments": {"value": 2}}),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_pool_reconnects_and_rediscovers_after_call_failure():
+    async def scenario():
+        first_connection = FakeConnection(
+            [make_remote_tool("server", "echo")],
+            responses=[MCPConnectionError("timeout", "sensitive timeout detail")],
+        )
+        second_connection = FakeConnection(
+            [make_remote_tool("server", "echo")],
+            responses=[{"content": [{"type": "text", "text": "recovered"}]}],
+        )
+        connections = [first_connection, second_connection]
+        pool = MCPServerPool(
+            MCPConfig((make_server_config("server"),)),
+            connection_factory=lambda config: connections.pop(0),
+        )
+        await pool.initialize_all()
+
+        failed = await pool.call_tool("server", "echo", {})
+        recovered = await pool.call_tool("server", "echo", {})
+
+        assert failed.ok is False
+        assert failed.content["category"] == "timeout"
+        assert "sensitive timeout detail" not in failed.error
+        assert first_connection.close_count == 1
+        assert second_connection.initialize_count == 1
+        assert recovered.ok is True
+        assert pool.server_state("server") is MCPServerState.READY
+
+    asyncio.run(scenario())
+
+
+def test_pool_concurrent_waiters_trigger_only_one_reconnect():
+    async def scenario():
+        first_connection = FakeConnection([make_remote_tool("server", "echo")])
+        reconnect_gate = asyncio.Event()
+        second_connection = FakeConnection(
+            [make_remote_tool("server", "echo")],
+            gate=reconnect_gate,
+            responses=[
+                {"content": [{"type": "text", "text": "one"}]},
+                {"content": [{"type": "text", "text": "two"}]},
+            ],
+        )
+        connections = [first_connection, second_connection]
+        pool = MCPServerPool(
+            MCPConfig((make_server_config("server"),)),
+            connection_factory=lambda config: connections.pop(0),
+        )
+        await pool.initialize_all()
+        first_connection.is_failed = True
+
+        first = asyncio.create_task(pool.call_tool("server", "echo", {"call": 1}))
+        second = asyncio.create_task(pool.call_tool("server", "echo", {"call": 2}))
+        for _ in range(20):
+            if second_connection.initialize_count == 1:
+                break
+            await asyncio.sleep(0)
+        reconnect_gate.set()
+
+        results = await asyncio.gather(first, second)
+        assert all(result.ok for result in results)
+        assert second_connection.initialize_count == 1
+        assert connections == []
+
+    asyncio.run(scenario())
+
+
+def test_pool_converts_remote_is_error_to_structured_tool_failure():
+    async def scenario():
+        connection = FakeConnection(
+            [make_remote_tool("server", "echo")],
+            responses=[
+                {
+                    "content": [{"type": "text", "text": "remote rejected input"}],
+                    "isError": True,
+                }
+            ],
+        )
+        pool = MCPServerPool(
+            MCPConfig((make_server_config("server"),)),
+            connection_factory=lambda config: connection,
+        )
+        await pool.initialize_all()
+
+        result = await pool.call_tool("server", "echo", {"bad": True})
+
+        assert result.ok is False
+        assert result.tool_name == "server__echo"
+        assert result.content["isError"] is True
+        assert result.error == "remote MCP tool returned an error"
+
+    asyncio.run(scenario())
+
+
+def test_pool_close_is_idempotent_and_closes_every_connection():
+    async def scenario():
+        connections = {
+            "alpha": FakeConnection([make_remote_tool("alpha", "echo")]),
+            "beta": FakeConnection([make_remote_tool("beta", "echo")]),
+        }
+        pool = MCPServerPool(
+            MCPConfig((make_server_config("alpha"), make_server_config("beta"))),
+            connection_factory=lambda config: connections[config.name],
+        )
+        await pool.initialize_all()
+
+        await pool.close()
+        await pool.close()
+
+        assert connections["alpha"].close_count == 1
+        assert connections["beta"].close_count == 1
+        assert pool.server_state("alpha") is MCPServerState.CLOSED
+        assert pool.server_state("beta") is MCPServerState.CLOSED
+        assert pool.tools == ()
 
     asyncio.run(scenario())
