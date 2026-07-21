@@ -17,6 +17,8 @@ from mycode.agent import (
     make_user_message,
 )
 from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType
+from mycode.llm import MessageOrigin
+from mycode.mcp import MCPToolWrapper, RemoteTool, ToolSearch
 from mycode.memory import InMemoryConversationMemory
 from mycode.permission.models import (
     ApprovalDecision,
@@ -159,6 +161,58 @@ class FakePermission:
 
     async def after_tool(self, call, result):
         return result
+
+
+class AgentFakeMCPPool:
+    def __init__(self, *, available=True):
+        self.available = available
+        self.calls = []
+        self.tools = ()
+
+    def is_available(self, server_name):
+        return self.available
+
+    async def ensure_available(self, server_name):
+        return self.available
+
+    async def call_tool(self, server_name, remote_name, arguments):
+        self.calls.append((server_name, remote_name, arguments))
+        return ToolResult(
+            ok=True,
+            tool_name=f"{server_name}__{remote_name}",
+            content={"remote": True},
+        )
+
+
+def make_remote_tool(name="echo", *, kind=ToolKind.WRITE):
+    return RemoteTool(
+        server_name="server",
+        remote_name=name,
+        public_name=f"server__{name}",
+        description=f"Remote {name} description.",
+        parameters={
+            "type": "object",
+            "properties": {"schema_secret": {"type": "string"}},
+        },
+        kind=kind,
+    )
+
+
+def make_mcp_loop(llm, memory, remote, pool, permission=None):
+    pool.tools = (remote,)
+    registry = ToolRegistry()
+    registry.register(MCPToolWrapper(remote, pool))
+    registry.register(ToolSearch(registry, pool))
+    return (
+        AgentLoop(
+            llm=llm,
+            memory=memory,
+            tool_executor=ToolExecutor(registry),
+            tool_registry=registry,
+            permission=permission or FakePermission(),
+        ),
+        registry,
+    )
 
 
 async def collect_async(async_iterable):
@@ -588,3 +642,129 @@ def test_agent_loop_reports_run_timeout_during_tool_execution():
     assert events[-1].type == AgentEventType.ERROR
     assert events[-1].error_code == AgentErrorCode.RUN_TIMEOUT
     assert AgentEventType.TOOL_RESULT not in [event.type for event in events]
+
+
+def test_agent_first_round_lists_deferred_name_and_description_without_schema():
+    memory = InMemoryConversationMemory()
+    llm = ScriptedLLM([[StreamEvent(StreamEventType.DONE)]])
+    remote = make_remote_tool()
+    loop, _ = make_mcp_loop(llm, memory, remote, AgentFakeMCPPool())
+
+    asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert [definition.name for definition in llm.tool_requests[0]] == ["tool_search"]
+    reminders = [
+        message
+        for message in llm.requests[0]
+        if message.origin is MessageOrigin.SYSTEM_REMINDER
+    ]
+    assert len(reminders) == 1
+    assert "server__echo" in reminders[0].content
+    assert "Remote echo description." in reminders[0].content
+    assert "schema_secret" not in reminders[0].content
+    assert all(message.origin is not MessageOrigin.SYSTEM_REMINDER for message in memory.messages())
+
+
+def test_agent_injects_discovered_tool_schema_starting_next_round_only():
+    memory = InMemoryConversationMemory()
+    search_call = ToolCall(
+        id="search-1",
+        name="tool_search",
+        arguments={"name": "server__echo"},
+        raw_arguments='{"name":"server__echo"}',
+    )
+    llm = ScriptedLLM(
+        [
+            [StreamEvent(StreamEventType.TOOL_CALL, tool_call=search_call), StreamEvent(StreamEventType.DONE)],
+            [StreamEvent(StreamEventType.TEXT_DELTA, "done"), StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    remote = make_remote_tool()
+    loop, registry = make_mcp_loop(llm, memory, remote, AgentFakeMCPPool())
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert [definition.name for definition in llm.tool_requests[0]] == ["tool_search"]
+    assert [definition.name for definition in llm.tool_requests[1]] == [
+        "server__echo",
+        "tool_search",
+    ]
+    assert registry.deferred_summaries() == []
+    assert not any(
+        message.origin is MessageOrigin.SYSTEM_REMINDER for message in llm.requests[1]
+    )
+    assert events[-1].content == "done"
+
+
+def test_agent_failed_search_keeps_schema_hidden_and_reminder_present():
+    memory = InMemoryConversationMemory()
+    search_call = ToolCall(
+        id="search-1",
+        name="tool_search",
+        arguments={"name": "missing__tool"},
+        raw_arguments='{"name":"missing__tool"}',
+    )
+    llm = ScriptedLLM(
+        [
+            [StreamEvent(StreamEventType.TOOL_CALL, tool_call=search_call), StreamEvent(StreamEventType.DONE)],
+            [StreamEvent(StreamEventType.TEXT_DELTA, "adjusted"), StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    remote = make_remote_tool()
+    loop, registry = make_mcp_loop(llm, memory, remote, AgentFakeMCPPool())
+
+    asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert [definition.name for definition in llm.tool_requests[0]] == ["tool_search"]
+    assert [definition.name for definition in llm.tool_requests[1]] == ["tool_search"]
+    assert [summary.name for summary in registry.deferred_summaries()] == ["server__echo"]
+    second_reminders = [
+        message
+        for message in llm.requests[1]
+        if message.origin is MessageOrigin.SYSTEM_REMINDER
+    ]
+    assert len(second_reminders) == 1
+    assert "server__echo" in second_reminders[0].content
+    assert "schema_secret" not in second_reminders[0].content
+
+
+def test_discovered_default_write_mcp_tool_uses_existing_approval_flow(tmp_path):
+    memory = InMemoryConversationMemory()
+    remote_call = ToolCall(
+        id="remote-1",
+        name="server__write",
+        arguments={"value": "approved"},
+        raw_arguments='{"value":"approved"}',
+    )
+    llm = ScriptedLLM(
+        [
+            [StreamEvent(StreamEventType.TOOL_CALL, tool_call=remote_call), StreamEvent(StreamEventType.DONE)],
+            [StreamEvent(StreamEventType.TEXT_DELTA, "done"), StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    remote = make_remote_tool("write", kind=ToolKind.WRITE)
+    pool = AgentFakeMCPPool()
+    permission_service = PermissionService.create(tmp_path, home=tmp_path / "home")
+    loop, registry = make_mcp_loop(
+        llm,
+        memory,
+        remote,
+        pool,
+        permission=PermissionInterceptor(permission_service),
+    )
+    assert registry.mark_discovered("server__write") is True
+    approvals = []
+
+    async def approve(request):
+        approvals.append(request.tool_call.name)
+        assert pool.calls == []
+        return ApprovalDecision(ApprovalDecisionType.APPROVE_ONCE)
+
+    events = asyncio.run(
+        collect_async(loop.run("hello", mode=AgentMode(), approval_provider=approve))
+    )
+
+    assert approvals == ["server__write"]
+    assert pool.calls == [("server", "write", {"value": "approved"})]
+    assert AgentEventType.APPROVAL_REQUIRED in [event.type for event in events]
+    assert events[-1].content == "done"
