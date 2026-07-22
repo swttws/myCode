@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from mycode.compact.models import CompactConfig
 from mycode.config import ConfigError, load_config
 
 
@@ -348,3 +349,87 @@ compact:
 
     with pytest.raises(ConfigError, match="integer"):
         load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})
+
+
+@pytest.mark.parametrize(
+    ("compact_config", "field_name"),
+    [
+        ({"context_window_tokens": 0}, "context_window_tokens"),
+        ({"context_window_tokens": -1}, "context_window_tokens"),
+        ({"tool_result_threshold_tokens": 0}, "tool_result_threshold_tokens"),
+        ({"tool_result_threshold_tokens": -1}, "tool_result_threshold_tokens"),
+        ({"tool_batch_threshold_tokens": 0}, "tool_batch_threshold_tokens"),
+        ({"tool_batch_threshold_tokens": -1}, "tool_batch_threshold_tokens"),
+        ({"tool_result_threshold_tokens": 2_000}, "tool_result_threshold_tokens"),
+        (
+            {
+                "tool_result_threshold_tokens": 8_001,
+                "tool_batch_threshold_tokens": 8_000,
+            },
+            "tool_result_threshold_tokens",
+        ),
+        ({"tool_batch_threshold_tokens": 115_000}, "tool_batch_threshold_tokens"),
+        ({"tool_batch_threshold_tokens": 115_001}, "tool_batch_threshold_tokens"),
+    ],
+)
+def test_rejects_invalid_compact_budget_combinations(tmp_path, compact_config, field_name):
+    config_path = tmp_path / "mycode.yaml"
+    compact_values = {
+        "context_window_tokens": 128_000,
+        "tool_result_threshold_tokens": 8_000,
+        "tool_batch_threshold_tokens": 12_000,
+    }
+    compact_values.update(compact_config)
+    compact_lines = "\n".join(
+        f"  {name}: {value}" for name, value in compact_values.items()
+    )
+    write_config(
+        config_path,
+        f"""
+protocol: anthropic
+model: claude-test
+base_url: https://api.anthropic.com
+api_key: sk-test
+compact:
+{compact_lines}
+""",
+    )
+
+    with pytest.raises(ConfigError, match=field_name):
+        load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})
+
+
+def test_loads_minimum_valid_compact_budget_boundary(tmp_path):
+    config_path = tmp_path / "mycode.yaml"
+    write_config(
+        config_path,
+        """
+protocol: anthropic
+model: claude-test
+base_url: https://api.anthropic.com
+api_key: sk-test
+compact:
+  context_window_tokens: 15002
+  tool_result_threshold_tokens: 2001
+  tool_batch_threshold_tokens: 2001
+""",
+    )
+
+    compact = load_config(config_path, cwd=tmp_path, home=tmp_path, environ={}).compact
+
+    assert (
+        0
+        < 2_000
+        < compact.tool_result_threshold_tokens
+        <= compact.tool_batch_threshold_tokens
+        < compact.context_window_tokens - 13_000
+    )
+
+
+def test_direct_compact_config_construction_validates_budget_invariant():
+    with pytest.raises(ValueError, match="tool_batch_threshold_tokens"):
+        CompactConfig(
+            context_window_tokens=128_000,
+            tool_result_threshold_tokens=8_000,
+            tool_batch_threshold_tokens=115_000,
+        )

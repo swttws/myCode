@@ -7,17 +7,54 @@ from typing import Literal
 from mycode.llm import ChatMessage
 
 
+DEFAULT_TOOL_RESULT_THRESHOLD_TOKENS = 8_000
+DEFAULT_TOOL_BATCH_THRESHOLD_TOKENS = 12_000
+PREVIEW_ALLOWANCE_TOKENS = 2_000
+AUTO_SAFETY_RESERVE_TOKENS = 13_000
+
+
 @dataclass(frozen=True)
 class CompactConfig:
     context_window_tokens: int
-    tool_result_threshold_tokens: int = 8_000
-    tool_batch_threshold_tokens: int = 12_000
+    tool_result_threshold_tokens: int = DEFAULT_TOOL_RESULT_THRESHOLD_TOKENS
+    tool_batch_threshold_tokens: int = DEFAULT_TOOL_BATCH_THRESHOLD_TOKENS
+
+    def __post_init__(self) -> None:
+        if self.context_window_tokens <= 0:
+            raise ValueError("compact.context_window_tokens must be greater than zero.")
+        if self.tool_result_threshold_tokens <= 0:
+            raise ValueError(
+                "compact.tool_result_threshold_tokens must be greater than zero."
+            )
+        if self.tool_batch_threshold_tokens <= 0:
+            raise ValueError(
+                "compact.tool_batch_threshold_tokens must be greater than zero."
+            )
+        if self.tool_result_threshold_tokens <= PREVIEW_ALLOWANCE_TOKENS:
+            raise ValueError(
+                "compact.tool_result_threshold_tokens must be greater than "
+                f"the preview allowance ({PREVIEW_ALLOWANCE_TOKENS})."
+            )
+        if self.tool_result_threshold_tokens > self.tool_batch_threshold_tokens:
+            raise ValueError(
+                "compact.tool_result_threshold_tokens must not exceed "
+                "compact.tool_batch_threshold_tokens."
+            )
+        if (
+            self.tool_batch_threshold_tokens
+            >= self.context_window_tokens - AUTO_SAFETY_RESERVE_TOKENS
+        ):
+            raise ValueError(
+                "compact.tool_batch_threshold_tokens must be less than "
+                "compact.context_window_tokens - "
+                f"{AUTO_SAFETY_RESERVE_TOKENS}."
+            )
 
 
 @dataclass(frozen=True)
 class CompactPolicy:
-    preview_tokens: int = 2_000
-    auto_reserve_tokens: int = 13_000
+    preview_tokens: int = PREVIEW_ALLOWANCE_TOKENS
+    auto_reserve_tokens: int = AUTO_SAFETY_RESERVE_TOKENS
     manual_reserve_tokens: int = 3_000
     keep_recent_tokens: int = 10_000
     min_recent_messages: int = 5

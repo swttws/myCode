@@ -8,7 +8,11 @@ from typing import Mapping
 
 import yaml
 
-from mycode.compact.models import CompactConfig
+from mycode.compact.models import (
+    DEFAULT_TOOL_BATCH_THRESHOLD_TOKENS,
+    DEFAULT_TOOL_RESULT_THRESHOLD_TOKENS,
+    CompactConfig,
+)
 
 
 class ConfigError(ValueError):
@@ -163,24 +167,26 @@ def _parse_compact(raw: Mapping[str, object]) -> CompactConfig:
         compact_raw["context_window_tokens"],
         "compact.context_window_tokens",
     )
-    defaults = CompactConfig(context_window_tokens=context_window_tokens)
-    return CompactConfig(
-        context_window_tokens=context_window_tokens,
-        tool_result_threshold_tokens=_compact_int(
-            compact_raw.get(
-                "tool_result_threshold_tokens",
-                defaults.tool_result_threshold_tokens,
+    try:
+        return CompactConfig(
+            context_window_tokens=context_window_tokens,
+            tool_result_threshold_tokens=_compact_int(
+                compact_raw.get(
+                    "tool_result_threshold_tokens",
+                    DEFAULT_TOOL_RESULT_THRESHOLD_TOKENS,
+                ),
+                "compact.tool_result_threshold_tokens",
             ),
-            "compact.tool_result_threshold_tokens",
-        ),
-        tool_batch_threshold_tokens=_compact_int(
-            compact_raw.get(
-                "tool_batch_threshold_tokens",
-                defaults.tool_batch_threshold_tokens,
+            tool_batch_threshold_tokens=_compact_int(
+                compact_raw.get(
+                    "tool_batch_threshold_tokens",
+                    DEFAULT_TOOL_BATCH_THRESHOLD_TOKENS,
+                ),
+                "compact.tool_batch_threshold_tokens",
             ),
-            "compact.tool_batch_threshold_tokens",
-        ),
-    )
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _compact_int(value: object, field_name: str) -> int:
