@@ -36,8 +36,8 @@ class RequestSnapshot:
 class TokenEstimate:
     tokens: int
     source: Literal["full_chars", "usage_delta"]
-    anchor_input_tokens: int | None
     delta_tokens: int
+    anchor_input_tokens: int | None = None
 
 
 @dataclass(frozen=True)

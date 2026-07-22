@@ -62,6 +62,12 @@ def test_compact_value_models_retain_their_context_fields():
     assert not slice_.eof
 
 
+def test_token_estimate_defaults_usage_anchor_to_none():
+    estimate = TokenEstimate(tokens=1, source="full_chars", delta_tokens=1)
+
+    assert estimate.anchor_input_tokens is None
+
+
 def test_compact_enums_expose_the_approved_wire_values():
     assert {action.value for action in CompactAction} == {
         "none",
