@@ -347,8 +347,10 @@ compact:
 """,
     )
 
-    with pytest.raises(ConfigError, match="integer"):
+    with pytest.raises(ConfigError, match="integer") as exc:
         load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})
+
+    assert exc.value.__cause__ is None
 
 
 @pytest.mark.parametrize(
@@ -424,6 +426,34 @@ compact:
         <= compact.tool_batch_threshold_tokens
         < compact.context_window_tokens - 13_000
     )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("context_window_tokens", 15_002.5),
+        ("tool_result_threshold_tokens", 2_001.5),
+        ("tool_batch_threshold_tokens", 2_001.5),
+        ("context_window_tokens", True),
+        ("tool_result_threshold_tokens", True),
+        ("tool_batch_threshold_tokens", True),
+    ],
+)
+def test_direct_compact_config_construction_rejects_non_integer_budgets(
+    field_name, value
+):
+    compact_values = {
+        "context_window_tokens": 15_002,
+        "tool_result_threshold_tokens": 2_001,
+        "tool_batch_threshold_tokens": 2_001,
+    }
+    compact_values[field_name] = value
+
+    with pytest.raises(ValueError) as exc:
+        CompactConfig(**compact_values)
+
+    assert field_name in str(exc.value)
+    assert "integer" in str(exc.value)
 
 
 def test_direct_compact_config_construction_validates_budget_invariant():

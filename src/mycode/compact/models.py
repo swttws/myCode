@@ -20,6 +20,13 @@ class CompactConfig:
     tool_batch_threshold_tokens: int = DEFAULT_TOOL_BATCH_THRESHOLD_TOKENS
 
     def __post_init__(self) -> None:
+        for field_name, value in (
+            ("context_window_tokens", self.context_window_tokens),
+            ("tool_result_threshold_tokens", self.tool_result_threshold_tokens),
+            ("tool_batch_threshold_tokens", self.tool_batch_threshold_tokens),
+        ):
+            if type(value) is not int:
+                raise ValueError(f"compact.{field_name} must be an integer.")
         if self.context_window_tokens <= 0:
             raise ValueError("compact.context_window_tokens must be greater than zero.")
         if self.tool_result_threshold_tokens <= 0:
