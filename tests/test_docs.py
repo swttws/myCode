@@ -46,6 +46,44 @@ def test_example_configs_exist_and_use_environment_variables():
         assert "sk-" not in text
 
 
+def test_primary_example_configs_load_with_compact_settings(tmp_path):
+    examples = {
+        "examples/mycode.anthropic.yaml": {
+            "environment": {"ANTHROPIC_API_KEY": "sk-anthropic-test"},
+        },
+        "examples/mycode.openai-responses.yaml": {
+            "environment": {"OPENAI_API_KEY": "sk-openai-test"},
+        },
+        "examples/mycode.openai-chat.yaml": {
+            "environment": {"OPENAI_API_KEY": "sk-openai-test"},
+            "overrides": {
+                "model": "gpt-test",
+                "base_url": "https://api.openai.com/v1",
+            },
+        },
+    }
+
+    configs = {}
+    for path, settings in examples.items():
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        data.update(settings.get("overrides", {}))
+        config_path = tmp_path / Path(path).name
+        config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+        configs[path] = load_config(
+            config_path,
+            cwd=tmp_path,
+            home=tmp_path,
+            environ=settings["environment"],
+        )
+
+    assert [config.protocol for config in configs.values()] == [
+        "anthropic",
+        "openai_responses",
+        "openai_chat",
+    ]
+    assert configs["examples/mycode.openai-chat.yaml"].usage.request_stream_usage is False
+
+
 def test_readme_primary_config_examples_load(tmp_path):
     readme = Path("README.md").read_text(encoding="utf-8")
     yaml_blocks = re.findall(r"```yaml\n(.*?)\n```", readme, re.DOTALL)
