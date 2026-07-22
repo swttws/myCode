@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Callable, IO, Literal
 
 from mycode.compact.estimator import TokenEstimator
-from mycode.compact.models import ArchivedArtifact
+from mycode.compact.models import PREVIEW_ALLOWANCE_TOKENS, ArchivedArtifact, ArtifactSlice
+from mycode.tool import ToolArguments, ToolDefinition, ToolKind, ToolResult
 
 
 STALE_AFTER_SECONDS = 86_400
@@ -35,7 +36,7 @@ class ArchiveSession:
         self._clock = clock
         self._stale_after_seconds = stale_after_seconds
         self._estimator = TokenEstimator()
-        self._allowed_paths: set[Path] = set()
+        self._allowed_artifacts: dict[Path, str] = {}
 
         cache_home = Path.home() if home is None else Path(home)
         self.context_dir = cache_home / ".mycode" / "projects" / self.workspace_hash / "context"
@@ -53,10 +54,45 @@ class ArchiveSession:
 
     @property
     def allowed_paths(self) -> frozenset[Path]:
-        return frozenset(self._allowed_paths)
+        return frozenset(self._allowed_artifacts)
 
     def begin(self) -> ArchiveTransaction:
         return ArchiveTransaction(self)
+
+    def read(
+        self,
+        path: str | Path,
+        *,
+        offset: int = 0,
+        max_tokens: int = PREVIEW_ALLOWANCE_TOKENS,
+    ) -> ArtifactSlice:
+        _validate_offset(offset)
+        _validate_max_tokens(max_tokens)
+        artifact_path, registered_sha256 = _resolve_registered_artifact(
+            path,
+            self._allowed_artifacts,
+        )
+        text = _read_verified_text(artifact_path, registered_sha256=registered_sha256)
+        if offset >= len(text):
+            return ArtifactSlice(
+                path=str(artifact_path),
+                text="",
+                next_offset=len(text),
+                eof=True,
+            )
+
+        end = _slice_end_for_budget(
+            text,
+            offset=offset,
+            max_tokens=max_tokens,
+            estimator=self._estimator,
+        )
+        return ArtifactSlice(
+            path=str(artifact_path),
+            text=text[offset:end],
+            next_offset=end,
+            eof=end >= len(text),
+        )
 
     def __enter__(self) -> ArchiveSession:
         return self
@@ -97,8 +133,11 @@ class ArchiveSession:
             encoding="utf-8",
         )
 
-    def _register_paths(self, paths: tuple[Path, ...]) -> None:
-        self._allowed_paths.update(paths)
+    def _register_paths(self, artifacts: tuple[ArchivedArtifact, ...]) -> None:
+        self._allowed_artifacts.update(
+            (Path(artifact.path).resolve(strict=True), artifact.sha256)
+            for artifact in artifacts
+        )
 
 
 class ArtifactStore(ArchiveSession):
@@ -177,7 +216,7 @@ class ArchiveTransaction:
             raise
 
         # 先把文件原子提交到磁盘，再登记可读路径；后续历史替换必须发生在这个顺序之后。
-        self._session._register_paths(tuple(pending.final_path for pending in self._pending))
+        self._session._register_paths(tuple(pending.artifact for pending in self._pending))
         self._pending.clear()
         self._finished = True
 
@@ -201,6 +240,70 @@ class ArchiveTransaction:
     def _ensure_open(self) -> None:
         if self._finished:
             raise RuntimeError("archive transaction is already closed")
+
+
+class ReadCompactArtifactTool:
+    def __init__(self, session: ArchiveSession) -> None:
+        self._session = session
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="read_compact_artifact",
+            description="分段读取当前会话已登记的上下文归档正文。",
+            parameters={
+                "type": "object",
+                "description": "读取上下文归档所需参数。",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "上下文管理器提供的已登记归档路径。",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "从正文字符偏移开始读取。",
+                        "minimum": 0,
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "本次最多返回的估算 token 数，最大 2000。",
+                        "minimum": 1,
+                        "maximum": PREVIEW_ALLOWANCE_TOKENS,
+                    },
+                },
+                "required": ["path"],
+            },
+            kind=ToolKind.READ,
+            grant_arguments=(),
+        )
+
+    def execute(self, arguments: ToolArguments) -> ToolResult:
+        try:
+            path = _required_str(arguments, "path")
+            offset = arguments.get("offset", 0)
+            max_tokens = arguments.get("max_tokens", PREVIEW_ALLOWANCE_TOKENS)
+            artifact_slice = self._session.read(
+                path,
+                offset=offset,
+                max_tokens=max_tokens,
+            )
+            return ToolResult(
+                ok=True,
+                tool_name=self.definition.name,
+                content={
+                    "path": artifact_slice.path,
+                    "text": artifact_slice.text,
+                    "next_offset": artifact_slice.next_offset,
+                    "eof": artifact_slice.eof,
+                },
+            )
+        except Exception as exc:
+            return ToolResult(
+                ok=False,
+                tool_name=self.definition.name,
+                content={"path": arguments.get("path")},
+                error=str(exc),
+            )
 
 
 class _ActivityLock:
@@ -256,6 +359,94 @@ class _ActivityLock:
 
 def _is_windows() -> bool:
     return os.name == "nt"
+
+
+def _validate_offset(offset: int) -> None:
+    if type(offset) is not int or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+
+
+def _validate_max_tokens(max_tokens: int) -> None:
+    if (
+        type(max_tokens) is not int
+        or max_tokens <= 0
+        or max_tokens > PREVIEW_ALLOWANCE_TOKENS
+    ):
+        raise ValueError(f"max_tokens must be an integer from 1 to {PREVIEW_ALLOWANCE_TOKENS}")
+
+
+def _resolve_registered_artifact(
+    path: str | Path,
+    allowed_artifacts: dict[Path, str],
+) -> tuple[Path, str]:
+    candidate = Path(path)
+    if any(part == ".." for part in candidate.parts):
+        raise ValueError("归档读取拒绝路径穿越语法")
+    if candidate.is_symlink():
+        raise ValueError("归档读取拒绝符号链接路径")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("归档路径未登记或不存在") from exc
+    expected_sha256 = allowed_artifacts.get(resolved)
+    if expected_sha256 is None:
+        raise ValueError("归档路径未登记")
+    # 这里不能复用工作区 PathGuard：归档位于用户缓存目录，只能按当前会话登记表精确授权。
+    if resolved.is_symlink():
+        raise ValueError("归档读取拒绝符号链接路径")
+    return resolved, expected_sha256
+
+
+def _read_verified_text(path: Path, *, registered_sha256: str) -> str:
+    try:
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("归档读取失败") from exc
+    if not isinstance(envelope, dict):
+        raise ValueError("归档格式无效")
+
+    text = envelope.get("text")
+    envelope_sha256 = envelope.get("sha256")
+    original_chars = envelope.get("original_chars")
+    if not isinstance(text, str) or not isinstance(envelope_sha256, str):
+        raise ValueError("归档格式无效")
+    if original_chars != len(text):
+        raise ValueError("归档完整性校验失败")
+    actual_sha256 = sha256(text.encode("utf-8")).hexdigest()
+    if actual_sha256 != envelope_sha256 or actual_sha256 != registered_sha256:
+        raise ValueError("归档完整性校验失败")
+    return text
+
+
+def _slice_end_for_budget(
+    text: str,
+    *,
+    offset: int,
+    max_tokens: int,
+    estimator: TokenEstimator,
+) -> int:
+    remaining = text[offset:]
+    if estimator.estimate_text(remaining) <= max_tokens:
+        return len(text)
+
+    low = offset + 1
+    high = len(text)
+    best = offset
+    while low <= high:
+        mid = (low + high) // 2
+        if estimator.estimate_text(text[offset:mid]) <= max_tokens:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    return max(best, offset + 1)
+
+
+def _required_str(arguments: ToolArguments, name: str) -> str:
+    value = arguments.get(name)
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    return value
 
 
 def _unlink_if_exists(path: Path) -> None:
