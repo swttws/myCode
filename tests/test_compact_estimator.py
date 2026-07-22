@@ -1,6 +1,8 @@
+import pytest
+
 from mycode.compact.estimator import TokenEstimator
-from mycode.compact.models import RequestSnapshot
-from mycode.llm import ChatMessage, MessageOrigin
+from mycode.compact.models import RequestSnapshot, TokenEstimate
+from mycode.llm import ChatMessage, MessageOrigin, UsageObservation
 from mycode.tool import ToolDefinition, ToolKind
 
 
@@ -20,6 +22,112 @@ def test_estimate_text_rounds_non_ascii_character_boundaries_upward():
     assert estimator.estimate_text("\u4f60\u4f60") == 2
     assert estimator.estimate_text("\u4f60\u4f60\u4f60") == 2
     assert estimator.estimate_text("\u4f60\u4f60\u4f60\u4f60") == 3
+
+
+def test_estimate_uses_full_character_estimate_before_a_usage_anchor():
+    estimate = TokenEstimator().estimate(
+        RequestSnapshot(ascii_chars=5, non_ascii_chars=1, fingerprint="first")
+    )
+
+    assert estimate == TokenEstimate(
+        tokens=3,
+        source="full_chars",
+        delta_tokens=3,
+        anchor_input_tokens=None,
+    )
+
+
+def test_record_usage_anchors_the_matching_snapshot_input_tokens():
+    estimator = TokenEstimator()
+    snapshot = RequestSnapshot(ascii_chars=16, non_ascii_chars=0, fingerprint="anchor")
+
+    estimator.record_usage(snapshot, UsageObservation(provider="test", input_tokens=100))
+
+    assert estimator.estimate(snapshot) == TokenEstimate(
+        tokens=100,
+        source="usage_delta",
+        delta_tokens=0,
+        anchor_input_tokens=100,
+    )
+
+
+def test_estimate_adds_positive_character_delta_to_usage_anchor():
+    estimator = TokenEstimator()
+    anchor = RequestSnapshot(ascii_chars=4, non_ascii_chars=0, fingerprint="anchor")
+    current = RequestSnapshot(ascii_chars=12, non_ascii_chars=0, fingerprint="current")
+    estimator.record_usage(anchor, UsageObservation(provider="test", input_tokens=10))
+
+    assert estimator.estimate(current) == TokenEstimate(
+        tokens=12,
+        source="usage_delta",
+        delta_tokens=2,
+        anchor_input_tokens=10,
+    )
+
+
+def test_estimate_subtracts_negative_character_delta_from_usage_anchor():
+    estimator = TokenEstimator()
+    anchor = RequestSnapshot(ascii_chars=12, non_ascii_chars=0, fingerprint="anchor")
+    current = RequestSnapshot(ascii_chars=4, non_ascii_chars=0, fingerprint="current")
+    estimator.record_usage(anchor, UsageObservation(provider="test", input_tokens=10))
+
+    assert estimator.estimate(current) == TokenEstimate(
+        tokens=8,
+        source="usage_delta",
+        delta_tokens=-2,
+        anchor_input_tokens=10,
+    )
+
+
+def test_missing_input_usage_preserves_the_previous_anchor():
+    estimator = TokenEstimator()
+    anchor = RequestSnapshot(ascii_chars=4, non_ascii_chars=0, fingerprint="anchor")
+    current = RequestSnapshot(ascii_chars=8, non_ascii_chars=0, fingerprint="current")
+    estimator.record_usage(anchor, UsageObservation(provider="test", input_tokens=10))
+
+    estimator.record_usage(current, UsageObservation(provider="test"))
+
+    assert estimator.estimate(current) == TokenEstimate(
+        tokens=11,
+        source="usage_delta",
+        delta_tokens=1,
+        anchor_input_tokens=10,
+    )
+
+
+@pytest.mark.parametrize("invalid_input_tokens", [-1, True, "10", 1.5])
+def test_invalid_input_usage_does_not_replace_the_previous_anchor(invalid_input_tokens):
+    estimator = TokenEstimator()
+    anchor = RequestSnapshot(ascii_chars=4, non_ascii_chars=0, fingerprint="anchor")
+    current = RequestSnapshot(ascii_chars=8, non_ascii_chars=0, fingerprint="current")
+    estimator.record_usage(anchor, UsageObservation(provider="test", input_tokens=10))
+
+    estimator.record_usage(
+        current,
+        UsageObservation(provider="test", input_tokens=invalid_input_tokens),
+    )
+
+    assert estimator.estimate(current) == TokenEstimate(
+        tokens=11,
+        source="usage_delta",
+        delta_tokens=1,
+        anchor_input_tokens=10,
+    )
+
+
+def test_reset_restores_full_character_estimates():
+    estimator = TokenEstimator()
+    snapshot = RequestSnapshot(ascii_chars=4, non_ascii_chars=0, fingerprint="anchor")
+    estimator.record_usage(snapshot, UsageObservation(provider="test", input_tokens=10))
+
+    estimator.reset()
+
+    assert estimator.estimate(snapshot) == TokenEstimate(
+        tokens=1,
+        source="full_chars",
+        delta_tokens=1,
+        anchor_input_tokens=None,
+    )
 
 
 def test_snapshot_is_exact_for_an_ascii_request():
