@@ -2,11 +2,15 @@ import json
 
 import httpx
 
+from mycode.compact.models import CompactConfig
 from mycode.config import LLMConfig
 from mycode.llm import ChatMessage, StreamEvent, StreamEventType
 from mycode.protocols.openai_chat import OpenAIChatLLM
 from mycode.tool import ToolCall, ToolDefinition, ToolKind
 from tests.helpers import ControlledAsyncByteStream, collect_async
+
+
+TEST_COMPACT_CONFIG = CompactConfig(context_window_tokens=128_000)
 
 
 def test_openai_chat_maps_delta_content_and_done_events():
@@ -29,6 +33,7 @@ def test_openai_chat_maps_delta_content_and_done_events():
         model="gpt-test",
         base_url="https://api.openai.test/v1",
         api_key="sk-test",
+        compact=TEST_COMPACT_CONFIG,
     )
     llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
@@ -69,6 +74,7 @@ def test_openai_chat_yields_first_delta_before_stream_finishes():
             model="gpt-test",
             base_url="https://api.openai.test/v1",
             api_key="sk-test",
+            compact=TEST_COMPACT_CONFIG,
         )
         llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
         iterator = llm.stream_chat([ChatMessage(role="user", content="hello")]).__aiter__()
@@ -99,7 +105,7 @@ def test_openai_chat_includes_tools_when_provided():
         request_log.append(request)
         return httpx.Response(200, content=b"data: [DONE]\n\n")
 
-    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     tool = ToolDefinition(
         name="read_file",
@@ -140,7 +146,7 @@ def test_openai_chat_omits_tools_when_none():
         request_log.append(request)
         return httpx.Response(200, content=b"data: [DONE]\n\n")
 
-    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     import asyncio
@@ -159,7 +165,7 @@ def test_openai_chat_serializes_tool_call_history():
         request_log.append(request)
         return httpx.Response(200, content=b"data: [DONE]\n\n")
 
-    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     messages = [
         ChatMessage(role="assistant", content="", tool_call_id="call-1", tool_name="read_file", tool_arguments='{"path":"README.md"}')
@@ -191,7 +197,7 @@ def test_openai_chat_serializes_tool_result_history():
         request_log.append(request)
         return httpx.Response(200, content=b"data: [DONE]\n\n")
 
-    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     messages = [ChatMessage(role="tool", content='{"ok":true}', tool_call_id="call-1")]
 
@@ -239,7 +245,7 @@ def test_openai_chat_streams_tool_call_arguments_as_tool_call():
         body = "\n".join([f"data: {json.dumps(chunk)}\n" for chunk in chunks] + ["data: [DONE]\n"])
         return httpx.Response(200, content=body.encode("utf-8"))
 
-    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     import asyncio
@@ -281,7 +287,7 @@ def test_openai_chat_preserves_invalid_tool_call_arguments():
         body = f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n"
         return httpx.Response(200, content=body.encode("utf-8"))
 
-    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_chat", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     import asyncio

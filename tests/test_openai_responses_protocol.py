@@ -2,11 +2,15 @@ import json
 
 import httpx
 
+from mycode.compact.models import CompactConfig
 from mycode.config import LLMConfig
 from mycode.llm import ChatMessage, StreamEvent, StreamEventType
 from mycode.protocols.openai_responses import OpenAIResponsesLLM
 from mycode.tool import ToolCall, ToolDefinition, ToolKind
 from tests.helpers import collect_async
+
+
+TEST_COMPACT_CONFIG = CompactConfig(context_window_tokens=128_000)
 
 
 def test_openai_responses_maps_output_text_and_done_events():
@@ -31,6 +35,7 @@ def test_openai_responses_maps_output_text_and_done_events():
         model="gpt-test",
         base_url="https://api.openai.test/v1",
         api_key="sk-test",
+        compact=TEST_COMPACT_CONFIG,
     )
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
@@ -63,7 +68,7 @@ def test_openai_responses_includes_tools_when_provided():
             content='event: response.completed\ndata: {"type":"response.completed"}\n\n'.encode("utf-8"),
         )
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     tool = ToolDefinition(
         name="read_file",
@@ -106,7 +111,7 @@ def test_openai_responses_omits_tools_when_none():
             content='event: response.completed\ndata: {"type":"response.completed"}\n\n'.encode("utf-8"),
         )
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     import asyncio
@@ -128,7 +133,7 @@ def test_openai_responses_serializes_tool_call_history():
             content='event: response.completed\ndata: {"type":"response.completed"}\n\n'.encode("utf-8"),
         )
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     messages = [
         ChatMessage(role="assistant", content="", tool_call_id="call-1", tool_name="read_file", tool_arguments='{"path":"README.md"}')
@@ -159,7 +164,7 @@ def test_openai_responses_serializes_tool_result_history():
             content='event: response.completed\ndata: {"type":"response.completed"}\n\n'.encode("utf-8"),
         )
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     messages = [ChatMessage(role="tool", content='{"ok":true}', tool_call_id="call-1")]
 
@@ -200,7 +205,7 @@ def test_openai_responses_streams_function_call_arguments_as_tool_call():
         )
         return httpx.Response(200, content=body.encode("utf-8"))
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     import asyncio
@@ -238,7 +243,7 @@ def test_openai_responses_preserves_invalid_function_arguments():
         )
         return httpx.Response(200, content=body.encode("utf-8"))
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     import asyncio

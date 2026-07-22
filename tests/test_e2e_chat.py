@@ -28,6 +28,8 @@ protocol: anthropic
 model: claude-test
 base_url: https://api.anthropic.test
 api_key: sk-test
+compact:
+  context_window_tokens: 128000
 """,
         encoding="utf-8",
     )

@@ -8,6 +8,8 @@ from typing import Mapping
 
 import yaml
 
+from mycode.compact.models import CompactConfig
+
 
 class ConfigError(ValueError):
     """配置加载或校验失败。"""
@@ -31,6 +33,7 @@ class LLMConfig:
     model: str
     base_url: str
     api_key: str
+    compact: CompactConfig
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
     usage: UsageConfig = field(default_factory=UsageConfig)
 
@@ -52,6 +55,7 @@ def load_config(
 
     env = os.environ if environ is None else environ
     api_key = _resolve_api_key(str(raw["api_key"]), env)
+    compact = _parse_compact(raw)
     thinking = _parse_thinking(raw.get("thinking"))
     usage = _parse_usage(raw.get("usage"))
 
@@ -60,6 +64,7 @@ def load_config(
         model=str(raw["model"]),
         base_url=str(raw["base_url"]),
         api_key=api_key,
+        compact=compact,
         thinking=thinking,
         usage=usage,
     )
@@ -142,6 +147,46 @@ def _parse_usage(raw: object) -> UsageConfig:
     if not isinstance(value, bool):
         raise ConfigError("usage.request_stream_usage must be a boolean.")
     return UsageConfig(request_stream_usage=value)
+
+
+def _parse_compact(raw: Mapping[str, object]) -> CompactConfig:
+    if "compact" not in raw:
+        raise ConfigError("Missing required config field: compact")
+
+    compact_raw = raw["compact"]
+    if not isinstance(compact_raw, dict):
+        raise ConfigError("compact must be a YAML mapping.")
+    if "context_window_tokens" not in compact_raw:
+        raise ConfigError("Missing required compact config field: context_window_tokens")
+
+    context_window_tokens = _compact_int(
+        compact_raw["context_window_tokens"],
+        "compact.context_window_tokens",
+    )
+    defaults = CompactConfig(context_window_tokens=context_window_tokens)
+    return CompactConfig(
+        context_window_tokens=context_window_tokens,
+        tool_result_threshold_tokens=_compact_int(
+            compact_raw.get(
+                "tool_result_threshold_tokens",
+                defaults.tool_result_threshold_tokens,
+            ),
+            "compact.tool_result_threshold_tokens",
+        ),
+        tool_batch_threshold_tokens=_compact_int(
+            compact_raw.get(
+                "tool_batch_threshold_tokens",
+                defaults.tool_batch_threshold_tokens,
+            ),
+            "compact.tool_batch_threshold_tokens",
+        ),
+    )
+
+
+def _compact_int(value: object, field_name: str) -> int:
+    if type(value) is not int:
+        raise ConfigError(f"{field_name} must be an integer.")
+    return value
 
 
 def _optional_int(value: object) -> int | None:
