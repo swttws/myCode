@@ -32,6 +32,21 @@ class ToolResultCompactor:
         history: Sequence[ChatMessage],
         transaction: ArchiveTransaction,
     ) -> LightCompactResult:
+        try:
+            return self._compact_or_raise(history, transaction)
+        except OSError:
+            transaction.rollback()
+            return LightCompactResult(
+                history=tuple(history),
+                artifacts=(),
+                changed=False,
+            )
+
+    def _compact_or_raise(
+        self,
+        history: Sequence[ChatMessage],
+        transaction: ArchiveTransaction,
+    ) -> LightCompactResult:
         compacted = list(history)
         artifacts: list[ArchivedArtifact] = []
 

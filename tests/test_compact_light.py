@@ -5,6 +5,7 @@ import json
 from hashlib import sha256
 
 from mycode.compact.archive import ArchiveSession
+from mycode.compact import archive as archive_module
 from mycode.compact.estimator import TokenEstimator
 from mycode.compact.models import CompactConfig, CompactPolicy
 from mycode.llm import ChatMessage, MessageOrigin
@@ -153,6 +154,80 @@ def test_batch_does_not_combine_tool_results_across_round_boundaries(tmp_path):
     assert result.artifacts == ()
 
     transaction.rollback()
+    session.close()
+
+
+def test_compact_preview_and_small_tool_results_are_idempotent(tmp_path):
+    preview = ChatMessage(
+        role="tool",
+        content='{"path":"already-archived"}',
+        tool_call_id="call-preview",
+        origin=MessageOrigin.COMPACT_PREVIEW,
+    )
+    small = ChatMessage(role="tool", content="small", tool_call_id="call-small")
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+    compactor = _make_compactor(
+        CompactConfig(
+            context_window_tokens=30_000,
+            tool_result_threshold_tokens=8_000,
+            tool_batch_threshold_tokens=12_000,
+        )
+    )
+
+    result = compactor.compact([preview, small], transaction)
+
+    assert result.changed is False
+    assert result.history == (preview, small)
+    assert result.history[0] is preview
+    assert result.history[1] is small
+    assert result.artifacts == ()
+
+    transaction.rollback()
+    session.close()
+
+
+def test_archive_failure_returns_original_history_without_partial_replacements(
+    tmp_path,
+    monkeypatch,
+):
+    first = "a" * 34_000
+    second = "b" * 36_000
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+    compactor = _make_compactor(
+        CompactConfig(
+            context_window_tokens=40_000,
+            tool_result_threshold_tokens=8_000,
+            tool_batch_threshold_tokens=12_000,
+        )
+    )
+    history = [
+        ChatMessage(role="tool", content=first, tool_call_id="call-first"),
+        ChatMessage(role="tool", content=second, tool_call_id="call-second"),
+    ]
+    real_archive_text = archive_module.ArchiveTransaction.archive_text
+    calls = {"count": 0}
+
+    def fail_on_second_archive(self, *, kind, text):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("disk full")
+        return real_archive_text(self, kind=kind, text=text)
+
+    monkeypatch.setattr(
+        archive_module.ArchiveTransaction,
+        "archive_text",
+        fail_on_second_archive,
+    )
+
+    result = compactor.compact(history, transaction)
+
+    assert result.changed is False
+    assert result.history == tuple(history)
+    assert result.artifacts == ()
+    assert not list((session.session_dir / "tmp").glob("*"))
+
     session.close()
 
 
