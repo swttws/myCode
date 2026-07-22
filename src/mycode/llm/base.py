@@ -26,6 +26,9 @@ class MessageOrigin(str, Enum):
     SYSTEM_INSTRUCTION = "system_instruction"
     SYSTEM_REMINDER = "system_reminder"
     ENVIRONMENT_CONTEXT = "environment_context"
+    COMPACT_PREVIEW = "compact_preview"
+    COMPACT_SUMMARY = "compact_summary"
+    COMPACT_BOUNDARY = "compact_boundary"
 
 
 @dataclass(frozen=True)
