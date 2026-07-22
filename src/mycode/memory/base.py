@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 from mycode.llm import ChatMessage
 
@@ -13,6 +14,10 @@ class ConversationMemory(ABC):
 
     @abstractmethod
     def messages(self) -> list[ChatMessage]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def replace(self, messages: Sequence[ChatMessage]) -> None:
         raise NotImplementedError
 
     @abstractmethod
