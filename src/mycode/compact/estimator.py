@@ -57,6 +57,4 @@ class TokenEstimator:
             "name": tool.name,
             "description": tool.description,
             "parameters": tool.parameters,
-            "kind": tool.kind.value,
-            "grant_arguments": list(tool.grant_arguments),
         }

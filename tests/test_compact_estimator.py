@@ -33,7 +33,7 @@ def test_snapshot_counts_and_fingerprints_non_ascii_request_content():
     )
 
 
-def test_snapshot_includes_message_tool_fields_and_tool_definitions_but_not_origin():
+def test_snapshot_includes_message_and_provider_visible_tool_fields_but_not_origin():
     estimator = TokenEstimator()
     message = ChatMessage(
         role="assistant",
@@ -58,9 +58,9 @@ def test_snapshot_includes_message_tool_fields_and_tool_definitions_but_not_orig
     snapshot = estimator.snapshot([message], [tool])
 
     assert snapshot == RequestSnapshot(
-        ascii_chars=321,
-        non_ascii_chars=18,
-        fingerprint="23c100d16201068539c467b6bed1df755ccee176c4de983327a490370bc6a482",
+        ascii_chars=284,
+        non_ascii_chars=16,
+        fingerprint="5737fceeb5186023e4c9f5e112a0809298e93d9994b7e78475b396d4d0a9ce85",
     )
     assert snapshot == estimator.snapshot(
         [
@@ -74,6 +74,26 @@ def test_snapshot_includes_message_tool_fields_and_tool_definitions_but_not_orig
             )
         ],
         [tool],
+    )
+
+
+def test_snapshot_excludes_local_tool_kind_and_permission_metadata():
+    estimator = TokenEstimator()
+    parameters = {"type": "object", "properties": {"path": {"type": "string"}}}
+    read_tool = ToolDefinition("read_file", "Read", parameters, ToolKind.READ, ("path",))
+    write_tool = ToolDefinition("read_file", "Read", parameters, ToolKind.WRITE, ("path", "force"))
+
+    read_snapshot = estimator.snapshot([], [read_tool])
+    write_snapshot = estimator.snapshot([], [write_tool])
+
+    assert (
+        read_snapshot.ascii_chars,
+        read_snapshot.non_ascii_chars,
+        read_snapshot.fingerprint,
+    ) == (
+        write_snapshot.ascii_chars,
+        write_snapshot.non_ascii_chars,
+        write_snapshot.fingerprint,
     )
 
 
