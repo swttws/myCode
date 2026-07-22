@@ -42,14 +42,28 @@ class TokenEstimator:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
     @staticmethod
-    def _message_payload(message: ChatMessage) -> dict[str, str | None]:
-        return {
-            "role": message.role,
-            "content": message.content,
-            "tool_call_id": message.tool_call_id,
-            "tool_name": message.tool_name,
-            "tool_arguments": message.tool_arguments,
-        }
+    def _message_payload(message: ChatMessage) -> dict[str, object]:
+        if message.role == "assistant" and message.tool_call_id and message.tool_name:
+            return {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": message.tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": message.tool_name,
+                            "arguments": message.tool_arguments or "{}",
+                        },
+                    }
+                ],
+            }
+        if message.role == "tool" and message.tool_call_id:
+            return {
+                "role": "tool",
+                "tool_call_id": message.tool_call_id,
+                "content": message.content,
+            }
+        return {"role": message.role, "content": message.content}
 
     @staticmethod
     def _tool_payload(tool: ToolDefinition) -> dict[str, object]:

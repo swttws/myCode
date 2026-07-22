@@ -13,13 +13,22 @@ def test_estimate_text_uses_asymmetric_ascii_and_non_ascii_rates():
     assert estimator.estimate_text("abc\u4f60") == 2
 
 
+def test_estimate_text_rounds_non_ascii_character_boundaries_upward():
+    estimator = TokenEstimator()
+
+    assert estimator.estimate_text("\u4f60") == 1
+    assert estimator.estimate_text("\u4f60\u4f60") == 2
+    assert estimator.estimate_text("\u4f60\u4f60\u4f60") == 2
+    assert estimator.estimate_text("\u4f60\u4f60\u4f60\u4f60") == 3
+
+
 def test_snapshot_is_exact_for_an_ascii_request():
     snapshot = TokenEstimator().snapshot([ChatMessage(role="user", content="hello")], [])
 
     assert snapshot == RequestSnapshot(
-        ascii_chars=118,
+        ascii_chars=59,
         non_ascii_chars=0,
-        fingerprint="2ffe96c2f55135643c48083a5395a7f609b88e0101086e9a57a6c600c1b96eda",
+        fingerprint="1846a3ccfddb9a0957faa87b06821b6b7eafd16987b8b6723ec5035f1706a4c1",
     )
 
 
@@ -27,9 +36,9 @@ def test_snapshot_counts_and_fingerprints_non_ascii_request_content():
     snapshot = TokenEstimator().snapshot([ChatMessage(role="user", content="\u4f60\u597d")], [])
 
     assert snapshot == RequestSnapshot(
-        ascii_chars=113,
+        ascii_chars=54,
         non_ascii_chars=2,
-        fingerprint="d2dedac969aacbc54a60443d4fddc0322a4d95d1bfad11d860234570bfbac377",
+        fingerprint="4b46a7327ecc469ed596f986d822cd1c0bafe2f9fdb2ba3d54fb65b4e764ead0",
     )
 
 
@@ -58,15 +67,15 @@ def test_snapshot_includes_message_and_provider_visible_tool_fields_but_not_orig
     snapshot = estimator.snapshot([message], [tool])
 
     assert snapshot == RequestSnapshot(
-        ascii_chars=284,
-        non_ascii_chars=16,
-        fingerprint="5737fceeb5186023e4c9f5e112a0809298e93d9994b7e78475b396d4d0a9ce85",
+        ascii_chars=299,
+        non_ascii_chars=14,
+        fingerprint="82de632edc1a2ac09c3d8d2074063e0028e1da67800b182047d0fa49684ed362",
     )
     assert snapshot == estimator.snapshot(
         [
             ChatMessage(
                 role="assistant",
-                content="\u8c03\u7528",
+                content="\u5ffd\u7565\u7684\u5185\u5bb9",
                 tool_call_id="call-1",
                 tool_name="read_file",
                 tool_arguments="{\"\u8def\u5f84\":\"README.md\"}",
@@ -74,6 +83,59 @@ def test_snapshot_includes_message_and_provider_visible_tool_fields_but_not_orig
             )
         ],
         [tool],
+    )
+
+
+def test_snapshot_omits_tool_metadata_from_ordinary_messages():
+    estimator = TokenEstimator()
+    cases = (
+        (
+            ChatMessage(role="user", content="request"),
+            ChatMessage(
+                role="user",
+                content="request",
+                tool_call_id="call-1",
+                tool_name="read_file",
+                tool_arguments="{}",
+            ),
+        ),
+        (
+            ChatMessage(role="assistant", content="response"),
+            ChatMessage(role="assistant", content="response", tool_call_id="call-1"),
+        ),
+        (
+            ChatMessage(role="assistant", content="response"),
+            ChatMessage(role="assistant", content="response", tool_name="read_file", tool_arguments="{}"),
+        ),
+    )
+
+    for ordinary_message, message_with_metadata in cases:
+        assert estimator.snapshot([ordinary_message], []) == estimator.snapshot([message_with_metadata], [])
+
+
+def test_snapshot_uses_only_provider_visible_tool_result_fields():
+    estimator = TokenEstimator()
+    tool_result = ChatMessage(role="tool", content="output", tool_call_id="call-1")
+
+    assert estimator.snapshot([tool_result], []) == RequestSnapshot(
+        ascii_chars=84,
+        non_ascii_chars=0,
+        fingerprint="609f71e9801647f9ab6ebb8720e1665a6f5607704cac9cfe9f5a0d4ca6f2fc4f",
+    )
+    assert estimator.snapshot([tool_result], []) == estimator.snapshot(
+        [
+            ChatMessage(
+                role="tool",
+                content="output",
+                tool_call_id="call-1",
+                tool_name="ignored",
+                tool_arguments="{}",
+            )
+        ],
+        [],
+    )
+    assert estimator.snapshot([tool_result], []) != estimator.snapshot(
+        [ChatMessage(role="tool", content="output", tool_call_id="call-2")], []
     )
 
 
