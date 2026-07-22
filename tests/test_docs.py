@@ -1,7 +1,9 @@
+import re
 from pathlib import Path
 
 import yaml
 
+from mycode.config import load_config
 from mycode.mcp import MCPTransportKind, load_mcp_config
 
 
@@ -42,6 +44,37 @@ def test_example_configs_exist_and_use_environment_variables():
         text = Path(path).read_text(encoding="utf-8")
         assert env_ref in text
         assert "sk-" not in text
+
+
+def test_readme_primary_config_examples_load(tmp_path):
+    readme = Path("README.md").read_text(encoding="utf-8")
+    yaml_blocks = re.findall(r"```yaml\n(.*?)\n```", readme, re.DOTALL)
+    config_snippets = [block for block in yaml_blocks if block.startswith("protocol:")]
+
+    assert len(config_snippets) == 4
+
+    configs = []
+    for index, snippet in enumerate(config_snippets):
+        config_path = tmp_path / f"readme-config-{index}.yaml"
+        config_path.write_text(snippet, encoding="utf-8")
+        configs.append(
+            load_config(
+                config_path,
+                cwd=tmp_path,
+                home=tmp_path,
+                environ={
+                    "OPENAI_API_KEY": "sk-openai-test",
+                    "ANTHROPIC_API_KEY": "sk-anthropic-test",
+                },
+            )
+        )
+
+    assert [config.protocol for config in configs] == [
+        "openai_responses",
+        "openai_responses",
+        "openai_chat",
+        "anthropic",
+    ]
 
 
 def test_readme_and_repository_example_document_stage_05_permission_boundaries():

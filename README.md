@@ -61,13 +61,15 @@ mycode-dev --config examples/mycode.openai-responses.yaml
 
 ## 配置格式
 
-YAML 配置包含四个核心字段：
+YAML 配置包含五个必填字段：
 
 ```yaml
 protocol: openai_responses
 model: your-openai-model
 base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
+compact:
+  context_window_tokens: 128000
 ```
 
 `api_key` 可以直接写字面值，也可以使用 `${ENV_NAME}` 引用环境变量。建议使用环境变量。
@@ -118,6 +120,8 @@ protocol: openai_responses
 model: your-openai-model
 base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
+compact:
+  context_window_tokens: 128000
 ```
 
 `openai_responses` 支持 Stage 03 的工具系统，会把工具注册为 Responses API 的 function tools。工具读写分类只用于本地 Agent 调度，不会进入 OpenAI payload。
@@ -129,6 +133,8 @@ protocol: openai_chat
 model: your-openai-model
 base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
+compact:
+  context_window_tokens: 128000
 ```
 
 `openai_chat` 支持 Stage 03 的工具系统，也适合很多 OpenAI-compatible 网关。工具调用历史和工具结果历史会继续转换为 Chat Completions 可理解的 message。
@@ -140,6 +146,8 @@ protocol: anthropic
 model: your-claude-model
 base_url: https://api.anthropic.com
 api_key: ${ANTHROPIC_API_KEY}
+compact:
+  context_window_tokens: 200000
 thinking:
   enabled: true
   budget_tokens: 2048
