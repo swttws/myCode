@@ -72,6 +72,90 @@ def test_single_tool_result_at_threshold_is_not_archived(tmp_path):
     session.close()
 
 
+def test_batch_archives_largest_result_and_reestimates_before_continuing(tmp_path):
+    first = "a" * 26_000
+    second = "b" * 28_000
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+    compactor = _make_compactor(
+        CompactConfig(
+            context_window_tokens=30_000,
+            tool_result_threshold_tokens=8_000,
+            tool_batch_threshold_tokens=12_000,
+        )
+    )
+    history = [
+        ChatMessage(role="tool", content=first, tool_call_id="call-first"),
+        ChatMessage(role="tool", content=second, tool_call_id="call-second"),
+    ]
+
+    result = compactor.compact(history, transaction)
+
+    assert result.changed is True
+    assert len(result.artifacts) == 1
+    assert result.artifacts[0].original_chars == len(second)
+    assert result.history[0] == history[0]
+    assert result.history[1].origin is MessageOrigin.COMPACT_PREVIEW
+    assert json.loads(result.history[1].content)["tool_call_id"] == "call-second"
+
+    transaction.rollback()
+    session.close()
+
+
+def test_batch_uses_original_order_when_estimated_sizes_are_equal(tmp_path):
+    content = "x" * 26_000
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+    compactor = _make_compactor(
+        CompactConfig(
+            context_window_tokens=30_000,
+            tool_result_threshold_tokens=8_000,
+            tool_batch_threshold_tokens=12_000,
+        )
+    )
+    history = [
+        ChatMessage(role="tool", content=content, tool_call_id="call-first"),
+        ChatMessage(role="tool", content=content, tool_call_id="call-second"),
+    ]
+
+    result = compactor.compact(history, transaction)
+
+    assert len(result.artifacts) == 1
+    assert result.history[0].origin is MessageOrigin.COMPACT_PREVIEW
+    assert result.history[1] == history[1]
+    assert json.loads(result.history[0].content)["tool_call_id"] == "call-first"
+
+    transaction.rollback()
+    session.close()
+
+
+def test_batch_does_not_combine_tool_results_across_round_boundaries(tmp_path):
+    content = "x" * 26_000
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+    compactor = _make_compactor(
+        CompactConfig(
+            context_window_tokens=30_000,
+            tool_result_threshold_tokens=8_000,
+            tool_batch_threshold_tokens=12_000,
+        )
+    )
+    history = [
+        ChatMessage(role="tool", content=content, tool_call_id="call-first"),
+        ChatMessage(role="assistant", content="next round"),
+        ChatMessage(role="tool", content=content, tool_call_id="call-second"),
+    ]
+
+    result = compactor.compact(history, transaction)
+
+    assert result.changed is False
+    assert result.history == tuple(history)
+    assert result.artifacts == ()
+
+    transaction.rollback()
+    session.close()
+
+
 def _make_compactor(config):
     light_module = importlib.import_module("mycode.compact.light")
     return light_module.ToolResultCompactor(config=config)
