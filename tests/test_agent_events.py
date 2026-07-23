@@ -6,6 +6,7 @@ from mycode.agent import (
     AgentMode,
     ApprovalRequest,
 )
+from mycode.compact.models import CompactAction, CompactReport, CompactStatus
 from mycode.llm import UsageObservation
 from mycode.permission.models import (
     ApprovalDecisionType,
@@ -28,12 +29,14 @@ def test_agent_event_type_declares_public_contract():
         "cancelled",
         "approval_required",
         "usage",
+        "compaction",
     ]
 
 
 def test_agent_error_code_declares_machine_readable_values():
     assert AgentErrorCode.MAX_ROUNDS_EXCEEDED.value == "max_rounds_exceeded"
     assert AgentErrorCode.PROMPT_ERROR.value == "prompt_error"
+    assert AgentErrorCode.COMPACTION_ERROR.value == "compaction_error"
 
 
 def test_agent_event_can_carry_tool_approval_and_error_context():
@@ -95,3 +98,21 @@ def test_agent_usage_event_carries_normalized_observation():
 
     assert event.round_index == 2
     assert event.usage == observation
+
+
+def test_agent_compaction_event_carries_report():
+    report = CompactReport(
+        status=CompactStatus.COMPACTED,
+        actions=(CompactAction.LIGHT, CompactAction.HEAVY),
+        before_tokens=50_000,
+        after_tokens=20_000,
+        archived_count=3,
+        attempts=2,
+        circuit_open=False,
+        message_zh="上下文已压缩。",
+    )
+
+    event = AgentEvent(type=AgentEventType.COMPACTION, round_index=1, compaction=report)
+
+    assert event.round_index == 1
+    assert event.compaction == report
