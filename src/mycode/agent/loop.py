@@ -16,6 +16,7 @@ from mycode.agent.history import (
 )
 from mycode.agent.scheduler import ToolScheduleError, build_tool_batches
 from mycode.agent.state import AgentMode
+from mycode.compact.models import CompactAction, CompactError
 from mycode.llm import BaseLLM, LLMError, StreamEventType
 from mycode.memory import ConversationMemory
 from mycode.prompt import (
@@ -46,6 +47,7 @@ class AgentLoop:
         tool_executor: ToolExecutor,
         tool_registry: ToolRegistry,
         permission: PermissionInterceptor,
+        context_manager,
         config: AgentConfig | None = None,
         prompt_builder: PromptBuilder | None = None,
     ) -> None:
@@ -56,6 +58,7 @@ class AgentLoop:
         self.config = config or AgentConfig()
         self._permission = permission
         self._prompt_builder = prompt_builder or create_default_prompt_builder(Path.cwd(), self.config.prompt)
+        self._context_manager = context_manager
         self._next_turn_id = 0
 
     def clear_memory(self) -> None:
@@ -88,23 +91,49 @@ class AgentLoop:
                 assistant_parts: list[str] = []
                 tool_calls = []
                 # 只注入延迟工具摘要；模型通过 tool_search 发现后，完整 schema 才进入下一轮。
-                deferred_reminder = _make_deferred_tool_reminder(
-                    self._tool_registry.deferred_summaries()
-                )
-                round_turn_context = (
-                    replace(
-                        turn_context,
-                        reminders=turn_context.reminders + (deferred_reminder,),
+                def build_request(history):
+                    deferred_reminder = _make_deferred_tool_reminder(
+                        self._tool_registry.deferred_summaries()
                     )
-                    if deferred_reminder is not None
-                    else turn_context
-                )
-                prompt_request = self._prompt_builder.build(
-                    history=self._memory.messages(),
-                    tools=self._tool_registry.model_definitions(),
-                    turn=round_turn_context,
-                    round_index=round_index,
-                )
+                    round_turn_context = (
+                        replace(
+                            turn_context,
+                            reminders=turn_context.reminders + (deferred_reminder,),
+                        )
+                        if deferred_reminder is not None
+                        else turn_context
+                    )
+                    return self._prompt_builder.build(
+                        history=history,
+                        tools=self._tool_registry.model_definitions(),
+                        turn=round_turn_context,
+                        round_index=round_index,
+                    )
+
+                try:
+                    prepared_context = await self._context_manager.prepare_auto(
+                        build_request=build_request,
+                        run_deadline=run_deadline,
+                    )
+                except CompactError as exc:
+                    yield AgentEvent(
+                        AgentEventType.ERROR,
+                        content=exc.report.message_zh or str(exc),
+                        round_index=round_index,
+                        error_code=AgentErrorCode.COMPACTION_ERROR,
+                        compaction=exc.report,
+                    )
+                    return
+
+                if _has_compaction_action(prepared_context.report):
+                    yield AgentEvent(
+                        AgentEventType.COMPACTION,
+                        content=prepared_context.report.message_zh,
+                        round_index=round_index,
+                        compaction=prepared_context.report,
+                    )
+
+                prompt_request = prepared_context.request
                 stream = self._llm.stream_chat(
                     list(prompt_request.messages),
                     tools=list(prompt_request.tools),
@@ -391,6 +420,10 @@ def _run_timeout_won(model_timeout: float | None, run_remaining: float | None) -
     if model_timeout is None:
         return True
     return run_remaining <= model_timeout
+
+
+def _has_compaction_action(report) -> bool:
+    return any(action is not CompactAction.NONE for action in report.actions)
 
 
 async def _execute_tool_with_run_deadline(

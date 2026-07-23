@@ -14,6 +14,7 @@ from mycode.memory import InMemoryConversationMemory
 from mycode.permission.models import PermissionConfigError
 from mycode.permission.service import PermissionInterceptor, PermissionService
 from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
+from tests.helpers import PassthroughContextManager
 
 
 class ScriptedLLM(BaseLLM):
@@ -98,13 +99,15 @@ def _final(text="done"):
 def _build_loop(workspace, home, llm, tools, *, service=None):
     permissions = service or PermissionService.create(workspace, home=home)
     registry = ToolRegistry(tools)
+    memory = InMemoryConversationMemory()
     loop = AgentLoop(
         llm=llm,
-        memory=InMemoryConversationMemory(),
+        memory=memory,
         tool_executor=ToolExecutor(registry),
         tool_registry=registry,
         permission=PermissionInterceptor(permissions),
         prompt_builder=FakePromptBuilder(),
+        context_manager=PassthroughContextManager(memory),
     )
     return loop, permissions
 

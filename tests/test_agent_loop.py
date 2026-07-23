@@ -16,10 +16,21 @@ from mycode.agent import (
     make_tool_result_message,
     make_user_message,
 )
+from mycode.compact.models import (
+    CompactAction,
+    CompactError,
+    CompactFailureCode,
+    CompactReport,
+    CompactStatus,
+    PreparedContext,
+    RequestSnapshot,
+    TokenEstimate,
+)
 from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType
 from mycode.llm import MessageOrigin
 from mycode.mcp import MCPToolWrapper, RemoteTool, ToolSearch
 from mycode.memory import InMemoryConversationMemory
+from mycode.prompt.models import PromptBuildMetadata, PromptBuildResult
 from mycode.permission.models import (
     ApprovalDecision,
     ApprovalDecisionType,
@@ -29,6 +40,7 @@ from mycode.permission.models import (
 )
 from mycode.permission.service import PermissionInterceptor, PermissionService
 from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
+from tests.helpers import PassthroughContextManager
 
 
 class ScriptedLLM(BaseLLM):
@@ -36,8 +48,11 @@ class ScriptedLLM(BaseLLM):
         self.scripts = list(scripts)
         self.requests: list[list[ChatMessage]] = []
         self.tool_requests = []
+        self.on_stream = None
 
     async def stream_chat(self, messages, tools=None):
+        if self.on_stream is not None:
+            self.on_stream()
         self.requests.append(list(messages))
         self.tool_requests.append(tools)
         script = self.scripts.pop(0)
@@ -210,6 +225,7 @@ def make_mcp_loop(llm, memory, remote, pool, permission=None):
             tool_executor=ToolExecutor(registry),
             tool_registry=registry,
             permission=permission or FakePermission(),
+            context_manager=PassthroughContextManager(memory),
         ),
         registry,
     )
@@ -223,26 +239,114 @@ async def collect_async(async_iterable):
 
 
 def make_loop(llm, memory=None, tools=None, permission=None):
+    memory = memory or InMemoryConversationMemory()
     registry = ToolRegistry(tools or [NoopTool()])
     return AgentLoop(
         llm=llm,
-        memory=memory or InMemoryConversationMemory(),
+        memory=memory,
         tool_executor=ToolExecutor(registry),
         tool_registry=registry,
         permission=permission or FakePermission(),
+        context_manager=PassthroughContextManager(memory),
     )
 
 
 def make_configured_loop(llm, memory=None, tools=None, config=None, permission=None):
+    memory = memory or InMemoryConversationMemory()
     registry = ToolRegistry(tools or [NoopTool()])
     return AgentLoop(
         llm=llm,
-        memory=memory or InMemoryConversationMemory(),
+        memory=memory,
         tool_executor=ToolExecutor(registry),
         tool_registry=registry,
         config=config,
         permission=permission or FakePermission(),
+        context_manager=PassthroughContextManager(memory),
     )
+
+
+class TrackingMemory(InMemoryConversationMemory):
+    def __init__(self, order):
+        super().__init__()
+        self._order = order
+
+    def append(self, message):
+        if message.role == "user":
+            self._order.append("memory.append_user")
+        return super().append(message)
+
+
+class TrackingPromptBuilder:
+    def __init__(self, order):
+        self._order = order
+
+    def begin_turn(self, *, turn_id, plan_only):
+        return (turn_id, plan_only)
+
+    def build(self, *, history, tools, turn, round_index):
+        self._order.append("prompt.build")
+        return PromptBuildResult(
+            messages=tuple(history),
+            tools=tuple(tools),
+            metadata=PromptBuildMetadata((), "test", ()),
+        )
+
+
+class TrackingContextManager(PassthroughContextManager):
+    def __init__(self, memory, order):
+        super().__init__(memory)
+        self._order = order
+
+    async def prepare_auto(self, *, build_request, run_deadline):
+        self._order.append("context.prepare_auto")
+        return await super().prepare_auto(
+            build_request=build_request,
+            run_deadline=run_deadline,
+        )
+
+
+class PreparedRequestContextManager:
+    def __init__(self, request):
+        self.request = request
+        self.prepare_calls = 0
+        self.report = CompactReport(
+            status=CompactStatus.COMPACTED,
+            actions=(CompactAction.LIGHT,),
+            before_tokens=100,
+            after_tokens=40,
+            archived_count=1,
+            attempts=0,
+            circuit_open=False,
+            message_zh="上下文已压缩。",
+        )
+
+    async def prepare_auto(self, *, build_request, run_deadline):
+        self.prepare_calls += 1
+        build_request((ChatMessage(role="user", content="pre-compact"),))
+        return PreparedContext(
+            request=self.request,
+            snapshot=RequestSnapshot(ascii_chars=1, non_ascii_chars=0, fingerprint="prepared"),
+            estimate=TokenEstimate(tokens=40, source="full_chars", delta_tokens=0),
+            report=self.report,
+        )
+
+
+class FailingContextManager:
+    def __init__(self):
+        self.report = CompactReport(
+            status=CompactStatus.FAILED,
+            actions=(CompactAction.HEAVY,),
+            before_tokens=100,
+            after_tokens=100,
+            archived_count=0,
+            attempts=3,
+            circuit_open=True,
+            failure_code=CompactFailureCode.INVALID_FORMAT,
+            message_zh="压缩失败。",
+        )
+
+    async def prepare_auto(self, *, build_request, run_deadline):
+        raise CompactError(self.report)
 
 
 def test_agent_history_helpers_create_expected_messages():
@@ -276,6 +380,93 @@ def test_agent_history_helpers_create_expected_messages():
         "content": {"text": "hello"},
         "error": None,
     }
+
+
+def test_agent_loop_prepares_context_after_user_append_before_llm_send():
+    order = []
+    memory = TrackingMemory(order)
+    llm = ScriptedLLM([[StreamEvent(StreamEventType.DONE)]])
+    llm.on_stream = lambda: order.append("llm.stream_chat")
+    registry = ToolRegistry([NoopTool()])
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        prompt_builder=TrackingPromptBuilder(order),
+        context_manager=TrackingContextManager(memory, order),
+    )
+
+    asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert order == [
+        "memory.append_user",
+        "context.prepare_auto",
+        "prompt.build",
+        "llm.stream_chat",
+    ]
+    assert llm.requests[0] == [ChatMessage(role="user", content="hello")]
+
+
+def test_agent_loop_sends_prepared_context_request_and_reports_compaction():
+    memory = InMemoryConversationMemory()
+    prepared_request = PromptBuildResult(
+        messages=(ChatMessage(role="user", content="compacted request"),),
+        tools=(),
+        metadata=PromptBuildMetadata((), "prepared", ()),
+    )
+    context_manager = PreparedRequestContextManager(prepared_request)
+    llm = ScriptedLLM(
+        [[StreamEvent(StreamEventType.TEXT_DELTA, "ok"), StreamEvent(StreamEventType.DONE)]]
+    )
+    registry = ToolRegistry([NoopTool()])
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        context_manager=context_manager,
+    )
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert [event.type for event in events] == [
+        AgentEventType.USER_MESSAGE,
+        AgentEventType.COMPACTION,
+        AgentEventType.TEXT_DELTA,
+        AgentEventType.FINAL_RESPONSE,
+    ]
+    assert events[1].compaction == context_manager.report
+    assert llm.requests == [[ChatMessage(role="user", content="compacted request")]]
+    assert llm.tool_requests == [[]]
+
+
+def test_agent_loop_stops_before_llm_when_context_compaction_fails():
+    memory = InMemoryConversationMemory()
+    llm = ScriptedLLM([[StreamEvent(StreamEventType.DONE)]])
+    registry = ToolRegistry([NoopTool()])
+    context_manager = FailingContextManager()
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        context_manager=context_manager,
+    )
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert [event.type for event in events] == [
+        AgentEventType.USER_MESSAGE,
+        AgentEventType.ERROR,
+    ]
+    assert events[-1].content == "压缩失败。"
+    assert events[-1].error_code == AgentErrorCode.COMPACTION_ERROR
+    assert events[-1].compaction == context_manager.report
+    assert llm.requests == []
 
 
 def test_agent_loop_streams_text_and_final_response():
