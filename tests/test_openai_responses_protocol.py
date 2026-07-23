@@ -2,11 +2,15 @@ import json
 
 import httpx
 
+from mycode.compact.models import CompactConfig
 from mycode.config import LLMConfig
-from mycode.llm import ChatMessage, StreamEvent, StreamEventType
+from mycode.llm import ChatMessage, StreamEvent, StreamEventType, UsageObservation
 from mycode.protocols.openai_responses import OpenAIResponsesLLM
 from mycode.tool import ToolCall, ToolDefinition, ToolKind
 from tests.helpers import collect_async
+
+
+TEST_COMPACT_CONFIG = CompactConfig(context_window_tokens=128_000)
 
 
 def test_openai_responses_maps_output_text_and_done_events():
@@ -31,6 +35,7 @@ def test_openai_responses_maps_output_text_and_done_events():
         model="gpt-test",
         base_url="https://api.openai.test/v1",
         api_key="sk-test",
+        compact=TEST_COMPACT_CONFIG,
     )
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
@@ -63,7 +68,7 @@ def test_openai_responses_includes_tools_when_provided():
             content='event: response.completed\ndata: {"type":"response.completed"}\n\n'.encode("utf-8"),
         )
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     tool = ToolDefinition(
         name="read_file",
@@ -106,7 +111,7 @@ def test_openai_responses_omits_tools_when_none():
             content='event: response.completed\ndata: {"type":"response.completed"}\n\n'.encode("utf-8"),
         )
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     import asyncio
@@ -116,6 +121,63 @@ def test_openai_responses_omits_tools_when_none():
     payload = json.loads(request_log[0].content)
     assert "tools" not in payload
     assert "parallel_tool_calls" not in payload
+
+
+def test_openai_responses_maps_completed_usage_to_done():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = "\n".join(
+            [
+                "event: response.completed",
+                (
+                    'data: {"type":"response.completed","response":{"usage":{'
+                    '"input_tokens":21,"output_tokens":5,"total_tokens":26,'
+                    '"input_tokens_details":{"cached_tokens":7}}}}'
+                ),
+                "",
+            ]
+        )
+        return httpx.Response(200, content=body.encode("utf-8"))
+
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
+    llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    import asyncio
+
+    events = asyncio.run(collect_async(llm.stream_chat([ChatMessage(role="user", content="hello")])))
+
+    assert events == [
+        StreamEvent(
+            StreamEventType.DONE,
+            usage=UsageObservation(
+                provider="openai_responses",
+                input_tokens=21,
+                output_tokens=5,
+                total_tokens=26,
+                cache_read_tokens=7,
+            ),
+        )
+    ]
+
+
+def test_openai_responses_ignores_missing_or_invalid_completed_usage():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = "\n".join(
+            [
+                "event: response.completed",
+                'data: {"type":"response.completed","response":{"usage":{"input_tokens":"bad"}}}',
+                "",
+            ]
+        )
+        return httpx.Response(200, content=body.encode("utf-8"))
+
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
+    llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    import asyncio
+
+    events = asyncio.run(collect_async(llm.stream_chat([ChatMessage(role="user", content="hello")])))
+
+    assert events == [StreamEvent(StreamEventType.DONE)]
 
 
 def test_openai_responses_serializes_tool_call_history():
@@ -128,7 +190,7 @@ def test_openai_responses_serializes_tool_call_history():
             content='event: response.completed\ndata: {"type":"response.completed"}\n\n'.encode("utf-8"),
         )
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     messages = [
         ChatMessage(role="assistant", content="", tool_call_id="call-1", tool_name="read_file", tool_arguments='{"path":"README.md"}')
@@ -159,7 +221,7 @@ def test_openai_responses_serializes_tool_result_history():
             content='event: response.completed\ndata: {"type":"response.completed"}\n\n'.encode("utf-8"),
         )
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     messages = [ChatMessage(role="tool", content='{"ok":true}', tool_call_id="call-1")]
 
@@ -200,7 +262,7 @@ def test_openai_responses_streams_function_call_arguments_as_tool_call():
         )
         return httpx.Response(200, content=body.encode("utf-8"))
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     import asyncio
@@ -238,7 +300,7 @@ def test_openai_responses_preserves_invalid_function_arguments():
         )
         return httpx.Response(200, content=body.encode("utf-8"))
 
-    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test")
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
     llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     import asyncio

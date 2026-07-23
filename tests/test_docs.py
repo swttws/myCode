@@ -1,7 +1,9 @@
+import re
 from pathlib import Path
 
 import yaml
 
+from mycode.config import load_config
 from mycode.mcp import MCPTransportKind, load_mcp_config
 
 
@@ -42,6 +44,78 @@ def test_example_configs_exist_and_use_environment_variables():
         text = Path(path).read_text(encoding="utf-8")
         assert env_ref in text
         assert "sk-" not in text
+
+
+def test_primary_example_configs_load_with_compact_settings(tmp_path):
+    examples = {
+        "examples/mycode.anthropic.yaml": {
+            "environment": {"ANTHROPIC_API_KEY": "sk-anthropic-test"},
+        },
+        "examples/mycode.openai-responses.yaml": {
+            "environment": {"OPENAI_API_KEY": "sk-openai-test"},
+        },
+        "examples/mycode.openai-chat.yaml": {
+            "environment": {"OPENAI_API_KEY": "sk-openai-test"},
+            "overrides": {
+                "model": "gpt-test",
+                "base_url": "https://api.openai.com/v1",
+            },
+        },
+    }
+
+    configs = {}
+    for path, settings in examples.items():
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        data.update(settings.get("overrides", {}))
+        config_path = tmp_path / Path(path).name
+        config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+        configs[path] = load_config(
+            config_path,
+            cwd=tmp_path,
+            home=tmp_path,
+            environ=settings["environment"],
+        )
+
+    assert [config.protocol for config in configs.values()] == [
+        "anthropic",
+        "openai_responses",
+        "openai_chat",
+    ]
+    assert configs["examples/mycode.anthropic.yaml"].compact.context_window_tokens == 200_000
+    assert configs["examples/mycode.openai-responses.yaml"].compact.context_window_tokens == 128_000
+    assert configs["examples/mycode.openai-chat.yaml"].compact.context_window_tokens == 128_000
+    assert configs["examples/mycode.openai-chat.yaml"].usage.request_stream_usage is True
+
+
+def test_readme_primary_config_examples_load(tmp_path):
+    readme = Path("README.md").read_text(encoding="utf-8")
+    yaml_blocks = re.findall(r"```yaml\n(.*?)\n```", readme, re.DOTALL)
+    config_snippets = [block for block in yaml_blocks if block.startswith("protocol:")]
+
+    assert len(config_snippets) == 4
+
+    configs = []
+    for index, snippet in enumerate(config_snippets):
+        config_path = tmp_path / f"readme-config-{index}.yaml"
+        config_path.write_text(snippet, encoding="utf-8")
+        configs.append(
+            load_config(
+                config_path,
+                cwd=tmp_path,
+                home=tmp_path,
+                environ={
+                    "OPENAI_API_KEY": "sk-openai-test",
+                    "ANTHROPIC_API_KEY": "sk-anthropic-test",
+                },
+            )
+        )
+
+    assert [config.protocol for config in configs] == [
+        "openai_responses",
+        "openai_responses",
+        "openai_chat",
+        "anthropic",
+    ]
 
 
 def test_readme_and_repository_example_document_stage_05_permission_boundaries():
@@ -127,6 +201,32 @@ def test_readme_documents_stage_06_mcp_behavior_and_boundaries():
         "HTTP+SSE",
         "热重载",
         "持久化缓存",
+    ]
+
+    assert all(value in readme for value in required)
+
+
+def test_readme_documents_stage_07_context_management():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    required = [
+        "Stage 07",
+        "compact.context_window_tokens",
+        "context_window_tokens",
+        "8K",
+        "12K",
+        "2K",
+        "13K",
+        "3K",
+        "10K",
+        "/compact",
+        "read_compact_artifact",
+        "~/.mycode/projects",
+        "24 小时",
+        "熔断",
+        "应急压缩",
+        "分段读取",
+        "归档",
+        "上下文缓存",
     ]
 
     assert all(value in readme for value in required)

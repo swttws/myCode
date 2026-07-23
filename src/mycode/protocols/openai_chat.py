@@ -4,7 +4,7 @@ import json
 import httpx
 
 from mycode.config import LLMConfig
-from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType
+from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType, UsageObservation
 from mycode.tool import ToolCall, ToolDefinition
 from mycode.protocols.common import join_url, parse_json_object, raise_for_bad_status
 from mycode.protocols.sse import parse_sse_events_async
@@ -25,6 +25,8 @@ class OpenAIChatLLM(BaseLLM):
         if tools:
             payload["tools"] = [_tool_to_openai_spec(tool) for tool in tools]
             payload["parallel_tool_calls"] = False
+        if self.config.usage.request_stream_usage:
+            payload["stream_options"] = {"include_usage": True}
         headers = {
             "authorization": f"Bearer {self.config.api_key}",
             "accept": "text/event-stream",
@@ -34,13 +36,17 @@ class OpenAIChatLLM(BaseLLM):
         async with self._client.stream("POST", url, headers=headers, json=payload) as response:
             raise_for_bad_status(response)
             pending_tool_calls: dict[str, dict[str, str]] = {}
+            pending_usage: UsageObservation | None = None
             async for sse_event in parse_sse_events_async(response.aiter_lines()):
                 if sse_event.data == "[DONE]":
                     for event in _flush_openai_chat_tool_calls(pending_tool_calls):
                         yield event
-                    yield StreamEvent(StreamEventType.DONE)
+                    yield StreamEvent(StreamEventType.DONE, usage=pending_usage)
                     continue
                 payload = parse_json_object(sse_event.data)
+                usage = _parse_openai_chat_usage(payload.get("usage"))
+                if usage is not None:
+                    pending_usage = usage
                 _accumulate_openai_chat_tool_calls(payload, pending_tool_calls)
                 event = _map_openai_chat_event(payload)
                 if event is not None:
@@ -90,6 +96,35 @@ def _map_openai_chat_event(payload: dict[str, object]) -> StreamEvent | None:
     if not isinstance(delta, dict) or "content" not in delta:
         return None
     return StreamEvent(StreamEventType.TEXT_DELTA, str(delta["content"]))
+
+
+def _parse_openai_chat_usage(raw: object) -> UsageObservation | None:
+    if not isinstance(raw, dict):
+        return None
+    input_tokens = _non_negative_int(raw.get("prompt_tokens"))
+    output_tokens = _non_negative_int(raw.get("completion_tokens"))
+    total_tokens = _non_negative_int(raw.get("total_tokens"))
+    details = raw.get("prompt_tokens_details")
+    cache_read_tokens = (
+        _non_negative_int(details.get("cached_tokens"))
+        if isinstance(details, dict)
+        else None
+    )
+    if all(value is None for value in (input_tokens, output_tokens, total_tokens, cache_read_tokens)):
+        return None
+    return UsageObservation(
+        provider="openai_chat",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cache_read_tokens=cache_read_tokens,
+    )
+
+
+def _non_negative_int(value: object) -> int | None:
+    if type(value) is int and value >= 0:
+        return value
+    return None
 
 
 def _accumulate_openai_chat_tool_calls(

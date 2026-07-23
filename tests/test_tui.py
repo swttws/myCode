@@ -8,6 +8,12 @@ from mycode.agent import (
     AgentEventType,
 )
 from mycode import tui as tui_module
+from mycode.compact.models import (
+    CompactAction,
+    CompactFailureCode,
+    CompactReport,
+    CompactStatus,
+)
 from mycode.permission.models import (
     ApprovalDecisionType,
     ApprovalRequest,
@@ -21,10 +27,12 @@ from mycode.tool import ToolCall, ToolResult
 
 
 class FakeSession:
-    def __init__(self, scripts=None):
+    def __init__(self, scripts=None, compact_scripts=None):
         self.scripts = list(scripts or [])
+        self.compact_scripts = list(compact_scripts or [])
         self.sent: list[str] = []
         self.send_kwargs = []
+        self.compact_count = 0
         self.clear_count = 0
         self.plan_only = False
         self.permission = (PermissionMode.DEFAULT, None)
@@ -33,6 +41,11 @@ class FakeSession:
         self.sent.append(user_text)
         self.send_kwargs.append(kwargs)
         for event in self.scripts.pop(0):
+            yield event
+
+    async def compact(self):
+        self.compact_count += 1
+        for event in self.compact_scripts.pop(0):
             yield event
 
     def clear(self):
@@ -83,6 +96,31 @@ def make_console():
     return console, output
 
 
+def compact_report(
+    *,
+    status=CompactStatus.COMPACTED,
+    actions=(CompactAction.HEAVY,),
+    before=80_000,
+    after=20_000,
+    archived=3,
+    attempts=1,
+    circuit=False,
+    failure_code=None,
+    message="",
+):
+    return CompactReport(
+        status=status,
+        actions=actions,
+        before_tokens=before,
+        after_tokens=after,
+        archived_count=archived,
+        attempts=attempts,
+        circuit_open=circuit,
+        failure_code=failure_code,
+        message_zh=message,
+    )
+
+
 def test_tui_streams_assistant_text_and_exits():
     console, output = make_console()
     session = FakeSession(
@@ -100,7 +138,7 @@ def test_tui_streams_assistant_text_and_exits():
     assert "hi" in output.getvalue()
 
 
-def test_tui_announces_stage_05_permission_mode():
+def test_tui_announces_stage_07_context_management():
     console, output = make_console()
     session = FakeSession()
     inputs = iter(["/exit"])
@@ -110,8 +148,9 @@ def test_tui_announces_stage_05_permission_mode():
 
     assert asyncio.run(tui.run()) == 0
     text = output.getvalue()
-    assert "Stage 05" in text
+    assert "Stage 07" in text
     assert "Agent" in text
+    assert "/compact" in text
     assert "纯对话模式" not in text
 
 
@@ -126,6 +165,91 @@ def test_tui_clear_command_clears_memory_without_llm_request():
     assert asyncio.run(tui.run()) == 0
     assert session.clear_count == 1
     assert session.sent == []
+
+
+def test_tui_compact_command_uses_session_compact_without_send():
+    console, output = make_console()
+    report = compact_report(message="手动压缩完成。")
+    session = FakeSession(
+        compact_scripts=[[AgentEvent(AgentEventType.COMPACTION, compaction=report)]]
+    )
+    inputs = iter(["/compact", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    assert session.compact_count == 1
+    assert session.sent == []
+    assert "手动压缩完成" in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [
+        (
+            compact_report(message="上下文已压缩。"),
+            ("上下文已压缩", "归档 3", "80000 → 20000"),
+        ),
+        (
+            compact_report(
+                status=CompactStatus.NO_OP,
+                actions=(CompactAction.NONE,),
+                before=12_000,
+                after=12_000,
+                archived=0,
+                attempts=0,
+                message="没有可压缩的旧历史。",
+            ),
+            ("无需压缩", "没有可压缩的旧历史"),
+        ),
+        (
+            compact_report(
+                actions=(CompactAction.HEAVY, CompactAction.EMERGENCY),
+                attempts=3,
+                circuit=True,
+                message="已执行应急压缩。",
+            ),
+            ("应急压缩", "熔断已打开", "尝试 3"),
+        ),
+        (
+            compact_report(
+                status=CompactStatus.FAILED,
+                actions=(CompactAction.HEAVY,),
+                before=80_000,
+                after=80_000,
+                archived=0,
+                attempts=3,
+                failure_code=CompactFailureCode.ARCHIVE_ERROR,
+                message="归档写入失败。",
+            ),
+            ("压缩失败", "archive_error", "归档写入失败"),
+        ),
+        (
+            compact_report(
+                actions=(CompactAction.EMERGENCY,),
+                attempts=0,
+                circuit=True,
+                message="摘要熔断中，已执行本地应急压缩。",
+            ),
+            ("熔断已打开", "应急压缩"),
+        ),
+    ],
+)
+def test_tui_renders_compaction_status_in_chinese(report, expected):
+    console, output = make_console()
+    session = FakeSession(
+        [[AgentEvent(AgentEventType.COMPACTION, compaction=report)]]
+    )
+    inputs = iter(["hello", "/exit"])
+    tui = ChatTUI(session=session, console=console, input_func=lambda: next(inputs))
+
+    import asyncio
+
+    assert asyncio.run(tui.run()) == 0
+    text = output.getvalue()
+    for snippet in expected:
+        assert snippet in text
 
 
 def test_tui_plan_only_status_command_does_not_send_to_llm():

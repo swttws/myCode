@@ -1,5 +1,6 @@
 import pytest
 
+from mycode.compact.models import CompactConfig
 from mycode.config import LLMConfig
 from mycode.llm import BaseLLM
 from mycode.protocols import (
@@ -17,6 +18,7 @@ def make_config(protocol):
         model="model-test",
         base_url="https://example.com",
         api_key="sk-test",
+        compact=CompactConfig(context_window_tokens=128_000),
     )
 
 

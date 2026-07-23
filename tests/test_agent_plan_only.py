@@ -12,6 +12,7 @@ from mycode.llm import BaseLLM, StreamEvent, StreamEventType
 from mycode.memory import InMemoryConversationMemory
 from mycode.permission.service import PermissionInterceptor, PermissionService
 from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
+from tests.helpers import PassthroughContextManager
 
 
 class ScriptedLLM(BaseLLM):
@@ -58,12 +59,14 @@ async def collect_async(async_iterable):
 def make_loop(tmp_path, llm, tools):
     registry = ToolRegistry(tools)
     service = PermissionService.create(tmp_path, home=tmp_path / "home")
+    memory = InMemoryConversationMemory()
     return AgentLoop(
         llm=llm,
-        memory=InMemoryConversationMemory(),
+        memory=memory,
         tool_executor=ToolExecutor(registry),
         tool_registry=registry,
         permission=PermissionInterceptor(service),
+        context_manager=PassthroughContextManager(memory),
     )
 
 

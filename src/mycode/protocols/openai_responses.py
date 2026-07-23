@@ -4,7 +4,7 @@ import json
 import httpx
 
 from mycode.config import LLMConfig
-from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType
+from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType, UsageObservation
 from mycode.tool import ToolCall, ToolDefinition
 from mycode.protocols.common import join_url, parse_json_object, raise_for_bad_status
 from mycode.protocols.sse import parse_sse_events_async
@@ -77,9 +77,42 @@ def _map_openai_responses_event(payload: dict[str, object]) -> StreamEvent | Non
     if event_type == "response.output_text.delta":
         return StreamEvent(StreamEventType.TEXT_DELTA, str(payload.get("delta", "")))
     if event_type == "response.completed":
-        return StreamEvent(StreamEventType.DONE)
+        return StreamEvent(StreamEventType.DONE, usage=_parse_openai_responses_usage(payload))
     if event_type == "response.failed":
         return StreamEvent(StreamEventType.ERROR, "OpenAI Responses request failed.")
+    return None
+
+
+def _parse_openai_responses_usage(payload: dict[str, object]) -> UsageObservation | None:
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = _non_negative_int(usage.get("input_tokens"))
+    output_tokens = _non_negative_int(usage.get("output_tokens"))
+    total_tokens = _non_negative_int(usage.get("total_tokens"))
+    details = usage.get("input_tokens_details")
+    cache_read_tokens = (
+        _non_negative_int(details.get("cached_tokens"))
+        if isinstance(details, dict)
+        else None
+    )
+    if all(value is None for value in (input_tokens, output_tokens, total_tokens, cache_read_tokens)):
+        return None
+    return UsageObservation(
+        provider="openai_responses",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cache_read_tokens=cache_read_tokens,
+    )
+
+
+def _non_negative_int(value: object) -> int | None:
+    if type(value) is int and value >= 0:
+        return value
     return None
 
 

@@ -63,6 +63,12 @@ def test_chat_message_origin_defaults_without_shifting_tool_history_positions():
     assert message.origin is MessageOrigin.CONVERSATION
 
 
+def test_message_origin_includes_compact_internal_sources():
+    assert MessageOrigin.COMPACT_PREVIEW.value == "compact_preview"
+    assert MessageOrigin.COMPACT_SUMMARY.value == "compact_summary"
+    assert MessageOrigin.COMPACT_BOUNDARY.value == "compact_boundary"
+
+
 def test_stream_done_event_can_carry_usage_observation():
     observation = UsageObservation(
         provider="openai_chat",

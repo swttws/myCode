@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from mycode.compact.models import CompactReport
 from mycode.llm import UsageObservation
 from mycode.permission.models import ApprovalRequest
 from mycode.tool import ToolCall, ToolResult
@@ -19,6 +20,7 @@ class AgentEventType(str, Enum):
     CANCELLED = "cancelled"
     APPROVAL_REQUIRED = "approval_required"
     USAGE = "usage"
+    COMPACTION = "compaction"
 
 
 class AgentErrorCode(str, Enum):
@@ -33,6 +35,7 @@ class AgentErrorCode(str, Enum):
     CANCELLED = "cancelled"
     APPROVAL_CANCELLED = "approval_cancelled"
     PROMPT_ERROR = "prompt_error"
+    COMPACTION_ERROR = "compaction_error"
 
 
 @dataclass(frozen=True)
@@ -45,3 +48,4 @@ class AgentEvent:
     approval_request: ApprovalRequest | None = None
     error_code: AgentErrorCode | None = None
     usage: UsageObservation | None = None
+    compaction: CompactReport | None = None

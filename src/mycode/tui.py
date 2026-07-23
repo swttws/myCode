@@ -9,6 +9,7 @@ from prompt_toolkit import PromptSession
 from rich.console import Console
 
 from mycode.agent import ApprovalDecision, ApprovalDecisionType, ApprovalRequest, AgentEventType
+from mycode.compact.models import CompactAction, CompactStatus
 from mycode.permission.models import PermissionMode, RuleSource
 from mycode.session import ChatSession
 
@@ -36,7 +37,7 @@ class ChatTUI:
 
     async def run(self) -> int:
         self._console.print(
-            "[bold cyan]myCode[/bold cyan] Stage 05 Agent 权限模式，输入 /exit 退出，/clear 清空上下文。"
+            "[bold cyan]myCode[/bold cyan] Stage 07 Agent 上下文管理，输入 /exit 退出，/clear 清空上下文，/compact 手动压缩。"
         )
         while True:
             try:
@@ -53,6 +54,9 @@ class ChatTUI:
             if command == "/clear":
                 self._session.clear()
                 self._console.print("[dim]上下文已清空。[/dim]")
+                continue
+            if command == "/compact":
+                await self._render_compaction_stream()
                 continue
             if command == "/plan-only":
                 # 只查询状态，不触发模型请求。
@@ -142,11 +146,30 @@ class ChatTUI:
                 self._console.print(f"\n[red]错误：{event.content}[/red]")
             elif event.type == AgentEventType.CANCELLED:
                 self._console.print(f"\n[yellow]已取消：{event.content}[/yellow]")
+            elif event.type == AgentEventType.COMPACTION:
+                self._console.print(
+                    f"\n[dim]{_format_compaction(event.compaction, event.content)}[/dim]",
+                    end="",
+                )
             elif event.type == AgentEventType.APPROVAL_REQUIRED and event.approval_request is not None:
                 self._console.print(
                     f"\n[yellow]等待审批：{event.approval_request.tool_call.name}[/yellow]",
                     end="",
                 )
+        self._console.print()
+
+    async def _render_compaction_stream(self) -> None:
+        self._console.print("[bold green]assistant>[/bold green] ", end="")
+        async for event in self._session.compact():
+            if event.type == AgentEventType.COMPACTION:
+                self._console.print(
+                    f"\n[dim]{_format_compaction(event.compaction, event.content)}[/dim]",
+                    end="",
+                )
+            elif event.type == AgentEventType.ERROR:
+                self._console.print(f"\n[red]错误：{event.content}[/red]")
+            elif event.type == AgentEventType.CANCELLED:
+                self._console.print(f"\n[yellow]已取消：{event.content}[/yellow]")
         self._console.print()
 
     async def _approval_provider(self, request: ApprovalRequest) -> ApprovalDecision:
@@ -187,6 +210,40 @@ class ChatTUI:
             return ApprovalDecision(selected)
         self._console.print("[yellow]无效审批选项，已取消本次工具调用。[/yellow]")
         return ApprovalDecision(ApprovalDecisionType.CANCEL)
+
+
+def _format_compaction(report, fallback: str = "") -> str:
+    if report is None:
+        return fallback or "上下文压缩状态未知。"
+
+    actions = set(report.actions)
+    if report.status is CompactStatus.FAILED:
+        headline = "压缩失败"
+    elif report.status is CompactStatus.NO_OP or actions == {CompactAction.NONE}:
+        headline = "无需压缩"
+    elif CompactAction.EMERGENCY in actions:
+        headline = "应急压缩完成"
+    elif CompactAction.FORCE in actions:
+        headline = "手动压缩完成"
+    else:
+        headline = "上下文已压缩"
+
+    if report.message_zh:
+        headline = f"{headline}：{report.message_zh}"
+    elif fallback:
+        headline = f"{headline}：{fallback}"
+
+    details = [
+        f"{report.before_tokens} → {report.after_tokens}",
+        f"归档 {report.archived_count}",
+    ]
+    if report.attempts:
+        details.append(f"尝试 {report.attempts}")
+    if report.circuit_open:
+        details.append("熔断已打开")
+    if report.failure_code is not None:
+        details.append(f"原因 {report.failure_code.value}")
+    return f"{headline}（{'，'.join(details)}）"
 
 
 def _mode_label(mode: PermissionMode) -> str:

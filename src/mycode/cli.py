@@ -8,7 +8,8 @@ from pathlib import Path
 
 from mycode.config import ConfigError, load_config
 from mycode.dev_logging import configure_dev_logging_from_env
-from mycode.agent import AgentLoop
+from mycode.agent import AgentConfig, AgentLoop
+from mycode.compact import create_context_manager
 from mycode.memory import InMemoryConversationMemory
 from mycode.mcp import (
     MCPConfig,
@@ -97,16 +98,33 @@ async def _run_application(
     mcp_config_diagnostics: tuple[MCPDiagnostic, ...],
 ) -> int:
     pool = MCPServerPool(mcp_config)
+    context_manager = None
     try:
-        # 初始化失败以诊断形式上报；可用 server 和本地工具仍可继续启动。
-        connection_diagnostics = await pool.initialize_all()
-        _report_mcp_diagnostics(mcp_config_diagnostics + connection_diagnostics)
-
         # 权限服务和文件工具必须共享同一 PathGuard，避免策略检查与实际执行使用不同边界。
         memory = InMemoryConversationMemory()
         tool_registry = create_default_tool_registry(
             Path.cwd(), path_guard=permissions.path_guard
         )
+        agent_config = AgentConfig()
+        try:
+            context_manager = create_context_manager(
+                workspace_root=Path.cwd(),
+                home=Path.home(),
+                llm=llm,
+                memory=memory,
+                config=config.compact,
+                model_timeout_seconds=agent_config.model_timeout_seconds,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.error("myCode 上下文缓存错误：%s", exc)
+            print(f"myCode 上下文缓存错误：{exc}", file=sys.stderr)
+            return 1
+        tool_registry.register(context_manager.artifact_tool)
+
+        # 初始化失败以诊断形式上报；可用 server 和本地工具仍可继续启动。
+        connection_diagnostics = await pool.initialize_all()
+        _report_mcp_diagnostics(mcp_config_diagnostics + connection_diagnostics)
+
         # 注册当前远端工具，并通过 pool listener 持续同步重连后的工具变化。
         register_mcp_tools(pool, tool_registry)
         tool_executor = ToolExecutor(tool_registry)
@@ -117,13 +135,19 @@ async def _run_application(
             tool_executor=tool_executor,
             tool_registry=tool_registry,
             permission=permission_interceptor,
+            context_manager=context_manager,
+            config=agent_config,
         )
         session = ChatSession(agent=agent, permissions=permissions)
         tui = ChatTUI(session=session, show_thinking=config.thinking.show)
         return await tui.run()
     finally:
         # 无论 TUI 正常退出、抛错还是被取消，都要回收 HTTP 流和 stdio 子进程。
-        await pool.close()
+        try:
+            if context_manager is not None:
+                context_manager.close()
+        finally:
+            await pool.close()
 
 
 def _report_mcp_diagnostics(diagnostics: tuple[MCPDiagnostic, ...]) -> None:
