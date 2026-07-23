@@ -66,7 +66,8 @@ class ContextManager:
         if light_result.changed:
             try:
                 transaction.commit()
-            except OSError:
+            except OSError as exc:
+                transaction.rollback()
                 raise CompactError(
                     _report(
                         status=CompactStatus.FAILED,
