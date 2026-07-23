@@ -3,8 +3,8 @@ import json
 import httpx
 
 from mycode.compact.models import CompactConfig
-from mycode.config import LLMConfig
-from mycode.llm import ChatMessage, StreamEvent, StreamEventType
+from mycode.config import LLMConfig, UsageConfig
+from mycode.llm import ChatMessage, StreamEvent, StreamEventType, UsageObservation
 from mycode.protocols.openai_chat import OpenAIChatLLM
 from mycode.tool import ToolCall, ToolDefinition, ToolKind
 from tests.helpers import ControlledAsyncByteStream, collect_async
@@ -156,6 +156,87 @@ def test_openai_chat_omits_tools_when_none():
     payload = json.loads(request_log[0].content)
     assert "tools" not in payload
     assert "parallel_tool_calls" not in payload
+
+
+def test_openai_chat_requests_and_maps_stream_usage_on_done():
+    request_log: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        request_log.append(request)
+        body = "\n".join(
+            [
+                'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+                "",
+                (
+                    'data: {"choices":[],"usage":{"prompt_tokens":12,'
+                    '"completion_tokens":3,"total_tokens":15,'
+                    '"prompt_tokens_details":{"cached_tokens":4}}}'
+                ),
+                "",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        return httpx.Response(200, content=body.encode("utf-8"))
+
+    config = LLMConfig(
+        protocol="openai_chat",
+        model="gpt-test",
+        base_url="https://api.openai.test/v1",
+        api_key="sk-test",
+        compact=TEST_COMPACT_CONFIG,
+        usage=UsageConfig(request_stream_usage=True),
+    )
+    llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    import asyncio
+
+    events = asyncio.run(collect_async(llm.stream_chat([ChatMessage(role="user", content="hello")])))
+
+    assert events == [
+        StreamEvent(StreamEventType.TEXT_DELTA, "Hi"),
+        StreamEvent(
+            StreamEventType.DONE,
+            usage=UsageObservation(
+                provider="openai_chat",
+                input_tokens=12,
+                output_tokens=3,
+                total_tokens=15,
+                cache_read_tokens=4,
+            ),
+        ),
+    ]
+    payload = json.loads(request_log[0].content)
+    assert payload["stream_options"] == {"include_usage": True}
+
+
+def test_openai_chat_ignores_missing_or_invalid_usage_and_still_completes():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = "\n".join(
+            [
+                'data: {"choices":[],"usage":{"prompt_tokens":"bad"}}',
+                "",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        return httpx.Response(200, content=body.encode("utf-8"))
+
+    config = LLMConfig(
+        protocol="openai_chat",
+        model="gpt-test",
+        base_url="https://api.openai.test/v1",
+        api_key="sk-test",
+        compact=TEST_COMPACT_CONFIG,
+        usage=UsageConfig(request_stream_usage=True),
+    )
+    llm = OpenAIChatLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    import asyncio
+
+    events = asyncio.run(collect_async(llm.stream_chat([ChatMessage(role="user", content="hello")])))
+
+    assert events == [StreamEvent(StreamEventType.DONE)]
 
 
 def test_openai_chat_serializes_tool_call_history():
