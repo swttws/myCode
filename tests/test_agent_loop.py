@@ -26,7 +26,7 @@ from mycode.compact.models import (
     RequestSnapshot,
     TokenEstimate,
 )
-from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType
+from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType, UsageObservation
 from mycode.llm import MessageOrigin
 from mycode.mcp import MCPToolWrapper, RemoteTool, ToolSearch
 from mycode.memory import InMemoryConversationMemory
@@ -349,6 +349,27 @@ class FailingContextManager:
         raise CompactError(self.report)
 
 
+class ManualCompactContextManager(PassthroughContextManager):
+    def __init__(self, memory):
+        super().__init__(memory)
+        self.manual_calls = []
+        self.report = CompactReport(
+            status=CompactStatus.COMPACTED,
+            actions=(CompactAction.FORCE,),
+            before_tokens=500,
+            after_tokens=200,
+            archived_count=2,
+            attempts=1,
+            circuit_open=False,
+            message_zh="手动压缩完成。",
+        )
+
+    async def compact_manual(self, *, build_request, run_deadline):
+        self.manual_calls.append({"run_deadline": run_deadline})
+        build_request(tuple(self.memory.messages()))
+        return self.report
+
+
 def test_agent_history_helpers_create_expected_messages():
     call = ToolCall(
         id="call-1",
@@ -467,6 +488,79 @@ def test_agent_loop_stops_before_llm_when_context_compaction_fails():
     assert events[-1].error_code == AgentErrorCode.COMPACTION_ERROR
     assert events[-1].compaction == context_manager.report
     assert llm.requests == []
+
+
+def test_agent_loop_records_done_usage_against_prepared_snapshot():
+    memory = InMemoryConversationMemory()
+    llm = ScriptedLLM(
+        [[StreamEvent(StreamEventType.DONE, usage=UsageObservation(provider="openai_chat", input_tokens=42))]]
+    )
+    context_manager = PassthroughContextManager(memory)
+    registry = ToolRegistry([NoopTool()])
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        context_manager=context_manager,
+    )
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert [event.type for event in events] == [
+        AgentEventType.USER_MESSAGE,
+        AgentEventType.USAGE,
+        AgentEventType.FINAL_RESPONSE,
+    ]
+    assert events[1].usage == UsageObservation(provider="openai_chat", input_tokens=42)
+    assert context_manager.record_usage_calls == [
+        (context_manager.prepared_contexts[0].snapshot, events[1].usage)
+    ]
+
+
+def test_agent_loop_does_not_record_missing_usage():
+    memory = InMemoryConversationMemory()
+    llm = ScriptedLLM([[StreamEvent(StreamEventType.DONE)]])
+    context_manager = PassthroughContextManager(memory)
+    registry = ToolRegistry([NoopTool()])
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        context_manager=context_manager,
+    )
+
+    asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert context_manager.record_usage_calls == []
+
+
+def test_agent_loop_manual_compact_only_yields_compaction_event():
+    memory = InMemoryConversationMemory()
+    memory.append(ChatMessage(role="user", content="old"))
+    llm = ScriptedLLM([])
+    context_manager = ManualCompactContextManager(memory)
+    registry = ToolRegistry([NoopTool()])
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        context_manager=context_manager,
+    )
+
+    events = asyncio.run(collect_async(loop.compact(mode=AgentMode())))
+
+    assert [event.type for event in events] == [AgentEventType.COMPACTION]
+    assert events[0].compaction == context_manager.report
+    assert events[0].content == "手动压缩完成。"
+    assert memory.messages() == [ChatMessage(role="user", content="old")]
+    assert llm.requests == []
+    assert len(context_manager.manual_calls) == 1
 
 
 def test_agent_loop_streams_text_and_final_response():

@@ -65,6 +65,78 @@ class AgentLoop:
         # /clear 只清会话历史，不重建模型、工具注册中心或运行配置。
         self._memory.clear()
 
+    async def compact(
+        self,
+        *,
+        mode: AgentMode,
+    ) -> AsyncIterable[AgentEvent]:
+        self._next_turn_id += 1
+        run_deadline = (
+            time.monotonic() + self.config.run_timeout_seconds
+            if self.config.run_timeout_seconds is not None
+            else None
+        )
+
+        try:
+            turn_context = self._prompt_builder.begin_turn(
+                turn_id=self._next_turn_id,
+                plan_only=mode.plan_only,
+            )
+
+            def build_request(history):
+                deferred_reminder = _make_deferred_tool_reminder(
+                    self._tool_registry.deferred_summaries()
+                )
+                round_turn_context = (
+                    replace(
+                        turn_context,
+                        reminders=turn_context.reminders + (deferred_reminder,),
+                    )
+                    if deferred_reminder is not None
+                    else turn_context
+                )
+                return self._prompt_builder.build(
+                    history=history,
+                    tools=self._tool_registry.model_definitions(),
+                    turn=round_turn_context,
+                    round_index=1,
+                )
+
+            report = await self._context_manager.compact_manual(
+                build_request=build_request,
+                run_deadline=run_deadline,
+            )
+            yield AgentEvent(
+                AgentEventType.COMPACTION,
+                content=report.message_zh,
+                compaction=report,
+            )
+        except CompactError as exc:
+            yield AgentEvent(
+                AgentEventType.ERROR,
+                content=exc.report.message_zh or str(exc),
+                error_code=AgentErrorCode.COMPACTION_ERROR,
+                compaction=exc.report,
+            )
+        except (PromptBuildError, PromptConfigurationError) as exc:
+            yield AgentEvent(
+                AgentEventType.ERROR,
+                content=str(exc),
+                error_code=AgentErrorCode.PROMPT_ERROR,
+            )
+        except LLMError as exc:
+            yield AgentEvent(
+                AgentEventType.ERROR,
+                content=str(exc),
+                error_code=AgentErrorCode.LLM_ERROR,
+            )
+        except asyncio.CancelledError:
+            yield AgentEvent(
+                AgentEventType.CANCELLED,
+                content="cancelled",
+                error_code=AgentErrorCode.CANCELLED,
+            )
+
     async def run(
         self,
         user_text: str,
@@ -193,6 +265,10 @@ class AgentLoop:
                         return
                     elif event.type == StreamEventType.DONE:
                         if event.usage is not None:
+                            self._context_manager.record_usage(
+                                prepared_context.snapshot,
+                                event.usage,
+                            )
                             yield AgentEvent(
                                 AgentEventType.USAGE,
                                 round_index=round_index,

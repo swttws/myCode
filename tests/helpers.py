@@ -31,6 +31,7 @@ class PassthroughContextManager:
         self.memory = memory
         self.report = report or _default_compact_report()
         self.prepare_calls = []
+        self.prepared_contexts = []
         self.record_usage_calls = []
         self.clear_calls = 0
         self.close_calls = 0
@@ -38,12 +39,14 @@ class PassthroughContextManager:
     async def prepare_auto(self, *, build_request, run_deadline):
         self.prepare_calls.append({"run_deadline": run_deadline})
         request = build_request(tuple(self.memory.messages()))
-        return PreparedContext(
+        prepared = PreparedContext(
             request=request,
             snapshot=RequestSnapshot(ascii_chars=0, non_ascii_chars=0, fingerprint="test"),
             estimate=TokenEstimate(tokens=0, source="full_chars", delta_tokens=0),
             report=self.report,
         )
+        self.prepared_contexts.append(prepared)
+        return prepared
 
     def record_usage(self, snapshot, usage):
         self.record_usage_calls.append((snapshot, usage))
