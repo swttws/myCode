@@ -4,7 +4,7 @@ import httpx
 
 from mycode.compact.models import CompactConfig
 from mycode.config import LLMConfig, ThinkingConfig
-from mycode.llm import ChatMessage, StreamEvent, StreamEventType
+from mycode.llm import ChatMessage, StreamEvent, StreamEventType, UsageObservation
 from mycode.protocols.anthropic import AnthropicLLM
 from mycode.tool import ToolDefinition, ToolKind
 from tests.helpers import collect_async
@@ -98,3 +98,94 @@ def test_anthropic_accepts_tools_parameter_without_sending_tools():
     assert events == [StreamEvent(StreamEventType.DONE)]
     payload = json.loads(request_log[0].content)
     assert "tools" not in payload
+
+
+def test_anthropic_accumulates_usage_on_done():
+    request_log: list[httpx.Request] = []
+    body = "\n".join(
+        [
+            "event: message_start",
+            (
+                'data: {"type":"message_start","message":{"usage":{'
+                '"input_tokens":11,"cache_read_input_tokens":2,'
+                '"cache_creation_input_tokens":3}}}'
+            ),
+            "",
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}',
+            "",
+            "event: message_delta",
+            'data: {"type":"message_delta","usage":{"output_tokens":5}}',
+            "",
+            "event: message_stop",
+            'data: {"type":"message_stop"}',
+            "",
+        ]
+    )
+    config = LLMConfig(
+        protocol="anthropic",
+        model="claude-test",
+        base_url="https://api.anthropic.test",
+        api_key="sk-test",
+        compact=TEST_COMPACT_CONFIG,
+    )
+    llm = AnthropicLLM(config, http_client=make_response(body, request_log))
+
+    import asyncio
+
+    events = asyncio.run(collect_async(llm.stream_chat([ChatMessage(role="user", content="hello")])))
+
+    assert events == [
+        StreamEvent(StreamEventType.TEXT_DELTA, "Hi"),
+        StreamEvent(
+            StreamEventType.DONE,
+            usage=UsageObservation(
+                provider="anthropic",
+                input_tokens=11,
+                output_tokens=5,
+                cache_read_tokens=2,
+                cache_write_tokens=3,
+            ),
+        ),
+    ]
+
+
+def test_anthropic_ignores_invalid_usage_and_preserves_text_and_thinking():
+    request_log: list[httpx.Request] = []
+    body = "\n".join(
+        [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":"bad"}}}',
+            "",
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}',
+            "",
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Visible"}}',
+            "",
+            "event: message_delta",
+            'data: {"type":"message_delta","usage":{"output_tokens":"bad"}}',
+            "",
+            "event: message_stop",
+            'data: {"type":"message_stop"}',
+            "",
+        ]
+    )
+    config = LLMConfig(
+        protocol="anthropic",
+        model="claude-test",
+        base_url="https://api.anthropic.test",
+        api_key="sk-test",
+        compact=TEST_COMPACT_CONFIG,
+    )
+    llm = AnthropicLLM(config, http_client=make_response(body, request_log))
+
+    import asyncio
+
+    events = asyncio.run(collect_async(llm.stream_chat([ChatMessage(role="user", content="hello")])))
+
+    assert events == [
+        StreamEvent(StreamEventType.THINKING_DELTA, "hmm"),
+        StreamEvent(StreamEventType.TEXT_DELTA, "Visible"),
+        StreamEvent(StreamEventType.DONE),
+    ]
