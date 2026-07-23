@@ -9,6 +9,7 @@ class FakeAgent:
     def __init__(self, events=None, operations=None) -> None:
         self.events = events or []
         self.runs = []
+        self.compacts = []
         self.clear_count = 0
         self.operations = operations
 
@@ -23,10 +24,15 @@ class FakeAgent:
         for event in self.events:
             yield event
 
+    async def compact(self, *, mode):
+        self.compacts.append({"mode": mode})
+        for event in self.events:
+            yield event
+
     def clear_memory(self):
         self.clear_count += 1
         if self.operations is not None:
-            self.operations.append("memory")
+            self.operations.append("agent")
 
 
 class FakePermissions:
@@ -46,6 +52,16 @@ class FakePermissions:
         self.mode = (PermissionMode.DEFAULT, None)
         if self.operations is not None:
             self.operations.append("permissions")
+
+
+class RecordingMode(AgentMode):
+    def __init__(self, operations):
+        super().__init__()
+        self._operations = operations
+
+    def reset(self):
+        self._operations.append("mode")
+        super().reset()
 
 
 async def collect_async(async_iterable):
@@ -82,6 +98,21 @@ def test_chat_session_send_passes_mode_and_approval_provider():
     assert agent.runs[0]["approval_provider"] is approval_provider
 
 
+def test_chat_session_compact_forwards_current_mode_and_events():
+    expected_events = [
+        AgentEvent(AgentEventType.COMPACTION, content="compacted"),
+    ]
+    agent = FakeAgent(expected_events)
+    session = ChatSession(agent=agent, permissions=FakePermissions())
+    session.set_plan_only(True)
+
+    events = asyncio.run(collect_async(session.compact()))
+
+    assert events == expected_events
+    assert agent.compacts[0]["mode"].plan_only is True
+    assert agent.runs == []
+
+
 def test_chat_session_toggles_plan_only():
     session = ChatSession(agent=FakeAgent(), permissions=FakePermissions())
 
@@ -98,7 +129,8 @@ def test_chat_session_clear_resets_memory_and_plan_only():
     operations = []
     agent = FakeAgent(operations=operations)
     permissions = FakePermissions(operations)
-    session = ChatSession(agent=agent, permissions=permissions)
+    mode = RecordingMode(operations)
+    session = ChatSession(agent=agent, permissions=permissions, mode=mode)
     session.set_plan_only(True)
 
     session.clear()
@@ -106,7 +138,7 @@ def test_chat_session_clear_resets_memory_and_plan_only():
     assert agent.clear_count == 1
     assert session.is_plan_only() is False
     assert permissions.clear_count == 1
-    assert operations == ["memory", "permissions"]
+    assert operations == ["agent", "mode", "permissions"]
 
 
 def test_chat_session_queries_and_sets_permission_mode():

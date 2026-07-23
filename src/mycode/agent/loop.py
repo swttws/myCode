@@ -62,8 +62,8 @@ class AgentLoop:
         self._next_turn_id = 0
 
     def clear_memory(self) -> None:
-        # /clear 只清会话历史，不重建模型、工具注册中心或运行配置。
-        self._memory.clear()
+        # /clear 通过 ContextManager 同步清理历史、usage 锚点和归档会话；不重建模型、工具注册中心或运行配置。
+        self._context_manager.clear()
 
     async def compact(
         self,

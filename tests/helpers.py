@@ -53,6 +53,7 @@ class PassthroughContextManager:
 
     def clear(self):
         self.clear_calls += 1
+        self.memory.clear()
 
     def close(self):
         self.close_calls += 1

@@ -31,6 +31,10 @@ class ChatSession:
         ):
             yield event
 
+    async def compact(self):
+        async for event in self._agent.compact(mode=self._mode):
+            yield event
+
     def set_plan_only(self, enabled: bool) -> None:
         self._mode.plan_only = enabled
 
