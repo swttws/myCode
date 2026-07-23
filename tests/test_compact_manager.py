@@ -1,7 +1,10 @@
 from dataclasses import FrozenInstanceError
 
+import asyncio
+
 import pytest
 
+from mycode.compact.archive import ArchiveSession
 from mycode.compact.models import (
     ArchivedArtifact,
     ArtifactSlice,
@@ -14,9 +17,12 @@ from mycode.compact.models import (
     CompactStatus,
     HeavyCompactResult,
     LightCompactResult,
+    PreparedContext,
     RequestSnapshot,
     TokenEstimate,
 )
+from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType
+from mycode.memory import InMemoryConversationMemory
 
 
 def test_compact_config_and_policy_have_approved_defaults_and_are_frozen():
@@ -121,3 +127,90 @@ def test_compact_report_results_and_error_preserve_outcome_details():
 
     assert isinstance(error, RuntimeError)
     assert error.report is report
+
+
+def test_context_manager_prepare_auto_returns_safe_request_without_summary_call(tmp_path):
+    from mycode.compact.manager import ContextManager
+
+    memory = InMemoryConversationMemory()
+    memory.append(ChatMessage(role="user", content="hello"))
+    llm = RecordingLLM()
+    builder = RecordingRequestBuilder()
+    store = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    manager = ContextManager(
+        llm=llm,
+        memory=memory,
+        config=CompactConfig(context_window_tokens=100_000),
+        store=store,
+    )
+
+    prepared = asyncio.run(manager.prepare_auto(build_request=builder, run_deadline=None))
+
+    assert isinstance(prepared, PreparedContext)
+    assert llm.requests == []
+    assert builder.calls == [tuple(memory.messages())]
+    assert prepared.request.messages == tuple(memory.messages())
+    assert prepared.report.status is CompactStatus.SAFE
+    assert prepared.report.actions == (CompactAction.NONE,)
+    assert prepared.report.archived_count == 0
+
+    store.close()
+
+
+def test_context_manager_prepare_auto_commits_light_compaction_before_rebuilding_request(tmp_path):
+    from mycode.compact.manager import ContextManager
+
+    memory = InMemoryConversationMemory()
+    original_tool = ChatMessage(role="tool", content="x" * 9_000, tool_call_id="call-1")
+    memory.append(original_tool)
+    llm = RecordingLLM()
+    builder = RecordingRequestBuilder()
+    store = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    config = CompactConfig(
+        context_window_tokens=16_001,
+        tool_result_threshold_tokens=2_001,
+        tool_batch_threshold_tokens=2_002,
+    )
+    manager = ContextManager(llm=llm, memory=memory, config=config, store=store)
+
+    prepared = asyncio.run(manager.prepare_auto(build_request=builder, run_deadline=None))
+
+    compacted_history = tuple(memory.messages())
+    assert llm.requests == []
+    assert len(builder.calls) == 1
+    assert builder.calls[0] == compacted_history
+    assert compacted_history[0].origin.value == "compact_preview"
+    assert original_tool.content not in compacted_history[0].content
+    assert prepared.report.status is CompactStatus.COMPACTED
+    assert prepared.report.actions == (CompactAction.LIGHT,)
+    assert prepared.report.archived_count == 1
+
+    preview_path = __import__("json").loads(compacted_history[0].content)["path"]
+    store.read(preview_path)
+
+    store.close()
+
+
+class RecordingLLM(BaseLLM):
+    def __init__(self):
+        self.requests = []
+
+    async def stream_chat(self, messages, tools=None):
+        self.requests.append((list(messages), tools))
+        yield StreamEvent(StreamEventType.DONE)
+
+
+class RecordingRequestBuilder:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, history):
+        history = tuple(history)
+        self.calls.append(history)
+        return FakePromptRequest(messages=history, tools=())
+
+
+class FakePromptRequest:
+    def __init__(self, *, messages, tools):
+        self.messages = messages
+        self.tools = tools

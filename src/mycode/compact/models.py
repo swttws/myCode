@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from mycode.llm import ChatMessage
 
@@ -153,6 +153,14 @@ class HeavyCompactResult:
     artifacts: tuple[ArchivedArtifact, ...]
     actions: tuple[CompactAction, ...]
     summary: str
+
+
+@dataclass(frozen=True)
+class PreparedContext:
+    request: Any
+    snapshot: RequestSnapshot
+    estimate: TokenEstimate
+    report: CompactReport
 
 
 class CompactError(RuntimeError):
