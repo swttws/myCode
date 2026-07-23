@@ -30,6 +30,126 @@ class ForcedSummaryResult:
     temporary_summaries: tuple[str, ...]
 
 
+class ConversationCompactor:
+    def __init__(
+        self,
+        llm: BaseLLM,
+        config: CompactConfig,
+        *,
+        policy: CompactPolicy | None = None,
+        estimator: TokenEstimator | None = None,
+        model_timeout_seconds: float | None = None,
+    ) -> None:
+        self._llm = llm
+        self._config = config
+        self._policy = policy or CompactPolicy()
+        self._estimator = estimator or TokenEstimator()
+        self._model_timeout_seconds = model_timeout_seconds
+
+    async def compact(
+        self,
+        history: Sequence[ChatMessage],
+        *,
+        mode: str,
+        build_request,
+        transaction: ArchiveTransaction,
+        run_deadline: float | None,
+    ) -> HeavyCompactResult:
+        recent_messages = select_recent_messages(
+            history,
+            keep_recent_tokens=self._policy.keep_recent_tokens,
+            min_recent_messages=self._policy.min_recent_messages,
+            estimator=self._estimator,
+        )
+        summary_messages = list(summary_input_messages(history, recent_messages))
+        summary_messages, forced_artifacts, forced = await self._shrink_summary_messages(
+            summary_messages,
+            transaction=transaction,
+            run_deadline=run_deadline,
+        )
+        summary = await collect_summary(
+            self._llm,
+            summary_messages,
+            estimator=self._estimator,
+            policy=self._policy,
+            model_timeout_seconds=self._model_timeout_seconds,
+            run_deadline=run_deadline,
+        )
+        compacted = build_compacted_history(
+            history,
+            recent_messages=recent_messages,
+            summary=summary,
+            transaction=transaction,
+            estimator=self._estimator,
+        )
+        actions = (CompactAction.HEAVY, CompactAction.FORCE) if forced else (CompactAction.HEAVY,)
+        return HeavyCompactResult(
+            history=compacted.history,
+            artifacts=(*forced_artifacts, *compacted.artifacts),
+            actions=actions,
+            summary=summary,
+        )
+
+    async def _shrink_summary_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        transaction: ArchiveTransaction,
+        run_deadline: float | None,
+    ) -> tuple[list[ChatMessage], tuple[ArchivedArtifact, ...], bool]:
+        forced_artifacts: list[ArchivedArtifact] = []
+        forced = False
+        budget = _summary_budget(self._config, self._policy)
+
+        while _summary_request_tokens(messages) > budget:
+            before_tokens = _summary_request_tokens(messages)
+            oversized_index = _first_oversized_summary_message(messages, budget)
+            if oversized_index is not None:
+                forced_message = await summarize_oversized_message(
+                    self._llm,
+                    messages[oversized_index],
+                    config=self._config,
+                    transaction=transaction,
+                    estimator=self._estimator,
+                    policy=self._policy,
+                    model_timeout_seconds=self._model_timeout_seconds,
+                    run_deadline=run_deadline,
+                )
+                messages[oversized_index] = forced_message.message
+                forced_artifacts.append(forced_message.artifact)
+            else:
+                start, end = _earliest_containable_block(messages, budget)
+                temporary_summary = await collect_summary(
+                    self._llm,
+                    messages[start:end],
+                    estimator=self._estimator,
+                    policy=self._policy,
+                    model_timeout_seconds=self._model_timeout_seconds,
+                    run_deadline=run_deadline,
+                )
+                messages[start:end] = [
+                    ChatMessage(
+                        role="assistant",
+                        content=_temporary_summary_content(
+                            temporary_summary,
+                            message_count=end - start,
+                        ),
+                        origin=MessageOrigin.COMPACT_SUMMARY,
+                    )
+                ]
+
+            forced = True
+            after_tokens = _summary_request_tokens(messages)
+            if after_tokens >= before_tokens:
+                # 每轮递归必须严格降低工作副本预算，防止临时摘要反而放大导致死循环。
+                raise _summary_error(
+                    CompactFailureCode.BUDGET_NOT_RECOVERED,
+                    "递归摘要未降低预算。",
+                )
+
+        return messages, tuple(forced_artifacts), forced
+
+
 async def collect_summary(
     llm: BaseLLM,
     messages: Sequence[ChatMessage],
@@ -244,6 +364,50 @@ def _artifact_kind_for_message(message: ChatMessage):
     if message.role == "tool":
         return "tool_result"
     return "history"
+
+
+def _summary_budget(config: CompactConfig, policy: CompactPolicy) -> int:
+    return config.context_window_tokens - policy.manual_reserve_tokens
+
+
+def _first_oversized_summary_message(
+    messages: Sequence[ChatMessage],
+    budget: int,
+) -> int | None:
+    for index, message in enumerate(messages):
+        if _summary_request_tokens((message,)) > budget:
+            return index
+    return None
+
+
+def _earliest_containable_block(
+    messages: Sequence[ChatMessage],
+    budget: int,
+) -> tuple[int, int]:
+    end = 0
+    for candidate_end in range(1, len(messages) + 1):
+        if _summary_request_tokens(messages[:candidate_end]) > budget:
+            break
+        end = candidate_end
+    if end == 0:
+        raise _summary_error(
+            CompactFailureCode.BUDGET_NOT_RECOVERED,
+            "没有可容纳的递归摘要块。",
+        )
+    return 0, end
+
+
+def _temporary_summary_content(summary: str, *, message_count: int) -> str:
+    return json.dumps(
+        {
+            "kind": "temporary_summary",
+            "message_count": message_count,
+            "summary": summary,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _split_message_for_summary_budget(

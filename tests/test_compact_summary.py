@@ -6,7 +6,7 @@ import json
 import time
 
 from mycode.compact.archive import ArchiveSession
-from mycode.compact.models import CompactConfig, CompactError, CompactFailureCode
+from mycode.compact.models import CompactAction, CompactConfig, CompactError, CompactFailureCode
 from mycode.compact.summary_prompt import SUMMARY_SECTIONS
 from mycode.llm import BaseLLM, ChatMessage, MessageOrigin, StreamEvent, StreamEventType, UsageObservation
 from mycode.tool import ToolCall
@@ -338,6 +338,71 @@ def test_summarize_oversized_message_fails_when_replacement_does_not_shrink(tmp_
     error = _force_error(llm, message, config=config, transaction=transaction)
 
     assert error.report.failure_code is CompactFailureCode.BUDGET_NOT_RECOVERED
+
+    transaction.rollback()
+    session.close()
+
+
+def test_conversation_compactor_recursively_shrinks_work_copy_before_final_summary(tmp_path):
+    module = _module()
+    config = CompactConfig(
+        context_window_tokens=16_001,
+        tool_result_threshold_tokens=2_001,
+        tool_batch_threshold_tokens=2_002,
+    )
+    policy = module.CompactPolicy(keep_recent_tokens=1, min_recent_messages=5)
+    old_messages = [
+        ChatMessage(role="assistant", content=f"old-{index}-" + ("甲" * 7_000))
+        for index in range(6)
+    ]
+    recent_messages = [
+        ChatMessage(role="user", content=f"recent-{index}")
+        for index in range(5)
+    ]
+    history = [*old_messages, *recent_messages]
+    llm = ScriptedSummaryLLM(
+        [
+            [
+                StreamEvent(
+                    StreamEventType.TEXT_DELTA,
+                    _summary_output(section_text=f"临时块摘要 {index}"),
+                ),
+                StreamEvent(StreamEventType.DONE),
+            ]
+            for index in range(2)
+        ]
+        + [[StreamEvent(StreamEventType.TEXT_DELTA, _summary_output(section_text="最终全量摘要")), StreamEvent(StreamEventType.DONE)]]
+    )
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+    compactor = module.ConversationCompactor(llm, config, policy=policy)
+
+    result = asyncio.run(
+        compactor.compact(
+            history,
+            mode="auto",
+            build_request=lambda messages: None,
+            transaction=transaction,
+            run_deadline=None,
+        )
+    )
+
+    assert len(llm.requests) == 3
+    first_prompt = llm.requests[0][0].content
+    assert "old-0-" in first_prompt
+    assert "old-5-" not in first_prompt
+    budget = config.context_window_tokens - policy.manual_reserve_tokens
+    for request in llm.requests:
+        request_estimator = module.TokenEstimator()
+        snapshot = request_estimator.snapshot(request, [])
+        assert request_estimator.estimate(snapshot).tokens <= budget
+
+    final_prompt = llm.requests[-1][0].content
+    assert "临时块摘要" in final_prompt
+    assert result.summary == _summary_text("最终全量摘要")
+    assert result.actions == (CompactAction.HEAVY, CompactAction.FORCE)
+    assert all("临时块摘要" not in message.content for message in result.history)
+    assert result.history[-5:] == tuple(recent_messages)
 
     transaction.rollback()
     session.close()
