@@ -21,8 +21,9 @@ from mycode.compact.models import (
     RequestSnapshot,
     TokenEstimate,
 )
-from mycode.llm import BaseLLM, ChatMessage, StreamEvent, StreamEventType
+from mycode.llm import BaseLLM, ChatMessage, MessageOrigin, StreamEvent, StreamEventType
 from mycode.memory import InMemoryConversationMemory
+from mycode.tool import ToolCall
 
 
 def test_compact_config_and_policy_have_approved_defaults_and_are_frozen():
@@ -191,12 +192,74 @@ def test_context_manager_prepare_auto_commits_light_compaction_before_rebuilding
     store.close()
 
 
+def test_context_manager_retries_heavy_compaction_and_commits_only_success(tmp_path):
+    from mycode.compact.manager import ContextManager
+    from mycode.compact.summary_prompt import SUMMARY_SECTIONS
+
+    config = CompactConfig(
+        context_window_tokens=16_001,
+        tool_result_threshold_tokens=2_001,
+        tool_batch_threshold_tokens=2_002,
+    )
+    policy = CompactPolicy(keep_recent_tokens=1, min_recent_messages=5)
+    memory = CountingMemory(
+        [
+            ChatMessage(role="assistant", content="甲" * 6_000),
+            *[ChatMessage(role="user", content=f"recent-{index}") for index in range(5)],
+        ]
+    )
+    llm = RecordingLLM(
+        scripts=[
+            [StreamEvent(StreamEventType.TEXT_DELTA, "bad format"), StreamEvent(StreamEventType.DONE)],
+            [
+                StreamEvent(
+                    StreamEventType.TOOL_CALL,
+                    tool_call=ToolCall(id="call-1", name="read_compact_artifact", arguments={}),
+                ),
+                StreamEvent(StreamEventType.DONE),
+            ],
+            [
+                StreamEvent(
+                    StreamEventType.TEXT_DELTA,
+                    "<analysis-draft>草稿</analysis-draft><summary>"
+                    + "\n\n".join(f"## {section}\n最终摘要" for section in SUMMARY_SECTIONS)
+                    + "</summary>",
+                ),
+                StreamEvent(StreamEventType.DONE),
+            ],
+        ]
+    )
+    builder = RecordingRequestBuilder()
+    store = RecordingArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    manager = ContextManager(llm=llm, memory=memory, config=config, store=store, policy=policy)
+
+    prepared = asyncio.run(manager.prepare_auto(build_request=builder, run_deadline=None))
+
+    assert len(llm.requests) == 3
+    assert memory.replace_calls == 1
+    assert memory.messages()[0].origin is MessageOrigin.COMPACT_SUMMARY
+    assert prepared.report.status is CompactStatus.COMPACTED
+    assert prepared.report.actions == (CompactAction.HEAVY,)
+    assert prepared.report.attempts == 3
+    assert manager._failure_count == 0
+    assert [transaction.rolled_back for transaction in store.transactions[:3]] == [True, True, True]
+    assert store.transactions[3].committed is True
+    assert builder.calls[-1] == tuple(memory.messages())
+
+    store.close()
+
+
 class RecordingLLM(BaseLLM):
-    def __init__(self):
+    def __init__(self, scripts=None):
         self.requests = []
+        self.scripts = list(scripts or [])
 
     async def stream_chat(self, messages, tools=None):
         self.requests.append((list(messages), tools))
+        if self.scripts:
+            for event in self.scripts.pop(0):
+                yield event
+            return
         yield StreamEvent(StreamEventType.DONE)
 
 
@@ -214,3 +277,44 @@ class FakePromptRequest:
     def __init__(self, *, messages, tools):
         self.messages = messages
         self.tools = tools
+
+
+class CountingMemory(InMemoryConversationMemory):
+    def __init__(self, messages):
+        super().__init__()
+        self.replace_calls = 0
+        for message in messages:
+            self.append(message)
+
+    def replace(self, messages):
+        self.replace_calls += 1
+        super().replace(messages)
+
+
+class RecordingArchiveSession(ArchiveSession):
+    def __init__(self, *args, **kwargs):
+        self.transactions = []
+        super().__init__(*args, **kwargs)
+
+    def begin(self):
+        transaction = RecordingTransaction(super().begin())
+        self.transactions.append(transaction)
+        return transaction
+
+
+class RecordingTransaction:
+    def __init__(self, inner):
+        self._inner = inner
+        self.committed = False
+        self.rolled_back = False
+
+    def archive_text(self, *, kind, text):
+        return self._inner.archive_text(kind=kind, text=text)
+
+    def commit(self):
+        self.committed = True
+        return self._inner.commit()
+
+    def rollback(self):
+        self.rolled_back = True
+        return self._inner.rollback()
