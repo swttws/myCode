@@ -6,7 +6,7 @@ import json
 import time
 
 from mycode.compact.archive import ArchiveSession
-from mycode.compact.models import CompactError, CompactFailureCode
+from mycode.compact.models import CompactConfig, CompactError, CompactFailureCode
 from mycode.compact.summary_prompt import SUMMARY_SECTIONS
 from mycode.llm import BaseLLM, ChatMessage, MessageOrigin, StreamEvent, StreamEventType, UsageObservation
 from mycode.tool import ToolCall
@@ -267,6 +267,82 @@ def test_collect_summary_records_valid_usage_for_summary_request():
     assert estimate.tokens == 777
 
 
+def test_summarize_oversized_message_archives_original_and_summarizes_budgeted_chunks(tmp_path):
+    module = _module()
+    config = CompactConfig(
+        context_window_tokens=16_001,
+        tool_result_threshold_tokens=2_001,
+        tool_batch_threshold_tokens=2_002,
+    )
+    original = "甲" * 45_000
+    message = ChatMessage(role="user", content=original)
+    llm = ScriptedSummaryLLM(
+        [
+            [StreamEvent(StreamEventType.TEXT_DELTA, _summary_output(section_text=f"临时摘要 {index}")), StreamEvent(StreamEventType.DONE)]
+            for index in range(10)
+        ]
+    )
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+
+    result = asyncio.run(
+        module.summarize_oversized_message(
+            llm,
+            message,
+            config=config,
+            transaction=transaction,
+        )
+    )
+
+    assert len(llm.requests) > 1
+    budget = config.context_window_tokens - module.CompactPolicy().manual_reserve_tokens
+    for request in llm.requests:
+        request_estimator = module.TokenEstimator()
+        snapshot = request_estimator.snapshot(request, [])
+        assert request_estimator.estimate(snapshot).tokens <= budget
+
+    assert result.artifact.kind == "user_message"
+    assert result.artifact.original_chars == len(original)
+    assert result.message.role == "user"
+    assert result.message.origin is MessageOrigin.COMPACT_PREVIEW
+    assert original not in result.message.content
+    preview = json.loads(result.message.content)
+    assert preview["path"] == result.artifact.path
+    assert preview["temporary_summaries"] == list(result.temporary_summaries)
+    assert "草稿内容" not in result.message.content
+
+    transaction.commit()
+    assert _read_all(session, result.artifact.path) == original
+
+    session.close()
+
+
+def test_summarize_oversized_message_fails_when_replacement_does_not_shrink(tmp_path):
+    config = CompactConfig(
+        context_window_tokens=16_001,
+        tool_result_threshold_tokens=2_001,
+        tool_batch_threshold_tokens=2_002,
+    )
+    message = ChatMessage(role="user", content="short")
+    llm = ScriptedSummaryLLM(
+        [
+            [
+                StreamEvent(StreamEventType.TEXT_DELTA, _summary_output(section_text="临时摘要内容" * 20)),
+                StreamEvent(StreamEventType.DONE),
+            ]
+        ]
+    )
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+
+    error = _force_error(llm, message, config=config, transaction=transaction)
+
+    assert error.report.failure_code is CompactFailureCode.BUDGET_NOT_RECOVERED
+
+    transaction.rollback()
+    session.close()
+
+
 def _module():
     return importlib.import_module("mycode.compact.summary")
 
@@ -303,6 +379,14 @@ def _collect_error(llm, **kwargs):
     except CompactError as exc:
         return exc
     raise AssertionError("collect_summary did not fail")
+
+
+def _force_error(llm, message, **kwargs):
+    try:
+        asyncio.run(_module().summarize_oversized_message(llm, message, **kwargs))
+    except CompactError as exc:
+        return exc
+    raise AssertionError("summarize_oversized_message did not fail")
 
 
 class ScriptedSummaryLLM(BaseLLM):

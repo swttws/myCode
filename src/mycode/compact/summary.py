@@ -4,13 +4,14 @@ import asyncio
 import json
 import time
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from mycode.compact.archive import ArchiveTransaction
 from mycode.compact.estimator import TokenEstimator
 from mycode.compact.models import (
     ArchivedArtifact,
     CompactAction,
+    CompactConfig,
     CompactError,
     CompactFailureCode,
     CompactPolicy,
@@ -20,6 +21,13 @@ from mycode.compact.models import (
 )
 from mycode.compact.summary_prompt import build_summary_prompt, parse_summary_output
 from mycode.llm import BaseLLM, ChatMessage, LLMError, MessageOrigin, StreamEventType
+
+
+@dataclass(frozen=True)
+class ForcedSummaryResult:
+    message: ChatMessage
+    artifact: ArchivedArtifact
+    temporary_summaries: tuple[str, ...]
 
 
 async def collect_summary(
@@ -91,6 +99,62 @@ async def collect_summary(
             close = getattr(stream, "aclose", None)
             if close is not None:
                 await close()
+
+
+async def summarize_oversized_message(
+    llm: BaseLLM,
+    message: ChatMessage,
+    *,
+    config: CompactConfig,
+    transaction: ArchiveTransaction,
+    estimator: TokenEstimator | None = None,
+    policy: CompactPolicy = CompactPolicy(),
+    model_timeout_seconds: float | None = None,
+    run_deadline: float | None = None,
+) -> ForcedSummaryResult:
+    token_estimator = estimator or TokenEstimator()
+    artifact = transaction.archive_text(
+        kind=_artifact_kind_for_message(message),
+        text=message.content,
+    )
+    chunks = _split_message_for_summary_budget(
+        message,
+        config=config,
+        policy=policy,
+    )
+    temporary_summaries = []
+    for chunk in chunks:
+        temporary_summaries.append(
+            await collect_summary(
+                llm,
+                [replace(message, content=chunk)],
+                estimator=token_estimator,
+                policy=policy,
+                model_timeout_seconds=model_timeout_seconds,
+                run_deadline=run_deadline,
+            )
+        )
+
+    replacement_content = _forced_summary_preview(
+        message,
+        artifact,
+        temporary_summaries=tuple(temporary_summaries),
+    )
+    if token_estimator.estimate_text(replacement_content) >= token_estimator.estimate_text(message.content):
+        raise _summary_error(
+            CompactFailureCode.BUDGET_NOT_RECOVERED,
+            "单条消息压缩后未降低预算。",
+        )
+
+    return ForcedSummaryResult(
+        message=replace(
+            message,
+            content=replacement_content,
+            origin=MessageOrigin.COMPACT_PREVIEW,
+        ),
+        artifact=artifact,
+        temporary_summaries=tuple(temporary_summaries),
+    )
 
 
 def select_recent_messages(
@@ -171,6 +235,87 @@ def build_compacted_history(
         artifacts=artifacts,
         actions=(CompactAction.HEAVY,),
         summary=summary,
+    )
+
+
+def _artifact_kind_for_message(message: ChatMessage):
+    if message.role == "user":
+        return "user_message"
+    if message.role == "tool":
+        return "tool_result"
+    return "history"
+
+
+def _split_message_for_summary_budget(
+    message: ChatMessage,
+    *,
+    config: CompactConfig,
+    policy: CompactPolicy,
+) -> tuple[str, ...]:
+    budget = config.context_window_tokens - policy.manual_reserve_tokens
+    if budget <= 0:
+        raise _summary_error(
+            CompactFailureCode.BUDGET_NOT_RECOVERED,
+            "摘要请求预算不足。",
+        )
+
+    chunks: list[str] = []
+    offset = 0
+    text = message.content
+    while offset < len(text):
+        end = _summary_chunk_end(message, offset=offset, budget=budget)
+        if end <= offset:
+            raise _summary_error(
+                CompactFailureCode.BUDGET_NOT_RECOVERED,
+                "单条消息无法切出可摘要分片。",
+            )
+        chunks.append(text[offset:end])
+        offset = end
+    return tuple(chunks or ("",))
+
+
+def _summary_chunk_end(message: ChatMessage, *, offset: int, budget: int) -> int:
+    text = message.content
+    low = offset + 1
+    high = len(text)
+    best = offset
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = replace(message, content=text[offset:mid])
+        if _summary_request_tokens((candidate,)) <= budget:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
+def _summary_request_tokens(messages: Sequence[ChatMessage]) -> int:
+    request_estimator = TokenEstimator()
+    request = [ChatMessage(role="user", content=build_summary_prompt(messages))]
+    return request_estimator.estimate(request_estimator.snapshot(request, [])).tokens
+
+
+def _forced_summary_preview(
+    message: ChatMessage,
+    artifact: ArchivedArtifact,
+    *,
+    temporary_summaries: tuple[str, ...],
+) -> str:
+    return json.dumps(
+        {
+            "estimated_tokens": artifact.estimated_tokens,
+            "kind": artifact.kind,
+            "original_chars": artifact.original_chars,
+            "original_role": message.role,
+            "path": artifact.path,
+            "sha256": artifact.sha256,
+            "temporary_summaries": list(temporary_summaries),
+            "truncated": True,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
     )
 
 
