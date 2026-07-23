@@ -90,6 +90,94 @@ class ConversationCompactor:
             summary=summary,
         )
 
+    def emergency(
+        self,
+        history: Sequence[ChatMessage],
+        *,
+        build_request,
+        transaction: ArchiveTransaction,
+    ) -> HeavyCompactResult:
+        try:
+            return self._emergency_or_raise(
+                history,
+                build_request=build_request,
+                transaction=transaction,
+            )
+        except OSError as exc:
+            _rollback_quietly(transaction)
+            raise _summary_error(
+                CompactFailureCode.ARCHIVE_ERROR,
+                "应急压缩归档写入失败。",
+            ) from exc
+
+    def _emergency_or_raise(
+        self,
+        history: Sequence[ChatMessage],
+        *,
+        build_request,
+        transaction: ArchiveTransaction,
+    ) -> HeavyCompactResult:
+        original_history = tuple(history)
+        recent_messages = select_recent_messages(
+            original_history,
+            keep_recent_tokens=self._policy.keep_recent_tokens,
+            min_recent_messages=self._policy.min_recent_messages,
+            estimator=self._estimator,
+        )
+        old_messages = _old_messages(original_history, tuple(recent_messages))
+        compacted: list[ChatMessage] = []
+        artifacts: list[ArchivedArtifact] = []
+
+        if old_messages:
+            archive_text = _archive_history_json(old_messages)
+            artifact = transaction.archive_text(kind="history", text=archive_text)
+            artifacts.append(artifact)
+            compacted.append(_emergency_index_message(old_messages, artifact))
+
+        compacted.append(_boundary_message())
+        recent_start = len(compacted)
+        compacted.extend(recent_messages)
+        recent_artifacts = self._emergency_reduce_recent_until_safe(
+            compacted,
+            recent_start=recent_start,
+            build_request=build_request,
+            transaction=transaction,
+        )
+        artifacts.extend(recent_artifacts)
+        return HeavyCompactResult(
+            history=tuple(compacted),
+            artifacts=tuple(artifacts),
+            actions=(CompactAction.EMERGENCY,),
+            summary="",
+        )
+
+    def _emergency_reduce_recent_until_safe(
+        self,
+        compacted: list[ChatMessage],
+        *,
+        recent_start: int,
+        build_request,
+        transaction: ArchiveTransaction,
+    ) -> tuple[ArchivedArtifact, ...]:
+        artifacts: list[ArchivedArtifact] = []
+        safety_line = self._config.context_window_tokens - self._policy.auto_reserve_tokens
+        while _built_request_tokens(self._estimator, build_request, compacted) >= safety_line:
+            replacement_index = _first_unarchived_recent(compacted, recent_start)
+            if replacement_index is None:
+                raise _summary_error(
+                    CompactFailureCode.BUDGET_NOT_RECOVERED,
+                    "应急压缩后仍超过自动安全线。",
+                )
+            artifact, replacement = _archive_message_preview(
+                compacted[replacement_index],
+                transaction=transaction,
+                estimator=self._estimator,
+                max_preview_tokens=80,
+            )
+            compacted[replacement_index] = replacement
+            artifacts.append(artifact)
+        return tuple(artifacts)
+
     async def _shrink_summary_messages(
         self,
         messages: list[ChatMessage],
@@ -339,10 +427,7 @@ def build_compacted_history(
     )
     boundary_message = ChatMessage(
         role="user",
-        content=(
-            "以上摘要不包含完整文件、工具输出或超长用户原文细节；"
-            "需要具体内容时必须重新读取归档路径，不得依据摘要猜测。"
-        ),
+        content=_boundary_message().content,
         origin=MessageOrigin.COMPACT_BOUNDARY,
     )
     return HeavyCompactResult(
@@ -364,6 +449,172 @@ def _artifact_kind_for_message(message: ChatMessage):
     if message.role == "tool":
         return "tool_result"
     return "history"
+
+
+def _archive_history_json(messages: Sequence[ChatMessage]) -> str:
+    return json.dumps(
+        [_archive_message_payload(message) for message in messages],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _archive_message_payload(message: ChatMessage) -> dict[str, object]:
+    return {
+        "content": message.content,
+        "role": message.role,
+        "tool_arguments": message.tool_arguments,
+        "tool_call_id": message.tool_call_id,
+        "tool_name": message.tool_name,
+    }
+
+
+def _emergency_index_message(
+    messages: Sequence[ChatMessage],
+    artifact: ArchivedArtifact,
+) -> ChatMessage:
+    return ChatMessage(
+        role="assistant",
+        content=json.dumps(
+            {
+                "estimated_tokens": artifact.estimated_tokens,
+                "kind": "emergency_history_index",
+                "message_count": len(messages),
+                "path": artifact.path,
+                "preview": [
+                    {
+                        "content_head": message.content[:80],
+                        "role": message.role,
+                        "tool_call_id": message.tool_call_id,
+                    }
+                    for message in messages
+                ],
+                "sha256": artifact.sha256,
+                "truncated": True,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        origin=MessageOrigin.COMPACT_SUMMARY,
+    )
+
+
+def _boundary_message() -> ChatMessage:
+    return ChatMessage(
+        role="user",
+        content=(
+            "以上摘要不包含完整文件、工具输出或超长用户原文细节；"
+            "需要具体内容时必须重新读取归档路径，不得依据摘要猜测。"
+        ),
+        origin=MessageOrigin.COMPACT_BOUNDARY,
+    )
+
+
+def _built_request_tokens(
+    estimator: TokenEstimator,
+    build_request,
+    history: Sequence[ChatMessage],
+) -> int:
+    request = build_request(tuple(history))
+    return estimator.estimate(estimator.snapshot(request.messages, request.tools)).tokens
+
+
+def _first_unarchived_recent(
+    messages: Sequence[ChatMessage],
+    recent_start: int,
+) -> int | None:
+    for index in range(recent_start, len(messages)):
+        if messages[index].origin is not MessageOrigin.COMPACT_PREVIEW:
+            return index
+    return None
+
+
+def _archive_message_preview(
+    message: ChatMessage,
+    *,
+    transaction: ArchiveTransaction,
+    estimator: TokenEstimator,
+    max_preview_tokens: int,
+) -> tuple[ArchivedArtifact, ChatMessage]:
+    artifact = transaction.archive_text(
+        kind=_artifact_kind_for_message(message),
+        text=message.content,
+    )
+    return (
+        artifact,
+        replace(
+            message,
+            content=_message_preview_content(
+                message,
+                artifact,
+                estimator=estimator,
+                max_preview_tokens=max_preview_tokens,
+            ),
+            origin=MessageOrigin.COMPACT_PREVIEW,
+        ),
+    )
+
+
+def _message_preview_content(
+    message: ChatMessage,
+    artifact: ArchivedArtifact,
+    *,
+    estimator: TokenEstimator,
+    max_preview_tokens: int,
+) -> str:
+    text = message.content
+    best_preview = _message_preview_json(message, artifact, head="", tail="")
+    low = 0
+    high = min(len(text) // 2, max_preview_tokens)
+    while low <= high:
+        side_chars = (low + high) // 2
+        candidate = _message_preview_json(
+            message,
+            artifact,
+            head=text[:side_chars],
+            tail=text[-side_chars:] if side_chars else "",
+        )
+        if estimator.estimate_text(candidate) <= max_preview_tokens:
+            best_preview = candidate
+            low = side_chars + 1
+        else:
+            high = side_chars - 1
+    return best_preview
+
+
+def _message_preview_json(
+    message: ChatMessage,
+    artifact: ArchivedArtifact,
+    *,
+    head: str,
+    tail: str,
+) -> str:
+    return json.dumps(
+        {
+            "estimated_tokens": artifact.estimated_tokens,
+            "head": head,
+            "kind": artifact.kind,
+            "original_chars": artifact.original_chars,
+            "path": artifact.path,
+            "role": message.role,
+            "sha256": artifact.sha256,
+            "tail": tail,
+            "tool_call_id": message.tool_call_id,
+            "truncated": True,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _rollback_quietly(transaction: ArchiveTransaction) -> None:
+    try:
+        transaction.rollback()
+    except Exception:
+        return
 
 
 def _summary_budget(config: CompactConfig, policy: CompactPolicy) -> int:

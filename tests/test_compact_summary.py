@@ -408,6 +408,109 @@ def test_conversation_compactor_recursively_shrinks_work_copy_before_final_summa
     session.close()
 
 
+def test_emergency_archives_old_history_without_calling_llm_and_adds_index_boundary(tmp_path):
+    module = _module()
+    config = CompactConfig(context_window_tokens=100_000)
+    policy = module.CompactPolicy(keep_recent_tokens=1, min_recent_messages=5)
+    old_messages = [
+        ChatMessage(role="assistant", content="旧回答"),
+        ChatMessage(role="tool", content="旧工具结果", tool_call_id="call-1"),
+    ]
+    recent_messages = [ChatMessage(role="user", content=f"recent-{index}") for index in range(5)]
+    llm = ScriptedSummaryLLM([])
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+    compactor = module.ConversationCompactor(llm, config, policy=policy)
+
+    result = compactor.emergency(
+        [*old_messages, *recent_messages],
+        build_request=_fake_build_request,
+        transaction=transaction,
+    )
+
+    assert llm.requests == []
+    assert result.actions == (CompactAction.EMERGENCY,)
+    assert result.history[0].role == "assistant"
+    assert result.history[0].origin is MessageOrigin.COMPACT_SUMMARY
+    index = json.loads(result.history[0].content)
+    assert index["kind"] == "emergency_history_index"
+    assert index["message_count"] == len(old_messages)
+    assert index["path"] == result.artifacts[0].path
+    assert result.history[1].origin is MessageOrigin.COMPACT_BOUNDARY
+    assert "重新读取归档" in result.history[1].content
+    assert result.history[-5:] == tuple(recent_messages)
+
+    transaction.commit()
+    archived = json.loads(_read_all(session, index["path"]))
+    assert archived == [
+        {"content": "旧回答", "role": "assistant", "tool_arguments": None, "tool_call_id": None, "tool_name": None},
+        {"content": "旧工具结果", "role": "tool", "tool_arguments": None, "tool_call_id": "call-1", "tool_name": None},
+    ]
+
+    session.close()
+
+
+def test_emergency_replaces_oversized_recent_content_with_recoverable_previews(tmp_path):
+    module = _module()
+    config = CompactConfig(
+        context_window_tokens=16_001,
+        tool_result_threshold_tokens=2_001,
+        tool_batch_threshold_tokens=2_002,
+    )
+    policy = module.CompactPolicy(keep_recent_tokens=1, min_recent_messages=5)
+    old_messages = [ChatMessage(role="assistant", content="old")]
+    recent_messages = [
+        ChatMessage(role="user", content=f"recent-{index}-" + ("乙" * 9_000))
+        for index in range(5)
+    ]
+    llm = ScriptedSummaryLLM([])
+    session = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    transaction = session.begin()
+    compactor = module.ConversationCompactor(llm, config, policy=policy)
+
+    result = compactor.emergency(
+        [*old_messages, *recent_messages],
+        build_request=_fake_build_request,
+        transaction=transaction,
+    )
+
+    assert llm.requests == []
+    assert len(result.history) == 7
+    compacted_recent = result.history[-5:]
+    assert [message.role for message in compacted_recent] == ["user"] * 5
+    assert all(message.origin is MessageOrigin.COMPACT_PREVIEW for message in compacted_recent)
+    assert all("乙" * 100 not in message.content for message in compacted_recent)
+
+    request_estimator = module.TokenEstimator()
+    request = _fake_build_request(result.history)
+    snapshot = request_estimator.snapshot(request.messages, request.tools)
+    assert request_estimator.estimate(snapshot).tokens < config.context_window_tokens - policy.auto_reserve_tokens
+
+    transaction.commit()
+    for original, compacted in zip(recent_messages, compacted_recent):
+        preview = json.loads(compacted.content)
+        assert _read_all(session, preview["path"]) == original.content
+
+    session.close()
+
+
+def test_emergency_archive_failure_preserves_history_and_reports_archive_error():
+    module = _module()
+    config = CompactConfig(context_window_tokens=100_000)
+    policy = module.CompactPolicy(keep_recent_tokens=1, min_recent_messages=5)
+    history = [ChatMessage(role="assistant", content="old"), *[ChatMessage(role="user", content=str(index)) for index in range(5)]]
+    transaction = FailingTransaction()
+    llm = ScriptedSummaryLLM([])
+    compactor = module.ConversationCompactor(llm, config, policy=policy)
+
+    error = _emergency_error(compactor, history, build_request=_fake_build_request, transaction=transaction)
+
+    assert error.report.failure_code is CompactFailureCode.ARCHIVE_ERROR
+    assert transaction.rolled_back is True
+    assert history[0].content == "old"
+    assert llm.requests == []
+
+
 def _module():
     return importlib.import_module("mycode.compact.summary")
 
@@ -452,6 +555,35 @@ def _force_error(llm, message, **kwargs):
     except CompactError as exc:
         return exc
     raise AssertionError("summarize_oversized_message did not fail")
+
+
+def _emergency_error(compactor, history, **kwargs):
+    try:
+        compactor.emergency(history, **kwargs)
+    except CompactError as exc:
+        return exc
+    raise AssertionError("emergency did not fail")
+
+
+def _fake_build_request(messages):
+    return FakePromptRequest(messages=tuple(messages), tools=())
+
+
+class FakePromptRequest:
+    def __init__(self, *, messages, tools):
+        self.messages = messages
+        self.tools = tools
+
+
+class FailingTransaction:
+    def __init__(self):
+        self.rolled_back = False
+
+    def archive_text(self, *, kind, text):
+        raise OSError("disk full")
+
+    def rollback(self):
+        self.rolled_back = True
 
 
 class ScriptedSummaryLLM(BaseLLM):
