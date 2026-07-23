@@ -69,11 +69,20 @@ class SystemReminder:
 
 
 @dataclass(frozen=True)
+class PromptContextBlock:
+    id: str
+    kind: str
+    priority: int
+    content: str
+
+
+@dataclass(frozen=True)
 class TurnPromptContext:
     turn_id: int
     environment: EnvironmentSnapshot
     plan_only: bool
     reminders: tuple[SystemReminder, ...]
+    framework_blocks: tuple[PromptContextBlock, ...] = ()
 
 
 @dataclass(frozen=True)

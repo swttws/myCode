@@ -61,6 +61,7 @@ class FakeContextManager:
 def test_cli_loads_config_builds_session_and_runs_tui(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     home = tmp_path / "home"
+    home.mkdir()
     monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
     config_path = tmp_path / "mycode.yaml"
     write_config(
@@ -118,6 +119,7 @@ thinking:
             permission,
             context_manager,
             config,
+            project_memory=None,
         ):
             created["agent_kwargs"] = {
                 "llm": llm,
@@ -127,6 +129,7 @@ thinking:
                 "permission": permission,
                 "context_manager": context_manager,
                 "config": config,
+                "project_memory": project_memory,
             }
 
     class FakeChatSession:
@@ -168,6 +171,84 @@ thinking:
     assert created["session_agent"].__class__ is FakeAgentLoop
     assert created["session_permissions"] is permission_service
     assert created["session"].__class__ is FakeChatSession
+
+
+def test_cli_builds_project_memory_and_passes_it_into_agent_loop(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    config_path = tmp_path / "mycode.yaml"
+    write_primary_config(config_path)
+    created = {}
+
+    class FakeLLM:
+        pass
+
+    class FakeProjectMemory:
+        async def close(self):
+            return None
+
+    fake_project_memory = FakeProjectMemory()
+
+    class FakePermissionService:
+        def __init__(self):
+            self.path_guard = PathGuard(tmp_path)
+
+    class FakePermissionFactory:
+        @classmethod
+        def create(cls, workspace_root, **kwargs):
+            return FakePermissionService()
+
+    class FakeContextManager:
+        def __init__(self):
+            self.artifact_tool = FakeCompactArtifactTool()
+
+        def close(self):
+            created["context_closed"] = True
+
+    class FakePool:
+        tools = ()
+
+        def add_tools_listener(self, listener):
+            pass
+
+        async def initialize_all(self):
+            return ()
+
+        async def close(self):
+            created["pool_closed"] = True
+
+    class FakeAgentLoop:
+        def __init__(self, *, project_memory=None, **kwargs):
+            created["agent_project_memory"] = project_memory
+
+    class FakeTUI:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run(self):
+            return 0
+
+    def fake_create_project_memory_manager(**kwargs):
+        created["project_kwargs"] = kwargs
+        return fake_project_memory
+
+    monkeypatch.setattr(cli, "create_llm", lambda config: FakeLLM())
+    monkeypatch.setattr(cli, "PermissionService", FakePermissionFactory)
+    monkeypatch.setattr(cli, "create_project_memory_manager", fake_create_project_memory_manager)
+    monkeypatch.setattr(cli, "create_context_manager", lambda **kwargs: FakeContextManager(), raising=False)
+    monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr(cli, "ChatTUI", FakeTUI)
+    monkeypatch.setattr(cli, "load_mcp_config", lambda *args, **kwargs: (MCPConfig(()), ()))
+    monkeypatch.setattr(cli, "MCPServerPool", lambda config: FakePool())
+
+    exit_code = cli.main(["--config", str(config_path)])
+
+    assert exit_code == 0
+    assert created["project_kwargs"]["workspace_root"] == tmp_path
+    assert created["project_kwargs"]["home"] == home
+    assert created["agent_project_memory"] is fake_project_memory
 
 
 def test_cli_returns_error_before_tui_when_config_is_invalid(tmp_path, capsys):

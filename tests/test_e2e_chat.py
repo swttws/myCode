@@ -37,6 +37,7 @@ compact:
 
 def patch_tui(monkeypatch, inputs, output, home):
     real_create = cli.PermissionService.create
+    home.mkdir(parents=True, exist_ok=True)
 
     class IsolatedPermissionService:
         @classmethod
@@ -54,10 +55,19 @@ def patch_tui(monkeypatch, inputs, output, home):
 
     monkeypatch.setattr(cli, "ChatTUI", fake_tui_factory)
     monkeypatch.setattr(cli, "PermissionService", IsolatedPermissionService)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
 
 
 def conversation_messages(request):
     return [message for message in request if message.origin is MessageOrigin.CONVERSATION]
+
+
+def main_requests(llm):
+    return [
+        request
+        for request, tools in zip(llm.requests, llm.tool_requests)
+        if tools not in (None, [])
+    ]
 
 
 def test_e2e_cli_tui_session_memory_streams_and_sends_previous_context(tmp_path, monkeypatch):
@@ -78,13 +88,14 @@ def test_e2e_cli_tui_session_memory_streams_and_sends_previous_context(tmp_path,
 
     assert exit_code == 0
     assert "hi" in output.getvalue()
-    assert conversation_messages(llm.requests[1]) == [
+    requests = main_requests(llm)
+    assert conversation_messages(requests[1]) == [
         ChatMessage(role="user", content="hello"),
         ChatMessage(role="assistant", content="hi"),
         ChatMessage(role="user", content="second"),
     ]
-    assert llm.requests[1][0].origin is MessageOrigin.SYSTEM_INSTRUCTION
-    assert llm.requests[1][-1].origin is MessageOrigin.ENVIRONMENT_CONTEXT
+    assert requests[1][0].origin is MessageOrigin.SYSTEM_INSTRUCTION
+    assert requests[1][-1].origin is MessageOrigin.ENVIRONMENT_CONTEXT
     assert llm.tool_requests[0] is not None
 
 
@@ -105,7 +116,8 @@ def test_e2e_clear_removes_previous_context_before_next_request(tmp_path, monkey
     exit_code = cli.main(["--config", str(config_path)])
 
     assert exit_code == 0
-    assert conversation_messages(llm.requests[1]) == [
+    requests = main_requests(llm)
+    assert conversation_messages(requests[1]) == [
         ChatMessage(role="user", content="after clear"),
     ]
 
@@ -141,7 +153,8 @@ def test_e2e_tool_call_result_is_stored_for_next_request(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert "工具已执行" in output.getvalue()
-    second_request = conversation_messages(llm.requests[1])
+    requests = main_requests(llm)
+    second_request = conversation_messages(requests[1])
     assert second_request[0] == ChatMessage(role="user", content="read note")
     assert second_request[1] == ChatMessage(
         role="assistant",
@@ -194,7 +207,7 @@ def test_e2e_failed_edit_tool_call_returns_structured_error_and_continues(tmp_pa
     assert "expected exactly one match, found 2" in text
     assert "still here" in text
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "same\nsame\n"
-    assert len(llm.requests) == 2
+    assert len(main_requests(llm)) == 2
 
 
 def test_e2e_next_turn_sends_previous_tool_history_to_llm(tmp_path, monkeypatch):
@@ -228,8 +241,9 @@ def test_e2e_next_turn_sends_previous_tool_history_to_llm(tmp_path, monkeypatch)
     exit_code = cli.main(["--config", str(config_path)])
 
     assert exit_code == 0
-    assert len(llm.requests) == 3
-    second_request = conversation_messages(llm.requests[1])
+    requests = main_requests(llm)
+    assert len(requests) == 3
+    second_request = conversation_messages(requests[1])
     assert second_request[0] == ChatMessage(role="user", content="read note")
     assert second_request[1] == ChatMessage(
         role="assistant",
@@ -241,7 +255,7 @@ def test_e2e_next_turn_sends_previous_tool_history_to_llm(tmp_path, monkeypatch)
     assert second_request[2].role == "tool"
     assert second_request[2].tool_call_id == "call-1"
     assert "tool text" in second_request[2].content
-    third_request = conversation_messages(llm.requests[2])
+    third_request = conversation_messages(requests[2])
     assert third_request[-2] == ChatMessage(role="assistant", content="summary")
     assert third_request[-1] == ChatMessage(role="user", content="summarize result")
 
@@ -277,6 +291,7 @@ def test_e2e_clear_removes_tool_history_before_next_request(tmp_path, monkeypatc
     exit_code = cli.main(["--config", str(config_path)])
 
     assert exit_code == 0
-    assert conversation_messages(llm.requests[2]) == [
+    requests = main_requests(llm)
+    assert conversation_messages(requests[2]) == [
         ChatMessage(role="user", content="after clear"),
     ]

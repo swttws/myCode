@@ -84,6 +84,18 @@ compact:
 
 正常自动流程会先做轻量归档，再在仍超过安全线时调用摘要压缩。OpenAI Chat、OpenAI Responses 和 Anthropic 的 streaming usage 会被归一化为输入 token 锚点，后续预算估算会在字符估算与 usage 增量之间稳定切换。若摘要连续失败三次，会打开熔断并执行本地应急压缩；熔断期间自动路径不再调用摘要 LLM，直到一次成功的手动 `/compact` 清零失败计数。不可恢复的归档失败会保留原始 memory，不发送不安全请求。
 
+## Stage 08 project memory
+
+Stage 08 adds project memory as the long-term memory boundary for myCode. It refreshes local instructions, restored session history, and memory indexes before each normal user request, then records conversation history and schedules automatic notes after the final response.
+
+Instruction files are loaded in this fixed order: project root `mycode.md`, project directory `.mycode/instructions.md`, and user file `~/.mycode/instructions.md`. A line-level `@include relative/path.md` can expand additional Markdown. Project includes must stay inside the workspace, and user includes must stay inside `~/.mycode`; path escape, symlink escape, missing include, recursion cycles, and excessive include depth are reported as diagnostics instead of leaking file contents.
+
+Conversation archives are append-only `JSONL` files under `~/.mycode/projects/<workspace_sha256>/sessions/`. Session IDs use `YYYYMMDD-HHMMSS-xxxx`, metadata is derived by scanning JSONL, and no meta sidecar is written. automatic restore selects the newest recoverable session that is not older than 30 days, skips bad lines, downgrades unknown message origins to ordinary conversation messages, and truncates dangling assistant tool calls before they reach the model.
+
+Long-term notes are Markdown files split by scope. User memory lives in `~/.mycode/memory/`; project memory lives in `~/.mycode/projects/<workspace_sha256>/memory/`. Each scope has an `index.md` that is injected into framework context with deterministic limits of 200 lines and 25KB. Automatic note updates use the existing indexes and the latest user/assistant exchange to decide among `user_preference`, `correction`, `project_knowledge`, and `reference` notes. The note update model is called with `tools=[]`, and invalid decisions are ignored without touching existing notes.
+
+Stage 08 deliberately does not migrate `.mewcode`, does not build a vector database, does not implement RAG, does not provide team sync, and does not add a graphical management UI. The memory package keeps this boundary local, file-backed, deterministic, and testable.
+
 ## Stage 06 MCP 远端工具
 
 MCP server 使用独立 YAML 配置，不与 LLM 配置混合。可以用 `--mcp-config path/to/file.yaml` 显式指定；省略参数时依次查找当前目录的 `mycode.mcp.yaml` 和用户目录的 `~/.mycode/mcp.yaml`。两处都不存在时 MCP 保持禁用，本地工具和普通聊天仍可使用。

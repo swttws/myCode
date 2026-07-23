@@ -29,8 +29,8 @@ class ScriptedLLM(BaseLLM):
 
 
 class FakePromptBuilder:
-    def begin_turn(self, *, turn_id, plan_only):
-        return (turn_id, plan_only)
+    def begin_turn(self, *, turn_id, plan_only, framework_blocks=()):
+        return (turn_id, plan_only, tuple(framework_blocks))
 
     def build(self, *, history, tools, turn, round_index):
         class Result:

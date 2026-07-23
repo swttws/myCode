@@ -1,6 +1,6 @@
 from mycode.llm import ChatMessage, MessageOrigin
 from mycode.prompt.builder import PromptBuilder
-from mycode.prompt.models import EnvironmentSnapshot, PromptConfig, PromptModuleDefinition
+from mycode.prompt.models import EnvironmentSnapshot, PromptConfig, PromptContextBlock, PromptModuleDefinition
 from mycode.prompt.registry import PromptBuildError, PromptRegistry
 from mycode.prompt.reminder import ReminderPolicy
 from mycode.tool import ToolDefinition, ToolKind
@@ -95,3 +95,34 @@ def test_builder_skips_regular_module_failure_and_rejects_protected_module_failu
             turn=protected_builder.begin_turn(turn_id=2, plan_only=False),
             round_index=1,
         )
+
+
+def test_builder_injects_framework_context_after_history_before_runtime_messages():
+    collector = FakeEnvironmentCollector()
+    builder = PromptBuilder(
+        registry=PromptRegistry([FakeModule("stable", 100, "stable instruction")]),
+        environment_collector=collector,
+        reminder_policy=ReminderPolicy(4),
+        config=PromptConfig(),
+    )
+    history = (ChatMessage(role="user", content="current request"),)
+    framework_blocks = (
+        PromptContextBlock(id="memory", kind="memory_index", priority=200, content="project memory"),
+        PromptContextBlock(id="instructions", kind="instructions", priority=100, content="project instructions"),
+    )
+
+    default_turn = builder.begin_turn(turn_id=1, plan_only=False)
+    turn = builder.begin_turn(turn_id=2, plan_only=True, framework_blocks=framework_blocks)
+    result = builder.build(history=history, tools=(), turn=turn, round_index=1)
+
+    assert default_turn.framework_blocks == ()
+    assert turn.framework_blocks == framework_blocks
+    framework_message = result.messages[2]
+    assert result.messages[1] == history[0]
+    assert framework_message.role == "user"
+    assert framework_message.origin is MessageOrigin.FRAMEWORK_CONTEXT
+    assert framework_message.content.startswith("<framework-context>")
+    assert framework_message.content.index("project instructions") < framework_message.content.index("project memory")
+    assert result.messages[3].origin is MessageOrigin.SYSTEM_REMINDER
+    assert result.messages[4].origin is MessageOrigin.ENVIRONMENT_CONTEXT
+    assert history == (ChatMessage(role="user", content="current request"),)
