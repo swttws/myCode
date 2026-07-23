@@ -21,7 +21,7 @@ from mycode.compact.models import (
     RequestSnapshot,
     TokenEstimate,
 )
-from mycode.llm import BaseLLM, ChatMessage, MessageOrigin, StreamEvent, StreamEventType
+from mycode.llm import BaseLLM, ChatMessage, MessageOrigin, StreamEvent, StreamEventType, UsageObservation
 from mycode.memory import InMemoryConversationMemory
 from mycode.tool import ToolCall
 
@@ -323,6 +323,140 @@ def test_context_manager_uses_emergency_without_summary_llm_while_circuit_is_ope
     store.close()
 
 
+def test_context_manager_manual_compaction_noops_when_there_is_no_old_history(tmp_path):
+    from mycode.compact.manager import ContextManager
+
+    memory = CountingMemory([ChatMessage(role="user", content="only recent")])
+    llm = RecordingLLM()
+    store = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    manager = ContextManager(
+        llm=llm,
+        memory=memory,
+        config=CompactConfig(context_window_tokens=100_000),
+        store=store,
+    )
+
+    report = asyncio.run(manager.compact_manual(build_request=_fake_build_request, run_deadline=None))
+
+    assert report.status is CompactStatus.NO_OP
+    assert report.actions == (CompactAction.NONE,)
+    assert llm.requests == []
+    assert memory.replace_calls == 0
+
+    store.close()
+
+
+def test_context_manager_manual_success_resets_open_circuit(tmp_path):
+    from mycode.compact.manager import ContextManager
+
+    memory = CountingMemory(
+        [
+            ChatMessage(role="assistant", content="old enough to summarize"),
+            *[ChatMessage(role="user", content=f"recent-{index}") for index in range(5)],
+        ]
+    )
+    llm = RecordingLLM(scripts=[[StreamEvent(StreamEventType.TEXT_DELTA, _summary_output("手动摘要")), StreamEvent(StreamEventType.DONE)]])
+    store = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    manager = ContextManager(
+        llm=llm,
+        memory=memory,
+        config=CompactConfig(context_window_tokens=100_000),
+        store=store,
+        policy=CompactPolicy(keep_recent_tokens=1, min_recent_messages=5),
+    )
+    manager._circuit_open = True
+    manager._failure_count = 3
+
+    report = asyncio.run(manager.compact_manual(build_request=_fake_build_request, run_deadline=None))
+
+    assert report.status is CompactStatus.COMPACTED
+    assert report.actions == (CompactAction.HEAVY,)
+    assert report.circuit_open is False
+    assert manager._circuit_open is False
+    assert manager._failure_count == 0
+    assert memory.replace_calls == 1
+
+    store.close()
+
+
+def test_context_manager_manual_failure_keeps_open_circuit(tmp_path):
+    from mycode.compact.manager import ContextManager
+
+    memory = CountingMemory(
+        [
+            ChatMessage(role="assistant", content="old enough to summarize"),
+            *[ChatMessage(role="user", content=f"recent-{index}") for index in range(5)],
+        ]
+    )
+    llm = RecordingLLM(
+        scripts=[
+            [StreamEvent(StreamEventType.TEXT_DELTA, "bad"), StreamEvent(StreamEventType.DONE)]
+            for _ in range(3)
+        ]
+    )
+    store = ArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    manager = ContextManager(
+        llm=llm,
+        memory=memory,
+        config=CompactConfig(context_window_tokens=100_000),
+        store=store,
+        policy=CompactPolicy(keep_recent_tokens=1, min_recent_messages=5),
+    )
+    manager._circuit_open = True
+
+    report = asyncio.run(manager.compact_manual(build_request=_fake_build_request, run_deadline=None))
+
+    assert report.status is CompactStatus.FAILED
+    assert report.circuit_open is True
+    assert manager._circuit_open is True
+    assert memory.replace_calls == 0
+
+    store.close()
+
+
+def test_context_manager_lifecycle_record_usage_clear_close_artifact_tool_and_factory(tmp_path):
+    from mycode.compact import create_context_manager
+    from mycode.compact.manager import ContextManager
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    memory = CountingMemory([ChatMessage(role="user", content="hello")])
+    manager = create_context_manager(
+        workspace_root=workspace,
+        home=tmp_path / "home",
+        llm=RecordingLLM(),
+        memory=memory,
+        config=CompactConfig(context_window_tokens=100_000),
+        model_timeout_seconds=1.0,
+    )
+
+    assert isinstance(manager, ContextManager)
+    assert manager.artifact_tool.definition.name == "read_compact_artifact"
+    assert manager.artifact_tool.definition.grant_arguments == ()
+
+    snapshot = manager._estimator.snapshot([ChatMessage(role="user", content="hello")], [])
+    manager.record_usage(snapshot, UsageObservation(provider="test", input_tokens=123))
+    assert manager._estimator.estimate(snapshot).source == "usage_delta"
+
+    first_session_dir = manager._store.session_dir
+    manager._failure_count = 2
+    manager._circuit_open = True
+
+    manager.clear()
+
+    assert memory.messages() == []
+    assert manager._failure_count == 0
+    assert manager._circuit_open is False
+    assert manager._estimator.estimate(snapshot).source == "full_chars"
+    assert not first_session_dir.exists()
+    assert manager._store.session_dir.exists()
+    assert manager._store.session_dir != first_session_dir
+
+    second_session_dir = manager._store.session_dir
+    manager.close()
+    assert not second_session_dir.exists()
+
+
 class RecordingLLM(BaseLLM):
     def __init__(self, scripts=None):
         self.requests = []
@@ -351,6 +485,10 @@ class FakePromptRequest:
     def __init__(self, *, messages, tools):
         self.messages = messages
         self.tools = tools
+
+
+def _fake_build_request(messages):
+    return FakePromptRequest(messages=tuple(messages), tools=())
 
 
 class CountingMemory(InMemoryConversationMemory):
@@ -392,3 +530,13 @@ class RecordingTransaction:
     def rollback(self):
         self.rolled_back = True
         return self._inner.rollback()
+
+
+def _summary_output(section_text):
+    from mycode.compact.summary_prompt import SUMMARY_SECTIONS
+
+    return (
+        "<analysis-draft>草稿</analysis-draft><summary>"
+        + "\n\n".join(f"## {section}\n{section_text}" for section in SUMMARY_SECTIONS)
+        + "</summary>"
+    )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from mycode.compact.archive import ArchiveSession
+from pathlib import Path
+
+from mycode.compact.archive import ArchiveSession, ReadCompactArtifactTool
 from mycode.compact.estimator import TokenEstimator
 from mycode.compact.light import ToolResultCompactor
 from mycode.compact.models import (
@@ -13,7 +15,8 @@ from mycode.compact.models import (
     CompactStatus,
     PreparedContext,
 )
-from mycode.compact.summary import ConversationCompactor
+from mycode.compact.summary import ConversationCompactor, select_recent_messages, summary_input_messages
+from mycode.llm import UsageObservation
 from mycode.memory import ConversationMemory
 
 
@@ -122,7 +125,87 @@ class ContextManager:
             before_tokens=before_tokens,
             prior_actions=actions,
             prior_archived_count=archived_count,
+            fallback_to_emergency=True,
         )
+
+    @property
+    def artifact_tool(self) -> ReadCompactArtifactTool:
+        return ReadCompactArtifactTool(self._store)
+
+    async def compact_manual(
+        self,
+        *,
+        build_request,
+        run_deadline: float | None,
+    ) -> CompactReport:
+        history = tuple(self._memory.messages())
+        recent_messages = select_recent_messages(
+            history,
+            keep_recent_tokens=self._policy.keep_recent_tokens,
+            min_recent_messages=self._policy.min_recent_messages,
+            estimator=self._estimator,
+        )
+        if not summary_input_messages(history, recent_messages):
+            return _report(
+                status=CompactStatus.NO_OP,
+                actions=(CompactAction.NONE,),
+                before_tokens=sum(self._estimator.estimate_text(message.content) for message in history),
+                after_tokens=sum(self._estimator.estimate_text(message.content) for message in history),
+                archived_count=0,
+                circuit_open=self._circuit_open,
+                message_zh="没有可压缩的旧历史。",
+            )
+
+        before_tokens = sum(self._estimator.estimate_text(message.content) for message in history)
+        try:
+            prepared = await self._prepare_heavy(
+                history,
+                build_request=build_request,
+                run_deadline=run_deadline,
+                before_tokens=before_tokens,
+                prior_actions=(CompactAction.NONE,),
+                prior_archived_count=0,
+                fallback_to_emergency=False,
+            )
+        except CompactError as exc:
+            return _report(
+                status=CompactStatus.FAILED,
+                actions=(CompactAction.HEAVY,),
+                before_tokens=before_tokens,
+                after_tokens=exc.report.after_tokens,
+                archived_count=exc.report.archived_count,
+                attempts=exc.report.attempts,
+                circuit_open=self._circuit_open,
+                failure_code=exc.report.failure_code,
+                message_zh=exc.report.message_zh,
+            )
+
+        self._failure_count = 0
+        self._circuit_open = False
+        return _report(
+            status=prepared.report.status,
+            actions=prepared.report.actions,
+            before_tokens=prepared.report.before_tokens,
+            after_tokens=prepared.report.after_tokens,
+            archived_count=prepared.report.archived_count,
+            attempts=prepared.report.attempts,
+            circuit_open=False,
+            failure_code=prepared.report.failure_code,
+            message_zh=prepared.report.message_zh,
+        )
+
+    def record_usage(self, snapshot, usage: UsageObservation) -> None:
+        self._estimator.record_usage(snapshot, usage)
+
+    def clear(self) -> None:
+        self._memory.clear()
+        self._estimator.reset()
+        self._failure_count = 0
+        self._circuit_open = False
+        self._store.reset_session()
+
+    def close(self) -> None:
+        self._store.close()
 
     async def _prepare_heavy(
         self,
@@ -133,6 +216,7 @@ class ContextManager:
         before_tokens: int,
         prior_actions: tuple[CompactAction, ...],
         prior_archived_count: int,
+        fallback_to_emergency: bool,
     ) -> PreparedContext:
         for attempt in range(1, self._policy.max_attempts + 1):
             transaction = self._store.begin()
@@ -187,15 +271,30 @@ class ContextManager:
                 self._failure_count += 1
                 continue
 
-        self._circuit_open = True
-        # 第三次完整失败后立即切换到本地应急压缩，避免继续消耗摘要调用。
-        return self._prepare_emergency(
-            history,
-            build_request=build_request,
-            before_tokens=before_tokens,
-            prior_actions=_merge_actions(prior_actions, (CompactAction.HEAVY,)),
-            prior_archived_count=prior_archived_count,
-            attempts=self._policy.max_attempts,
+        if fallback_to_emergency:
+            self._circuit_open = True
+            # 第三次完整失败后立即切换到本地应急压缩，避免继续消耗摘要调用。
+            return self._prepare_emergency(
+                history,
+                build_request=build_request,
+                before_tokens=before_tokens,
+                prior_actions=_merge_actions(prior_actions, (CompactAction.HEAVY,)),
+                prior_archived_count=prior_archived_count,
+                attempts=self._policy.max_attempts,
+            )
+
+        raise CompactError(
+            _report(
+                status=CompactStatus.FAILED,
+                actions=_merge_actions(prior_actions, (CompactAction.HEAVY,)),
+                before_tokens=before_tokens,
+                after_tokens=before_tokens,
+                archived_count=prior_archived_count,
+                attempts=self._policy.max_attempts,
+                circuit_open=self._circuit_open,
+                failure_code=CompactFailureCode.INVALID_FORMAT,
+                message_zh="手动压缩失败。",
+            )
         )
 
     def _prepare_emergency(
@@ -302,3 +401,21 @@ def _merge_actions(*action_groups: tuple[CompactAction, ...]) -> tuple[CompactAc
             if action not in merged:
                 merged.append(action)
     return tuple(merged or [CompactAction.NONE])
+
+
+def create_context_manager(
+    *,
+    workspace_root: str | Path,
+    home: str | Path,
+    llm,
+    memory: ConversationMemory,
+    config: CompactConfig,
+    model_timeout_seconds: float | None,
+) -> ContextManager:
+    return ContextManager(
+        llm=llm,
+        memory=memory,
+        config=config,
+        store=ArchiveSession(workspace_root, home=home),
+        model_timeout_seconds=model_timeout_seconds,
+    )

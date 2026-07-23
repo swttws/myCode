@@ -51,6 +51,18 @@ class ArchiveSession:
 
     def close(self) -> None:
         self._lock.release()
+        shutil.rmtree(self.session_dir, ignore_errors=True)
+        self._allowed_artifacts.clear()
+
+    def reset_session(self) -> None:
+        self.close()
+        self.session_id = str(uuid.uuid4())
+        self.session_dir = self.context_dir / self.session_id
+        self.session_dir.mkdir(parents=True, exist_ok=False)
+        self._write_registration()
+        self._lock = _ActivityLock(self.session_dir / "session.lock")
+        if not self._lock.acquire():
+            raise RuntimeError(f"archive session is already active: {self.session_dir}")
 
     @property
     def allowed_paths(self) -> frozenset[Path]:
