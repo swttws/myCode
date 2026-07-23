@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,7 +14,7 @@ from mycode.mcp import (
 )
 from mycode.permission.models import PermissionConfigError
 from mycode.permission.pathing import PathGuard
-from mycode.tool import ToolKind
+from mycode.tool import ToolDefinition, ToolKind
 
 
 def write_config(path, text):
@@ -34,8 +35,33 @@ compact:
     )
 
 
+class FakeCompactArtifactTool:
+    @property
+    def definition(self):
+        return ToolDefinition(
+            name="read_compact_artifact",
+            description="Read compact artifact.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            kind=ToolKind.READ,
+        )
+
+
+class FakeContextManager:
+    def __init__(self, operations=None):
+        self.artifact_tool = FakeCompactArtifactTool()
+        self.operations = operations
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+        if self.operations is not None:
+            self.operations.append("context_close")
+
+
 def test_cli_loads_config_builds_session_and_runs_tui(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
     config_path = tmp_path / "mycode.yaml"
     write_config(
         config_path,
@@ -75,14 +101,32 @@ thinking:
             created["permission_workspace"] = workspace_root
             return permission_service
 
+    fake_context = FakeContextManager()
+
+    def fake_create_context_manager(**kwargs):
+        created["context_kwargs"] = kwargs
+        return fake_context
+
     class FakeAgentLoop:
-        def __init__(self, *, llm, memory, tool_executor, tool_registry, permission):
+        def __init__(
+            self,
+            *,
+            llm,
+            memory,
+            tool_executor,
+            tool_registry,
+            permission,
+            context_manager,
+            config,
+        ):
             created["agent_kwargs"] = {
                 "llm": llm,
                 "memory": memory,
                 "tool_executor": tool_executor,
                 "tool_registry": tool_registry,
                 "permission": permission,
+                "context_manager": context_manager,
+                "config": config,
             }
 
     class FakeChatSession:
@@ -96,6 +140,7 @@ thinking:
 
     monkeypatch.setattr(cli, "create_llm", fake_create_llm)
     monkeypatch.setattr(cli, "PermissionService", FakePermissionFactory)
+    monkeypatch.setattr(cli, "create_context_manager", fake_create_context_manager, raising=False)
     monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
     monkeypatch.setattr(cli, "ChatSession", FakeChatSession)
     monkeypatch.setattr(cli, "ChatTUI", FakeTUI)
@@ -110,7 +155,15 @@ thinking:
     assert created["agent_kwargs"]["tool_executor"] is not None
     assert created["agent_kwargs"]["tool_registry"] is not None
     assert created["agent_kwargs"]["permission"]._service is permission_service
+    assert created["agent_kwargs"]["context_manager"] is fake_context
+    assert created["context_kwargs"]["workspace_root"] == tmp_path
+    assert created["context_kwargs"]["home"] == home
+    assert created["context_kwargs"]["llm"].__class__ is FakeLLM
+    assert created["context_kwargs"]["memory"] is created["agent_kwargs"]["memory"]
+    assert created["context_kwargs"]["config"] is created["config"].compact
+    assert created["context_kwargs"]["model_timeout_seconds"] is None
     assert created["agent_kwargs"]["tool_registry"].get("read_file")._path_guard is permission_service.path_guard
+    assert created["agent_kwargs"]["tool_registry"].get("read_compact_artifact") is fake_context.artifact_tool
     assert created["permission_workspace"] == tmp_path
     assert created["session_agent"].__class__ is FakeAgentLoop
     assert created["session_permissions"] is permission_service
@@ -210,6 +263,7 @@ def test_cli_initializes_registers_reports_and_closes_mcp_in_same_loop(
         kind=ToolKind.WRITE,
     )
     created = {}
+    operations = []
 
     class FakePool:
         tools = (remote_tool,)
@@ -231,6 +285,7 @@ def test_cli_initializes_registers_reports_and_closes_mcp_in_same_loop(
         async def close(self):
             created["close_loop"] = asyncio.get_running_loop()
             created["closed"] = True
+            operations.append("pool_close")
 
         def is_available(self, server_name):
             return True
@@ -255,6 +310,7 @@ def test_cli_initializes_registers_reports_and_closes_mcp_in_same_loop(
     class FakeAgentLoop:
         def __init__(self, **kwargs):
             created["registry"] = kwargs["tool_registry"]
+            created["context_manager"] = kwargs["context_manager"]
 
     class FakeTUI:
         def __init__(self, **kwargs):
@@ -266,6 +322,13 @@ def test_cli_initializes_registers_reports_and_closes_mcp_in_same_loop(
 
     monkeypatch.setattr(cli, "create_llm", lambda config: object())
     monkeypatch.setattr(cli, "PermissionService", FakePermissionFactory)
+    fake_context = FakeContextManager(operations)
+    monkeypatch.setattr(
+        cli,
+        "create_context_manager",
+        lambda **kwargs: fake_context,
+        raising=False,
+    )
     monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
     monkeypatch.setattr(cli, "ChatTUI", FakeTUI)
     monkeypatch.setattr(
@@ -291,9 +354,13 @@ def test_cli_initializes_registers_reports_and_closes_mcp_in_same_loop(
     assert exit_code == 0
     assert created["initialize_loop"] is created["tui_loop"] is created["close_loop"]
     assert created["closed"] is True
+    assert fake_context.closed is True
+    assert operations == ["context_close", "pool_close"]
     assert callable(created["tools_listener"])
     assert created["registry"].get("remote__echo") is not None
     assert created["registry"].get("tool_search") is not None
+    assert created["registry"].get("read_compact_artifact") is fake_context.artifact_tool
+    assert created["context_manager"] is fake_context
     assert "safe config issue" in captured.err
     assert "safe failure" in captured.err
     assert "config" in captured.err
@@ -307,6 +374,7 @@ def test_cli_closes_mcp_pool_when_tui_raises(tmp_path, monkeypatch):
     primary = tmp_path / "mycode.yaml"
     write_primary_config(primary)
     closed = []
+    operations = []
 
     class FakePool:
         tools = ()
@@ -319,6 +387,7 @@ def test_cli_closes_mcp_pool_when_tui_raises(tmp_path, monkeypatch):
 
         async def close(self):
             closed.append(asyncio.get_running_loop())
+            operations.append("pool_close")
 
     class FakeTUI:
         def __init__(self, **kwargs):
@@ -328,6 +397,13 @@ def test_cli_closes_mcp_pool_when_tui_raises(tmp_path, monkeypatch):
             raise RuntimeError("tui failed")
 
     monkeypatch.setattr(cli, "create_llm", lambda config: object())
+    fake_context = FakeContextManager(operations)
+    monkeypatch.setattr(
+        cli,
+        "create_context_manager",
+        lambda **kwargs: fake_context,
+        raising=False,
+    )
     monkeypatch.setattr(cli, "ChatTUI", FakeTUI)
     monkeypatch.setattr(cli, "load_mcp_config", lambda *args, **kwargs: (MCPConfig(()), ()))
     monkeypatch.setattr(cli, "MCPServerPool", lambda config: FakePool())
@@ -336,6 +412,107 @@ def test_cli_closes_mcp_pool_when_tui_raises(tmp_path, monkeypatch):
         cli.main(["--config", str(primary)])
 
     assert len(closed) == 1
+    assert fake_context.closed is True
+    assert operations == ["context_close", "pool_close"]
+
+
+def test_cli_closes_context_and_pool_when_mcp_initialize_raises(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    operations = []
+
+    class FakePool:
+        tools = ()
+
+        async def initialize_all(self):
+            operations.append("initialize")
+            raise RuntimeError("mcp init failed")
+
+        async def close(self):
+            operations.append("pool_close")
+
+    class FakePermissionService:
+        path_guard = PathGuard(tmp_path)
+
+    fake_context = FakeContextManager(operations)
+    monkeypatch.setattr(cli, "MCPServerPool", lambda config: FakePool())
+    monkeypatch.setattr(
+        cli,
+        "create_context_manager",
+        lambda **kwargs: fake_context,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="mcp init failed"):
+        asyncio.run(
+            cli._run_application(
+                config=SimpleNamespace(compact=object()),
+                llm=object(),
+                permissions=FakePermissionService(),
+                mcp_config=MCPConfig(()),
+                mcp_config_diagnostics=(),
+            )
+        )
+
+    assert fake_context.closed is True
+    assert operations == ["initialize", "context_close", "pool_close"]
+
+
+def test_cli_returns_error_when_context_cache_creation_fails(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    primary = tmp_path / "mycode.yaml"
+    write_primary_config(primary)
+    operations = []
+
+    class FakePool:
+        tools = ()
+
+        async def initialize_all(self):
+            return ()
+
+        async def close(self):
+            operations.append("pool_close")
+
+    class FakePermissionService:
+        path_guard = PathGuard(tmp_path)
+
+    class FakePermissionFactory:
+        @classmethod
+        def create(cls, workspace_root, **kwargs):
+            return FakePermissionService()
+
+    class FakeAgentLoop:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeTUI:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run(self):
+            return 0
+
+    monkeypatch.setattr(cli, "create_llm", lambda config: object())
+    monkeypatch.setattr(cli, "PermissionService", FakePermissionFactory)
+    monkeypatch.setattr(cli, "MCPServerPool", lambda config: FakePool())
+    monkeypatch.setattr(cli, "load_mcp_config", lambda *args, **kwargs: (MCPConfig(()), ()))
+    monkeypatch.setattr(
+        cli,
+        "create_context_manager",
+        lambda **kwargs: (_ for _ in ()).throw(OSError("cache unavailable")),
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr(cli, "ChatTUI", FakeTUI)
+
+    exit_code = cli.main(["--config", str(primary)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "上下文缓存错误" in captured.err
+    assert "cache unavailable" in captured.err
+    assert operations == ["pool_close"]
 
 
 def test_cli_returns_error_before_tui_for_explicit_invalid_mcp_config(
