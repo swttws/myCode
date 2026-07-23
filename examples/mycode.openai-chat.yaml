@@ -6,3 +6,5 @@ base_url:
 api_key: ${OPENAI_API_KEY}
 compact:
   context_window_tokens: 128000
+usage:
+  request_stream_usage: true

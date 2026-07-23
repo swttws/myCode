@@ -81,7 +81,10 @@ def test_primary_example_configs_load_with_compact_settings(tmp_path):
         "openai_responses",
         "openai_chat",
     ]
-    assert configs["examples/mycode.openai-chat.yaml"].usage.request_stream_usage is False
+    assert configs["examples/mycode.anthropic.yaml"].compact.context_window_tokens == 200_000
+    assert configs["examples/mycode.openai-responses.yaml"].compact.context_window_tokens == 128_000
+    assert configs["examples/mycode.openai-chat.yaml"].compact.context_window_tokens == 128_000
+    assert configs["examples/mycode.openai-chat.yaml"].usage.request_stream_usage is True
 
 
 def test_readme_primary_config_examples_load(tmp_path):
@@ -198,6 +201,32 @@ def test_readme_documents_stage_06_mcp_behavior_and_boundaries():
         "HTTP+SSE",
         "热重载",
         "持久化缓存",
+    ]
+
+    assert all(value in readme for value in required)
+
+
+def test_readme_documents_stage_07_context_management():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    required = [
+        "Stage 07",
+        "compact.context_window_tokens",
+        "context_window_tokens",
+        "8K",
+        "12K",
+        "2K",
+        "13K",
+        "3K",
+        "10K",
+        "/compact",
+        "read_compact_artifact",
+        "~/.mycode/projects",
+        "24 小时",
+        "熔断",
+        "应急压缩",
+        "分段读取",
+        "归档",
+        "上下文缓存",
     ]
 
     assert all(value in readme for value in required)

@@ -1,6 +1,6 @@
 # myCode
 
-myCode 是一个使用 Python 开发的终端 AI 编程助手。当前推进至 Stage 06：MCP 远端工具接入，并保留 Stage 03 的 Agent Loop、Stage 04 的 Prompt Pipeline 与 Stage 05 的纵深权限和事件流契约。
+myCode 是一个使用 Python 开发的终端 AI 编程助手。当前推进至 Stage 07：上下文管理；它保留 Stage 03 的 Agent Loop、Stage 04 的 Prompt Pipeline、Stage 05 的纵深权限和 Stage 06 的 MCP 远端工具接入。
 
 用户启动 `mycode` 后输入问题，程序会把请求交给独立 Agent Loop。Agent 会调用配置中的大模型 API，通过稳定事件流向 TUI 输出用户消息、thinking、文本增量、工具开始、工具结果、最终回复、错误、取消和等待审批状态。对于 `openai_responses` 和 `openai_chat`，模型可以在同一用户回合中发起工具调用；myCode 会执行工具、把结构化结果写回对话历史，并自动进入下一轮 LLM 调用，直到模型输出最终文本或触发错误、取消、超时、最大轮数等终止条件。
 
@@ -74,6 +74,16 @@ compact:
 
 `api_key` 可以直接写字面值，也可以使用 `${ENV_NAME}` 引用环境变量。建议使用环境变量。
 
+## Stage 07 上下文管理
+
+`compact.context_window_tokens` 是必填配置，用来声明当前模型可承载的上下文窗口。示例配置中 OpenAI 系列使用 `128000`，Anthropic 示例使用 `200000`；如需适配更小模型，只改 `context_window_tokens`，内部策略会按同一安全线执行。工具结果单项超过 8K token 会被轻量归档，同一批工具结果超过 12K token 会优先处理最大的结果；归档预览固定最多 2K token，自动发送前会保留 13K token 安全余量，手动 `/compact` 使用 3K token 摘要预算，并尽量保留最近约 10K token 原文。
+
+上下文缓存位于 `~/.mycode/projects/<workspace_sha256>/context/<session_id>`，不同工作区和会话隔离。启动时会清理超过 24 小时且未持锁的旧会话目录；`/clear` 会清空当前 memory、usage 锚点并轮换归档会话，退出时删除当前会话目录。超大的工具结果、旧用户原文和应急历史都会先写入归档，再用可恢复预览替换进入模型上下文。
+
+模型需要恢复归档正文时，可以调用只读工具 `read_compact_artifact`，按 `path`、`offset` 和最多 2K token 的 `max_tokens` 分段读取；工具只允许读取当前会话已登记的归档路径，拒绝路径穿越、符号链接和未登记文件。TUI 的 `/compact` 会触发手动压缩，不追加用户消息，也不进入普通聊天请求。
+
+正常自动流程会先做轻量归档，再在仍超过安全线时调用摘要压缩。OpenAI Chat、OpenAI Responses 和 Anthropic 的 streaming usage 会被归一化为输入 token 锚点，后续预算估算会在字符估算与 usage 增量之间稳定切换。若摘要连续失败三次，会打开熔断并执行本地应急压缩；熔断期间自动路径不再调用摘要 LLM，直到一次成功的手动 `/compact` 清零失败计数。不可恢复的归档失败会保留原始 memory，不发送不安全请求。
+
 ## Stage 06 MCP 远端工具
 
 MCP server 使用独立 YAML 配置，不与 LLM 配置混合。可以用 `--mcp-config path/to/file.yaml` 显式指定；省略参数时依次查找当前目录的 `mycode.mcp.yaml` 和用户目录的 `~/.mycode/mcp.yaml`。两处都不存在时 MCP 保持禁用，本地工具和普通聊天仍可使用。
@@ -135,9 +145,11 @@ base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
 compact:
   context_window_tokens: 128000
+usage:
+  request_stream_usage: true
 ```
 
-`openai_chat` 支持 Stage 03 的工具系统，也适合很多 OpenAI-compatible 网关。工具调用历史和工具结果历史会继续转换为 Chat Completions 可理解的 message。
+`openai_chat` 支持 Stage 03 的工具系统，也适合很多 OpenAI-compatible 网关。工具调用历史和工具结果历史会继续转换为 Chat Completions 可理解的 message。`usage.request_stream_usage` 会请求 OpenAI Chat 在流式响应末尾返回 usage chunk，便于 Stage 07 的输入 token 锚点估算；不支持该选项的兼容网关可以关闭它。
 
 ## Anthropic
 
@@ -225,6 +237,7 @@ Stage 03 新增 `src/mycode/agent` 包作为 Agent 主边界。Agent Loop 每轮
 ## 交互命令
 
 - `/clear`：清空当前进程内的对话上下文，包括工具调用历史和工具结果历史。
+- `/compact`：手动压缩旧上下文；成功、无需压缩、熔断、应急压缩和不可恢复失败都会以中文状态输出。
 - `/plan-only`：显示当前 plan-only 状态。
 - `/plan-only on`：开启写工具审批模式。
 - `/plan-only off`：关闭写工具审批模式。
@@ -234,6 +247,6 @@ Stage 03 新增 `src/mycode/agent` 包作为 Agent 主边界。Agent Loop 每轮
 
 ## 当前阶段不做
 
-当前阶段不做 Agent 递归调用、子任务委派或多 Agent 调度，不做项目索引、RAG、长期记忆、代码符号图谱或上下文压缩，也不做复杂 TUI 全屏面板。
+当前阶段不做 Agent 递归调用、子任务委派或多 Agent 调度，不做项目索引、RAG、长期记忆、代码符号图谱，也不做复杂 TUI 全屏面板。
 
 本阶段也不实现 Anthropic 工具调用，不做真实网络或真实 API key 依赖的验收，不做工具失败后的自动回滚。后续能力会基于当前的 LLM、protocols、memory、tool 和 agent 边界继续扩展。
