@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
+import time
 
 from mycode.compact.archive import ArchiveSession
-from mycode.llm import ChatMessage, MessageOrigin
+from mycode.compact.models import CompactError, CompactFailureCode
+from mycode.compact.summary_prompt import SUMMARY_SECTIONS
+from mycode.llm import BaseLLM, ChatMessage, MessageOrigin, StreamEvent, StreamEventType, UsageObservation
+from mycode.tool import ToolCall
 
 
 def test_select_recent_messages_keeps_tail_within_token_budget():
@@ -140,6 +145,128 @@ def test_build_compacted_history_archives_earliest_old_user_when_user_budget_blo
     session.close()
 
 
+def test_collect_summary_sends_one_user_prompt_without_tools_and_ignores_draft():
+    output = _summary_output(section_text="正式内容")
+    llm = ScriptedSummaryLLM(
+        [
+            [
+                StreamEvent(StreamEventType.THINKING_DELTA, "隐藏思考"),
+                StreamEvent(StreamEventType.TEXT_DELTA, output[:60]),
+                StreamEvent(StreamEventType.TEXT_DELTA, output[60:]),
+                StreamEvent(StreamEventType.DONE),
+            ]
+        ]
+    )
+    source = [ChatMessage(role="assistant", content="旧回答")]
+
+    summary = asyncio.run(_module().collect_summary(llm, source))
+
+    assert len(llm.requests) == 1
+    assert llm.requests[0][0].role == "user"
+    assert len(llm.requests[0]) == 1
+    assert llm.tool_requests == [[]]
+    assert "旧回答" in llm.requests[0][0].content
+    assert summary == _summary_text("正式内容")
+    assert "草稿内容" not in summary
+    assert "隐藏思考" not in summary
+
+
+def test_collect_summary_fails_when_model_attempts_tool_call():
+    llm = ScriptedSummaryLLM(
+        [
+            [
+                StreamEvent(
+                    StreamEventType.TOOL_CALL,
+                    tool_call=ToolCall(id="call-1", name="read_compact_artifact", arguments={}),
+                ),
+                StreamEvent(StreamEventType.DONE),
+            ]
+        ]
+    )
+
+    error = _collect_error(llm)
+
+    assert error.report.failure_code is CompactFailureCode.TOOL_ATTEMPT
+
+
+def test_collect_summary_maps_error_event_to_llm_error():
+    llm = ScriptedSummaryLLM([[StreamEvent(StreamEventType.ERROR, "provider failed")]])
+
+    error = _collect_error(llm)
+
+    assert error.report.failure_code is CompactFailureCode.LLM_ERROR
+
+
+def test_collect_summary_fails_when_stream_ends_without_done():
+    llm = ScriptedSummaryLLM([[StreamEvent(StreamEventType.TEXT_DELTA, _summary_output())]])
+
+    error = _collect_error(llm)
+
+    assert error.report.failure_code is CompactFailureCode.INVALID_FORMAT
+
+
+def test_collect_summary_respects_model_timeout():
+    llm = HangingSummaryLLM()
+
+    error = _collect_error(llm, model_timeout_seconds=0.01)
+
+    assert error.report.failure_code is CompactFailureCode.TIMEOUT
+
+
+def test_collect_summary_respects_run_deadline():
+    llm = HangingSummaryLLM()
+
+    error = _collect_error(llm, run_deadline=time.monotonic() - 0.01)
+
+    assert error.report.failure_code is CompactFailureCode.TIMEOUT
+
+
+def test_collect_summary_maps_cancellation():
+    llm = CancelledSummaryLLM()
+
+    error = _collect_error(llm)
+
+    assert error.report.failure_code is CompactFailureCode.CANCELLED
+
+
+def test_collect_summary_rejects_summary_over_manual_reserve():
+    llm = ScriptedSummaryLLM(
+        [
+            [
+                StreamEvent(StreamEventType.TEXT_DELTA, _summary_output(section_text="甲" * 5_000)),
+                StreamEvent(StreamEventType.DONE),
+            ]
+        ]
+    )
+
+    error = _collect_error(llm)
+
+    assert error.report.failure_code is CompactFailureCode.SUMMARY_TOO_LARGE
+
+
+def test_collect_summary_records_valid_usage_for_summary_request():
+    module = _module()
+    estimator = module.TokenEstimator()
+    llm = ScriptedSummaryLLM(
+        [
+            [
+                StreamEvent(StreamEventType.TEXT_DELTA, _summary_output()),
+                StreamEvent(
+                    StreamEventType.DONE,
+                    usage=UsageObservation(provider="test", input_tokens=777),
+                ),
+            ]
+        ]
+    )
+
+    asyncio.run(module.collect_summary(llm, [ChatMessage(role="assistant", content="old")], estimator=estimator))
+
+    snapshot = estimator.snapshot(llm.requests[0], [])
+    estimate = estimator.estimate(snapshot)
+    assert estimate.source == "usage_delta"
+    assert estimate.tokens == 777
+
+
 def _module():
     return importlib.import_module("mycode.compact.summary")
 
@@ -157,3 +284,48 @@ def _read_all(session, path):
         offset = artifact_slice.next_offset
         if artifact_slice.eof:
             return "".join(chunks)
+
+
+def _summary_text(section_text="内容"):
+    return "\n\n".join(f"## {section}\n{section_text}" for section in SUMMARY_SECTIONS)
+
+
+def _summary_output(section_text="内容"):
+    return (
+        "<analysis-draft>\n草稿内容\n</analysis-draft>\n"
+        f"<summary>\n{_summary_text(section_text)}\n</summary>"
+    )
+
+
+def _collect_error(llm, **kwargs):
+    try:
+        asyncio.run(_module().collect_summary(llm, [ChatMessage(role="assistant", content="old")], **kwargs))
+    except CompactError as exc:
+        return exc
+    raise AssertionError("collect_summary did not fail")
+
+
+class ScriptedSummaryLLM(BaseLLM):
+    def __init__(self, scripts):
+        self.scripts = list(scripts)
+        self.requests = []
+        self.tool_requests = []
+
+    async def stream_chat(self, messages, tools=None):
+        self.requests.append(list(messages))
+        self.tool_requests.append(tools)
+        script = self.scripts.pop(0)
+        for event in script:
+            yield event
+
+
+class HangingSummaryLLM(BaseLLM):
+    async def stream_chat(self, messages, tools=None):
+        await asyncio.sleep(1)
+        yield StreamEvent(StreamEventType.DONE)
+
+
+class CancelledSummaryLLM(BaseLLM):
+    async def stream_chat(self, messages, tools=None):
+        raise asyncio.CancelledError
+        yield StreamEvent(StreamEventType.DONE)

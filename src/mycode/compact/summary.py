@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -9,10 +11,86 @@ from mycode.compact.estimator import TokenEstimator
 from mycode.compact.models import (
     ArchivedArtifact,
     CompactAction,
+    CompactError,
+    CompactFailureCode,
     CompactPolicy,
+    CompactReport,
+    CompactStatus,
     HeavyCompactResult,
 )
-from mycode.llm import ChatMessage, MessageOrigin
+from mycode.compact.summary_prompt import build_summary_prompt, parse_summary_output
+from mycode.llm import BaseLLM, ChatMessage, LLMError, MessageOrigin, StreamEventType
+
+
+async def collect_summary(
+    llm: BaseLLM,
+    messages: Sequence[ChatMessage],
+    *,
+    estimator: TokenEstimator | None = None,
+    policy: CompactPolicy = CompactPolicy(),
+    model_timeout_seconds: float | None = None,
+    run_deadline: float | None = None,
+) -> str:
+    token_estimator = estimator or TokenEstimator()
+    request = [ChatMessage(role="user", content=build_summary_prompt(messages))]
+    snapshot = token_estimator.snapshot(request, [])
+    text_parts: list[str] = []
+    done = False
+    stream = None
+
+    try:
+        stream = llm.stream_chat(request, tools=[])
+        while True:
+            wait_timeout = _summary_wait_timeout(model_timeout_seconds, run_deadline)
+            if wait_timeout is not None and wait_timeout <= 0:
+                raise _summary_error(CompactFailureCode.TIMEOUT, "摘要调用超时。")
+            try:
+                event = (
+                    await asyncio.wait_for(anext(stream), timeout=wait_timeout)
+                    if wait_timeout is not None
+                    else await anext(stream)
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError as exc:
+                raise _summary_error(CompactFailureCode.TIMEOUT, "摘要调用超时。") from exc
+
+            if event.type == StreamEventType.TEXT_DELTA:
+                text_parts.append(event.content)
+            elif event.type == StreamEventType.THINKING_DELTA:
+                continue
+            elif event.type == StreamEventType.TOOL_CALL:
+                raise _summary_error(CompactFailureCode.TOOL_ATTEMPT, "摘要模型尝试调用工具。")
+            elif event.type == StreamEventType.ERROR:
+                raise _summary_error(CompactFailureCode.LLM_ERROR, "摘要模型返回错误。")
+            elif event.type == StreamEventType.DONE:
+                done = True
+                if event.usage is not None:
+                    token_estimator.record_usage(snapshot, event.usage)
+                break
+
+        if not done:
+            raise _summary_error(CompactFailureCode.INVALID_FORMAT, "摘要流缺少完成事件。")
+
+        try:
+            summary = parse_summary_output("".join(text_parts))
+        except ValueError as exc:
+            raise _summary_error(CompactFailureCode.INVALID_FORMAT, "摘要格式不符合要求。") from exc
+
+        if token_estimator.estimate_text(summary) > policy.manual_reserve_tokens:
+            raise _summary_error(CompactFailureCode.SUMMARY_TOO_LARGE, "正式摘要超过 3K 预留上限。")
+        return summary
+    except CompactError:
+        raise
+    except asyncio.CancelledError as exc:
+        raise _summary_error(CompactFailureCode.CANCELLED, "摘要调用已取消。") from exc
+    except LLMError as exc:
+        raise _summary_error(CompactFailureCode.LLM_ERROR, "摘要模型调用失败。") from exc
+    finally:
+        if stream is not None:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
 
 
 def select_recent_messages(
@@ -93,6 +171,37 @@ def build_compacted_history(
         artifacts=artifacts,
         actions=(CompactAction.HEAVY,),
         summary=summary,
+    )
+
+
+def _summary_wait_timeout(
+    model_timeout_seconds: float | None,
+    run_deadline: float | None,
+) -> float | None:
+    # 摘要子调用同时受模型静默超时和整次运行截止时间约束，实际等待取更早到达的一侧。
+    timeouts = []
+    if model_timeout_seconds is not None:
+        timeouts.append(model_timeout_seconds)
+    if run_deadline is not None:
+        timeouts.append(run_deadline - time.monotonic())
+    if not timeouts:
+        return None
+    return min(timeouts)
+
+
+def _summary_error(code: CompactFailureCode, message: str) -> CompactError:
+    return CompactError(
+        CompactReport(
+            status=CompactStatus.FAILED,
+            actions=(CompactAction.HEAVY,),
+            before_tokens=0,
+            after_tokens=0,
+            archived_count=0,
+            attempts=1,
+            circuit_open=False,
+            failure_code=code,
+            message_zh=message,
+        )
     )
 
 
