@@ -48,6 +48,7 @@ class ContextManager:
             model_timeout_seconds=model_timeout_seconds,
         )
         self._failure_count = 0
+        self._circuit_open = False
 
     async def prepare_auto(
         self,
@@ -62,7 +63,7 @@ class ContextManager:
         if light_result.changed:
             try:
                 transaction.commit()
-            except OSError as exc:
+            except OSError:
                 raise CompactError(
                     _report(
                         status=CompactStatus.FAILED,
@@ -100,7 +101,18 @@ class ContextManager:
                     before_tokens=before_tokens,
                     after_tokens=estimate.tokens,
                     archived_count=archived_count,
+                    circuit_open=self._circuit_open,
                 ),
+            )
+
+        if self._circuit_open:
+            return self._prepare_emergency(
+                history,
+                build_request=build_request,
+                before_tokens=before_tokens,
+                prior_actions=actions,
+                prior_archived_count=archived_count,
+                attempts=0,
             )
 
         return await self._prepare_heavy(
@@ -122,7 +134,6 @@ class ContextManager:
         prior_actions: tuple[CompactAction, ...],
         prior_archived_count: int,
     ) -> PreparedContext:
-        last_error: CompactError | None = None
         for attempt in range(1, self._policy.max_attempts + 1):
             transaction = self._store.begin()
             try:
@@ -152,6 +163,7 @@ class ContextManager:
                 transaction.commit()
                 self._memory.replace(heavy.history)
                 self._failure_count = 0
+                self._circuit_open = False
                 return PreparedContext(
                     request=request,
                     snapshot=snapshot,
@@ -163,44 +175,97 @@ class ContextManager:
                         after_tokens=estimate.tokens,
                         archived_count=prior_archived_count + len(heavy.artifacts),
                         attempts=attempt,
+                        circuit_open=False,
                     ),
                 )
             except CompactError as exc:
                 transaction.rollback()
                 self._failure_count += 1
-                last_error = exc
                 continue
             except OSError as exc:
                 transaction.rollback()
                 self._failure_count += 1
-                last_error = CompactError(
-                    _report(
-                        status=CompactStatus.FAILED,
-                        actions=prior_actions,
-                        before_tokens=before_tokens,
-                        after_tokens=before_tokens,
-                        archived_count=prior_archived_count,
-                        attempts=attempt,
-                        failure_code=CompactFailureCode.ARCHIVE_ERROR,
-                        message_zh="重量压缩归档提交失败。",
-                    )
-                )
                 continue
 
-        if last_error is not None:
-            raise last_error
-        raise CompactError(
-            _report(
-                status=CompactStatus.FAILED,
-                actions=prior_actions,
-                before_tokens=before_tokens,
-                after_tokens=before_tokens,
-                archived_count=prior_archived_count,
-                attempts=self._policy.max_attempts,
-                failure_code=CompactFailureCode.BUDGET_NOT_RECOVERED,
-                message_zh="重量压缩未恢复预算。",
-            )
+        self._circuit_open = True
+        # 第三次完整失败后立即切换到本地应急压缩，避免继续消耗摘要调用。
+        return self._prepare_emergency(
+            history,
+            build_request=build_request,
+            before_tokens=before_tokens,
+            prior_actions=_merge_actions(prior_actions, (CompactAction.HEAVY,)),
+            prior_archived_count=prior_archived_count,
+            attempts=self._policy.max_attempts,
         )
+
+    def _prepare_emergency(
+        self,
+        history,
+        *,
+        build_request,
+        before_tokens: int,
+        prior_actions: tuple[CompactAction, ...],
+        prior_archived_count: int,
+        attempts: int,
+    ) -> PreparedContext:
+        transaction = self._store.begin()
+        try:
+            emergency = self._conversation.emergency(
+                history,
+                build_request=build_request,
+                transaction=transaction,
+            )
+            request = build_request(emergency.history)
+            snapshot = self._estimator.snapshot(request.messages, request.tools)
+            estimate = self._estimator.estimate(snapshot)
+            if estimate.tokens >= self._config.context_window_tokens - self._policy.auto_reserve_tokens:
+                raise CompactError(
+                    _report(
+                        status=CompactStatus.FAILED,
+                        actions=_merge_actions(prior_actions, emergency.actions),
+                        before_tokens=before_tokens,
+                        after_tokens=estimate.tokens,
+                        archived_count=prior_archived_count + len(emergency.artifacts),
+                        attempts=attempts,
+                        circuit_open=True,
+                        failure_code=CompactFailureCode.BUDGET_NOT_RECOVERED,
+                        message_zh="应急压缩后仍超过自动安全线。",
+                    )
+                )
+            transaction.commit()
+            self._memory.replace(emergency.history)
+            return PreparedContext(
+                request=request,
+                snapshot=snapshot,
+                estimate=estimate,
+                report=_report(
+                    status=CompactStatus.COMPACTED,
+                    actions=_merge_actions(prior_actions, emergency.actions),
+                    before_tokens=before_tokens,
+                    after_tokens=estimate.tokens,
+                    archived_count=prior_archived_count + len(emergency.artifacts),
+                    attempts=attempts,
+                    circuit_open=True,
+                ),
+            )
+        except CompactError:
+            transaction.rollback()
+            raise
+        except OSError as exc:
+            transaction.rollback()
+            raise CompactError(
+                _report(
+                    status=CompactStatus.FAILED,
+                    actions=_merge_actions(prior_actions, (CompactAction.EMERGENCY,)),
+                    before_tokens=before_tokens,
+                    after_tokens=before_tokens,
+                    archived_count=prior_archived_count,
+                    attempts=attempts,
+                    circuit_open=True,
+                    failure_code=CompactFailureCode.ARCHIVE_ERROR,
+                    message_zh="应急归档提交失败。",
+                )
+            ) from exc
 
 
 def _report(
@@ -213,6 +278,7 @@ def _report(
     failure_code: CompactFailureCode | None = None,
     message_zh: str = "",
     attempts: int = 0,
+    circuit_open: bool = False,
 ) -> CompactReport:
     return CompactReport(
         status=status,
@@ -221,7 +287,7 @@ def _report(
         after_tokens=after_tokens,
         archived_count=archived_count,
         attempts=attempts,
-        circuit_open=False,
+        circuit_open=circuit_open,
         failure_code=failure_code,
         message_zh=message_zh,
     )

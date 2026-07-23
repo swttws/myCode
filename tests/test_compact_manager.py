@@ -249,6 +249,80 @@ def test_context_manager_retries_heavy_compaction_and_commits_only_success(tmp_p
     store.close()
 
 
+def test_context_manager_opens_circuit_and_commits_emergency_after_three_heavy_failures(tmp_path):
+    from mycode.compact.manager import ContextManager
+
+    config = CompactConfig(
+        context_window_tokens=16_001,
+        tool_result_threshold_tokens=2_001,
+        tool_batch_threshold_tokens=2_002,
+    )
+    policy = CompactPolicy(keep_recent_tokens=1, min_recent_messages=5)
+    memory = CountingMemory(
+        [
+            ChatMessage(role="assistant", content="甲" * 6_000),
+            *[ChatMessage(role="user", content=f"recent-{index}") for index in range(5)],
+        ]
+    )
+    llm = RecordingLLM(
+        scripts=[
+            [StreamEvent(StreamEventType.TEXT_DELTA, "bad format"), StreamEvent(StreamEventType.DONE)],
+            [StreamEvent(StreamEventType.TEXT_DELTA, "bad format"), StreamEvent(StreamEventType.DONE)],
+            [StreamEvent(StreamEventType.TEXT_DELTA, "bad format"), StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    builder = RecordingRequestBuilder()
+    store = RecordingArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    manager = ContextManager(llm=llm, memory=memory, config=config, store=store, policy=policy)
+
+    prepared = asyncio.run(manager.prepare_auto(build_request=builder, run_deadline=None))
+
+    assert len(llm.requests) == 3
+    assert manager._circuit_open is True
+    assert prepared.report.circuit_open is True
+    assert prepared.report.status is CompactStatus.COMPACTED
+    assert prepared.report.actions == (CompactAction.HEAVY, CompactAction.EMERGENCY)
+    assert prepared.report.attempts == 3
+    assert memory.replace_calls == 1
+    assert memory.messages()[0].origin is MessageOrigin.COMPACT_SUMMARY
+    assert "emergency_history_index" in memory.messages()[0].content
+    assert store.transactions[-1].committed is True
+
+    store.close()
+
+
+def test_context_manager_uses_emergency_without_summary_llm_while_circuit_is_open(tmp_path):
+    from mycode.compact.manager import ContextManager
+
+    config = CompactConfig(
+        context_window_tokens=16_001,
+        tool_result_threshold_tokens=2_001,
+        tool_batch_threshold_tokens=2_002,
+    )
+    policy = CompactPolicy(keep_recent_tokens=1, min_recent_messages=5)
+    memory = CountingMemory(
+        [
+            ChatMessage(role="assistant", content="甲" * 6_000),
+            *[ChatMessage(role="user", content=f"recent-{index}") for index in range(5)],
+        ]
+    )
+    llm = RecordingLLM()
+    builder = RecordingRequestBuilder()
+    store = RecordingArchiveSession(tmp_path / "workspace", home=tmp_path / "home", session_id="session")
+    manager = ContextManager(llm=llm, memory=memory, config=config, store=store, policy=policy)
+    manager._circuit_open = True
+
+    prepared = asyncio.run(manager.prepare_auto(build_request=builder, run_deadline=None))
+
+    assert llm.requests == []
+    assert prepared.report.circuit_open is True
+    assert prepared.report.actions == (CompactAction.EMERGENCY,)
+    assert memory.replace_calls == 1
+    assert store.transactions[-1].committed is True
+
+    store.close()
+
+
 class RecordingLLM(BaseLLM):
     def __init__(self, scripts=None):
         self.requests = []
