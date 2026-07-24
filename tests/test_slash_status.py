@@ -1,13 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 from dataclasses import FrozenInstanceError, MISSING, fields, is_dataclass
+from pathlib import Path
+import sys
 from typing import get_origin
 
 import pytest
 
-from mycode.mcp.models import MCPServerState
 from mycode.permission.models import PermissionMode, RuleSource
+
+
+def _load_mcp_models():
+    module_path = Path(__file__).resolve().parents[1] / "src" / "mycode" / "mcp" / "models.py"
+    spec = importlib.util.spec_from_file_location("_stage09_mcp_models", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+MCPServerState = _load_mcp_models().MCPServerState
 
 
 def import_slash():
