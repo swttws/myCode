@@ -257,6 +257,7 @@ def test_slash_registry_rejects_invalid_identifiers(field_name: str, identifier:
     [
         ([_command("help"), _command("help")], "help", "help", "help"),
         ([_command("Help"), _command("help")], "help", "Help", "help"),
+        ([_command("ß"), _command("ss")], "ss", "ß", "ss"),
         ([_command("help", aliases=("h", "H"))], "h", "help", "help"),
         ([_command("help", aliases=("h",)), _command("status", aliases=("H",))], "h", "help", "status"),
         ([_command("help"), _command("status", aliases=("HELP",))], "help", "help", "status"),

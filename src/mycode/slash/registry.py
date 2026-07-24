@@ -31,7 +31,7 @@ class SlashCommandRegistry:
     ) -> None:
         self._validate_identifier(identifier)
 
-        key = identifier.lower()
+        key = identifier.casefold()
         existing = index.get(key)
         if existing is not None:
             raise SlashCommandRegistrationError(
