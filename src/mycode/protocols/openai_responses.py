@@ -35,6 +35,8 @@ class OpenAIResponsesLLM(BaseLLM):
             raise_for_bad_status(response)
             pending_tool_calls: dict[str, dict[str, str]] = {}
             async for sse_event in parse_sse_events_async(response.aiter_lines()):
+                if sse_event.data.strip() == "[DONE]":
+                    break
                 payload = parse_json_object(sse_event.data)
                 event = _map_openai_responses_tool_event(payload, pending_tool_calls)
                 if event is not None:
