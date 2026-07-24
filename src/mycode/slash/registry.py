@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from mycode.slash.models import SlashCommand
+from mycode.slash.models import SlashCommand, SlashCompletionCandidate
 
 
 class SlashCommandRegistrationError(ValueError):
@@ -19,9 +19,40 @@ class SlashCommandRegistry:
             for alias in command.aliases:
                 self._register_identifier(index, alias, command)
 
-        # 先在临时索引中完成全部校验，避免异常时留下部分注册状态。
+        # Validate against a temporary index first so failures do not leave partial state.
         self._commands = command_tuple
         self._index = index
+
+    def resolve(self, name: str, *, include_hidden: bool = True) -> SlashCommand | None:
+        command = self._index.get(name.casefold())
+        if command is None:
+            return None
+        if not include_hidden and command.hidden:
+            return None
+        return command
+
+    def public_commands(self) -> tuple[SlashCommand, ...]:
+        return tuple(command for command in self._commands if not command.hidden)
+
+    def completion_candidates(self, prefix: str) -> tuple[SlashCompletionCandidate, ...]:
+        normalized_prefix = prefix.casefold()
+        candidates: list[SlashCompletionCandidate] = []
+
+        for command in self._commands:
+            if command.hidden:
+                continue
+
+            for identifier in (command.name, *command.aliases):
+                candidate_text = f"/{identifier}"
+                if candidate_text.casefold().startswith(normalized_prefix):
+                    candidates.append(
+                        SlashCompletionCandidate(
+                            text=candidate_text,
+                            description=command.description,
+                        )
+                    )
+
+        return tuple(candidates)
 
     def _register_identifier(
         self,

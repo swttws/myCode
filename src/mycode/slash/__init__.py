@@ -18,6 +18,7 @@ from mycode.slash.models import (
     SlashMode,
     StatusSection,
 )
+from mycode.slash.registry import SlashCommandRegistrationError, SlashCommandRegistry
 
 __all__ = [
     "ApplicationStatusSnapshot",
@@ -30,6 +31,8 @@ __all__ = [
     "SlashCommandContext",
     "SlashCommandController",
     "SlashCommandHandler",
+    "SlashCommandRegistrationError",
+    "SlashCommandRegistry",
     "SlashCommandType",
     "SlashCompletionCandidate",
     "SlashDispatchKind",
