@@ -270,11 +270,11 @@ class ProjectMemoryManager:
 def _render_memory_index(user_text: str, project_text: str) -> str:
     return "\n".join(
         [
-            "## user memory",
-            user_text or "(empty)",
+            "## 用户记忆",
+            user_text or "（空）",
             "",
-            "## project memory",
-            project_text or "(empty)",
+            "## 项目记忆",
+            project_text or "（空）",
         ]
     )
 

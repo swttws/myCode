@@ -466,7 +466,7 @@ def _time_gap(reference_now: datetime, updated_at: datetime | None) -> tuple[int
             id="restore-notice",
             kind=FrameworkContextKind.RESTORE_NOTICE,
             priority=150,
-            content=f"Previous project session was restored after {gap_seconds} seconds without activity.",
+            content=f"上一个项目会话在无活动 {gap_seconds} 秒后已恢复。",
         ),
     )
 

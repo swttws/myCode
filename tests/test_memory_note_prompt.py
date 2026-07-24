@@ -43,8 +43,10 @@ def test_note_update_prompt_builds_context_rich_json_instruction():
     assert MemoryKind.PROJECT_KNOWLEDGE.value in message.content
     assert MemoryKind.REFERENCE.value in message.content
     assert "decisions" in message.content
-    assert "JSON object" in message.content
-    assert "Do not call tools" in message.content
+    assert "返回一个 JSON 对象" in message.content
+    assert "不要调用工具" in message.content
+    assert "现有用户记忆索引" in message.content
+    assert "最新助手消息" in message.content
 
 
 def test_note_update_prompt_parses_valid_decisions():

@@ -195,6 +195,8 @@ def test_project_memory_manager_refreshes_context_and_restores_only_once():
         FrameworkContextKind.MEMORY_INDEX,
     }
     assert "project instructions" in first.blocks[0].content
+    assert "## 用户记忆" in first.blocks[1].content
+    assert "## 项目记忆" in first.blocks[1].content
     assert "user note" in first.blocks[1].content
     assert "project note" in first.blocks[1].content
     assert second.restored_history == ()
