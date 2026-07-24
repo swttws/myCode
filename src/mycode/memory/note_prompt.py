@@ -43,6 +43,7 @@ class NoteUpdatePrompt:
                 "- create: action、scope、kind、title、body、reason",
                 "- merge/update: action、scope、kind、target_note_id、body、reason",
                 "- ignore: action、reason",
+                "- title 必须是具体、可执行的结论，直接写出偏好值或项目事实；不要使用 Method Naming Style 这类抽象分类标题。",
                 "",
                 "顶层 JSON 结构样例：",
                 '{"decisions":[]}',

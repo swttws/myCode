@@ -45,6 +45,7 @@ def test_note_update_prompt_builds_context_rich_json_instruction():
     assert "decisions" in message.content
     assert "返回一个 JSON 对象" in message.content
     assert "不要调用工具" in message.content
+    assert "title 必须是具体、可执行的结论" in message.content
     assert "只输出一个 JSON 对象" in message.content
     assert "不要使用 Markdown 代码块" in message.content
     assert "不要添加前后说明文字" in message.content

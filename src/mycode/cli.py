@@ -136,6 +136,7 @@ async def _run_application(
             return 1
 
         # 初始化失败以诊断形式上报；可用 server 和本地工具仍可继续启动。
+        tool_registry.register(project_memory.memory_note_tool)
         connection_diagnostics = await pool.initialize_all()
         _report_mcp_diagnostics(mcp_config_diagnostics + connection_diagnostics)
 

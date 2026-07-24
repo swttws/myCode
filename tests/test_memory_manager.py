@@ -13,6 +13,8 @@ from mycode.memory.models import (
     InstructionLoadResult,
     MemoryDiagnostic,
     MemoryIndexBundle,
+    MemoryKind,
+    MemoryNote,
     MemoryScope,
     NoteUpdateDecision,
     NoteUpdateResult,
@@ -63,6 +65,11 @@ class FakeSessions:
 class FakeNotes:
     def __init__(self) -> None:
         self.load_index_calls: list[MemoryScope] = []
+        self.load_notes_calls: list[MemoryScope] = []
+        self.notes_by_scope: dict[MemoryScope, tuple[MemoryNote, ...]] = {
+            MemoryScope.USER: (),
+            MemoryScope.PROJECT: (),
+        }
         self.apply_calls = []
 
     def load_index_bundle(self, scope):
@@ -75,6 +82,10 @@ class FakeNotes:
             byte_count=len(scope.value) + 7,
             truncated=False,
         )
+
+    def load_notes(self, scope):
+        self.load_notes_calls.append(scope)
+        return self.notes_by_scope.get(scope, ())
 
     def apply_decisions(self, decisions, *, source_session_id):
         self.apply_calls.append((tuple(decisions), source_session_id))
@@ -206,6 +217,52 @@ def test_project_memory_manager_refreshes_context_and_restores_only_once():
     assert "user note" in first.blocks[1].content
     assert "project note" in first.blocks[1].content
     assert second.restored_history == ()
+
+
+def test_project_memory_manager_injects_user_preference_and_correction_bodies_as_constraints():
+    manager, _instructions, _sessions, notes, _note_prompt, _llm, _memory = _manager(
+        restore_result=_restore_result()
+    )
+    notes.notes_by_scope[MemoryScope.USER] = (
+        MemoryNote(
+            note_id="method-naming-style-041bd935",
+            scope=MemoryScope.USER,
+            kind=MemoryKind.USER_PREFERENCE,
+            path="",
+            frontmatter={"title": "Method Naming Style"},
+            body="用户偏好方法命名使用驼峰式命名。",
+            updated_at="2026-07-23T10:00:00+00:00",
+        ),
+        MemoryNote(
+            note_id="print-output-language-37aea269",
+            scope=MemoryScope.USER,
+            kind=MemoryKind.CORRECTION,
+            path="",
+            frontmatter={"title": "Variable Naming Style"},
+            body="用户更喜欢在 print 输出时使用中文提示。",
+            updated_at="2026-07-23T10:01:00+00:00",
+        ),
+    )
+    notes.notes_by_scope[MemoryScope.PROJECT] = (
+        MemoryNote(
+            note_id="project-hidden-body-11112222",
+            scope=MemoryScope.PROJECT,
+            kind=MemoryKind.PROJECT_KNOWLEDGE,
+            path="",
+            frontmatter={"title": "Project internals"},
+            body="Project knowledge body should stay behind read_memory_note.",
+            updated_at="2026-07-23T10:02:00+00:00",
+        ),
+    )
+
+    context = asyncio.run(manager.before_user_request(compact_prepare=None))
+    memory_block = next(block for block in context.blocks if block.id == "memory-index")
+
+    assert notes.load_notes_calls == [MemoryScope.USER]
+    assert "用户记忆中的 user_preference/correction 是当前请求的行为约束" in memory_block.content
+    assert "用户偏好方法命名使用驼峰式命名。" in memory_block.content
+    assert "用户更喜欢在 print 输出时使用中文提示。" in memory_block.content
+    assert "Project knowledge body should stay behind read_memory_note." not in memory_block.content
 
 
 def test_project_memory_manager_reports_compaction_unavailable_and_failed_without_sensitive_history():

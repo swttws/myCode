@@ -13,12 +13,18 @@ from mycode.memory.models import (
     FrameworkContextBlock,
     FrameworkContextKind,
     MemoryDiagnostic,
+    MemoryKind,
+    MemoryNote,
     MemoryScope,
 )
 from mycode.memory.paths import MemoryPaths
 from mycode.memory.note_prompt import NoteUpdatePrompt
 from mycode.memory.notes import MemoryNoteStore
 from mycode.memory.sessions import SessionArchiveStore
+from mycode.memory.tools import ReadMemoryNoteTool
+
+
+_USER_DIRECT_MEMORY_KINDS = frozenset({MemoryKind.USER_PREFERENCE, MemoryKind.CORRECTION})
 
 
 class ProjectMemoryManager:
@@ -41,12 +47,17 @@ class ProjectMemoryManager:
         self._note_prompt = note_prompt
         self._llm = llm
         self._memory = memory
+        self._memory_note_tool = ReadMemoryNoteTool(notes)
         self._time_gap_notice_seconds = time_gap_notice_seconds
         self._restored = False
         self._closed = False
         self._recorded_message_ids: set[int] = set()
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._background_diagnostics: list[MemoryDiagnostic] = []
+
+    @property
+    def memory_note_tool(self) -> ReadMemoryNoteTool:
+        return self._memory_note_tool
 
     async def before_user_request(
         self,
@@ -99,6 +110,7 @@ class ProjectMemoryManager:
 
         user_index = self._notes.load_index_bundle(MemoryScope.USER)
         project_index = self._notes.load_index_bundle(MemoryScope.PROJECT)
+        user_notes = self._notes.load_notes(MemoryScope.USER)
         diagnostics.extend(user_index.diagnostics)
         diagnostics.extend(project_index.diagnostics)
         blocks.append(
@@ -106,7 +118,11 @@ class ProjectMemoryManager:
                 id="memory-index",
                 kind=FrameworkContextKind.MEMORY_INDEX,
                 priority=200,
-                content=_render_memory_index(user_index.rendered_text, project_index.rendered_text),
+                content=_render_memory_index(
+                    user_index.rendered_text,
+                    project_index.rendered_text,
+                    _direct_user_notes(user_notes),
+                ),
             )
         )
 
@@ -272,16 +288,46 @@ def _print_background_error(diagnostic: MemoryDiagnostic) -> None:
     print(f"myCode 记忆更新错误：{diagnostic.code}: {diagnostic.message}", file=sys.stderr)
 
 
-def _render_memory_index(user_text: str, project_text: str) -> str:
+def _render_memory_index(
+    user_text: str,
+    project_text: str,
+    direct_user_notes: Sequence[MemoryNote],
+) -> str:
     return "\n".join(
         [
+            "## 长期记忆使用规则",
+            "- 用户记忆中的 user_preference/correction 是当前请求的行为约束；当相关时必须遵循。",
+            "- 最新用户明确要求优先于长期记忆中的旧偏好。",
+            "- 项目记忆索引只提供摘要；需要完整正文时调用 read_memory_note(scope, note_id)。",
+            "",
             "## 用户记忆",
+            "### 已加载偏好与纠正正文",
+            _render_direct_user_notes(direct_user_notes),
+            "",
+            "### 用户记忆索引",
             user_text or "（空）",
             "",
-            "## 项目记忆",
+            "## 项目记忆索引",
             project_text or "（空）",
         ]
     )
+
+
+def _direct_user_notes(notes: Sequence[MemoryNote]) -> tuple[MemoryNote, ...]:
+    return tuple(note for note in notes if note.kind in _USER_DIRECT_MEMORY_KINDS)
+
+
+def _render_direct_user_notes(notes: Sequence[MemoryNote]) -> str:
+    if not notes:
+        return "（空）"
+    lines: list[str] = []
+    for note in notes:
+        title = note.frontmatter.get("title", note.note_id)
+        lines.append(f"- {title} ({note.kind.value}, id: {note.note_id}, updated: {note.updated_at})")
+        body = note.body.strip()
+        if body:
+            lines.extend(f"  {line}" for line in body.splitlines())
+    return "\n".join(lines)
 
 
 def _call_diagnostics(func: Callable[[], Sequence[MemoryDiagnostic]], code: str) -> tuple[MemoryDiagnostic, ...]:
