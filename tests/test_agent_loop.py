@@ -30,7 +30,14 @@ from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventT
 from mycode.llm import MessageOrigin
 from mycode.mcp import MCPToolWrapper, RemoteTool, ToolSearch
 from mycode.memory import InMemoryConversationMemory
-from mycode.prompt.models import PromptBuildMetadata, PromptBuildResult
+from mycode.memory.models import FrameworkContext, FrameworkContextBlock, FrameworkContextKind, MemoryDiagnostic
+from mycode.prompt.builder import PromptBuilder
+from mycode.prompt.models import PromptConfig
+from mycode.prompt.models import EnvironmentSnapshot, PromptBuildMetadata, PromptBuildResult
+from mycode.prompt.models import PromptContextBlock
+from mycode.prompt.models import PromptModuleDefinition
+from mycode.prompt.registry import PromptRegistry
+from mycode.prompt.reminder import ReminderPolicy
 from mycode.permission.models import (
     ApprovalDecision,
     ApprovalDecisionType,
@@ -140,6 +147,28 @@ class StaticResultTool:
 
     def execute(self, arguments):
         return self.result
+
+
+class FakeEnvironmentCollector:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def collect(self) -> EnvironmentSnapshot:
+        self.calls += 1
+        return EnvironmentSnapshot("workspace", "TestOS", "time", "UTC", "main", "M file", ())
+
+
+class FakeModule:
+    def __init__(self, module_id: str, priority: int, text: str) -> None:
+        self._definition = PromptModuleDefinition(module_id, priority)
+        self._text = text
+
+    @property
+    def definition(self) -> PromptModuleDefinition:
+        return self._definition
+
+    def render(self, context) -> str:
+        return self._text
 
 
 class RecordingTool(StaticResultTool):
@@ -279,9 +308,11 @@ class TrackingMemory(InMemoryConversationMemory):
 class TrackingPromptBuilder:
     def __init__(self, order):
         self._order = order
+        self.framework_blocks = []
 
-    def begin_turn(self, *, turn_id, plan_only):
-        return (turn_id, plan_only)
+    def begin_turn(self, *, turn_id, plan_only, framework_blocks=()):
+        self.framework_blocks.append(tuple(framework_blocks))
+        return (turn_id, plan_only, tuple(framework_blocks))
 
     def build(self, *, history, tools, turn, round_index):
         self._order.append("prompt.build")
@@ -303,6 +334,57 @@ class TrackingContextManager(PassthroughContextManager):
             build_request=build_request,
             run_deadline=run_deadline,
         )
+
+    def clear(self):
+        self._order.append("context.clear")
+        super().clear()
+
+
+class FakeProjectMemory:
+    def __init__(self, order, *, framework_blocks=(), restored_history=()) -> None:
+        self._order = order
+        self.framework_blocks = tuple(framework_blocks)
+        self.restored_history = tuple(restored_history)
+        self.before_calls = []
+        self.record_user_calls = []
+        self.record_assistant_calls = []
+        self.record_tool_calls = []
+        self.after_calls = []
+        self.clear_calls = 0
+        self.close_calls = 0
+
+    async def before_user_request(self, *, compact_prepare):
+        self.before_calls.append(compact_prepare is not None)
+        self._order.append("project.before")
+        return FrameworkContext(
+            blocks=self.framework_blocks,
+            restored_history=self.restored_history,
+            session_summary=None,
+            diagnostics=(),
+        )
+
+    def record_user_message(self, message):
+        self.record_user_calls.append(message)
+        self._order.append("project.user")
+
+    def record_assistant_message(self, message):
+        self.record_assistant_calls.append(message)
+        self._order.append("project.assistant")
+
+    def record_tool_history(self, *, assistant_tool_call=None, tool_result=None):
+        self.record_tool_calls.append((assistant_tool_call, tool_result))
+        self._order.append("project.tool")
+
+    def after_final_response(self, *, user_message, assistant_message, framework_context):
+        self.after_calls.append((user_message, assistant_message, framework_context))
+        self._order.append("project.after")
+
+    def clear_session_state(self):
+        self.clear_calls += 1
+        self._order.append("project.clear")
+
+    async def close(self):
+        self.close_calls += 1
 
 
 class PreparedRequestContextManager:
@@ -428,6 +510,176 @@ def test_agent_loop_prepares_context_after_user_append_before_llm_send():
         "llm.stream_chat",
     ]
     assert llm.requests[0] == [ChatMessage(role="user", content="hello")]
+
+
+def test_agent_loop_refreshes_project_memory_before_user_append_and_injects_framework_context():
+    order = []
+    memory = TrackingMemory(order)
+    project_memory = FakeProjectMemory(
+        order,
+        framework_blocks=(
+            FrameworkContextBlock(
+                id="instructions",
+                kind=FrameworkContextKind.INSTRUCTIONS,
+                priority=100,
+                content="project instructions",
+            ),
+            FrameworkContextBlock(
+                id="memory-index",
+                kind=FrameworkContextKind.MEMORY_INDEX,
+                priority=200,
+                content="project memory",
+            ),
+        ),
+    )
+    llm = ScriptedLLM([[StreamEvent(StreamEventType.DONE)]])
+    llm.on_stream = lambda: order.append("llm.stream_chat")
+    registry = ToolRegistry([NoopTool()])
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        prompt_builder=PromptBuilder(
+            registry=PromptRegistry([FakeModule("stable", 100, "stable instruction")]),
+            environment_collector=FakeEnvironmentCollector(),
+            reminder_policy=ReminderPolicy(4),
+            config=PromptConfig(),
+        ),
+        context_manager=TrackingContextManager(memory, order),
+        project_memory=project_memory,
+    )
+
+    asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert order[0] == "project.before"
+    assert order[1] == "memory.append_user"
+    assert project_memory.before_calls == [True]
+    assert project_memory.record_user_calls == [ChatMessage(role="user", content="hello")]
+    assert llm.requests[0][1] == ChatMessage(role="user", content="hello")
+    assert llm.requests[0][2].origin is MessageOrigin.FRAMEWORK_CONTEXT
+    assert llm.requests[0][2].content.startswith("<framework-context>")
+
+
+def test_agent_loop_records_tool_history_and_final_response_to_project_memory():
+    order = []
+    memory = TrackingMemory(order)
+    project_memory = FakeProjectMemory(order)
+    call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"}, raw_arguments='{"text":"hi"}')
+    llm = ScriptedLLM(
+        [
+            [StreamEvent(StreamEventType.TOOL_CALL, tool_call=call), StreamEvent(StreamEventType.DONE)],
+            [StreamEvent(StreamEventType.TEXT_DELTA, "done"), StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    registry = ToolRegistry([EchoTool()])
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        prompt_builder=PromptBuilder(
+            registry=PromptRegistry([FakeModule("stable", 100, "stable instruction")]),
+            environment_collector=FakeEnvironmentCollector(),
+            reminder_policy=ReminderPolicy(4),
+            config=PromptConfig(),
+        ),
+        context_manager=TrackingContextManager(memory, order),
+        project_memory=project_memory,
+    )
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert [event.type for event in events] == [
+        AgentEventType.USER_MESSAGE,
+        AgentEventType.TOOL_CALL_STARTED,
+        AgentEventType.TOOL_RESULT,
+        AgentEventType.TEXT_DELTA,
+        AgentEventType.FINAL_RESPONSE,
+    ]
+    assert project_memory.record_tool_calls[0][0] == ChatMessage(
+        role="assistant",
+        content="",
+        tool_call_id="call-1",
+        tool_name="echo",
+        tool_arguments='{"text":"hi"}',
+    )
+    assert project_memory.record_tool_calls[1][1] == ChatMessage(
+        role="tool",
+        content=json.dumps(
+            {"ok": True, "tool_name": "echo", "content": {"text": "hi"}, "error": None},
+            ensure_ascii=False,
+        ),
+        tool_call_id="call-1",
+    )
+    assert project_memory.record_assistant_calls == [ChatMessage(role="assistant", content="done")]
+    assert len(project_memory.after_calls) == 1
+    assert project_memory.after_calls[0][0] == ChatMessage(role="user", content="hello")
+    assert project_memory.after_calls[0][1] == ChatMessage(role="assistant", content="done")
+
+
+def test_agent_loop_clear_memory_resets_context_and_project_session_state():
+    order = []
+    memory = TrackingMemory(order)
+    project_memory = FakeProjectMemory(order)
+    loop = AgentLoop(
+        llm=ScriptedLLM([[StreamEvent(StreamEventType.DONE)]]),
+        memory=memory,
+        tool_executor=ToolExecutor(ToolRegistry([NoopTool()])),
+        tool_registry=ToolRegistry([NoopTool()]),
+        permission=FakePermission(),
+        context_manager=TrackingContextManager(memory, order),
+        project_memory=project_memory,
+    )
+
+    loop.clear_memory()
+
+    assert order == ["context.clear", "project.clear"]
+    assert project_memory.clear_calls == 1
+
+
+def test_agent_loop_blocks_request_when_project_memory_restore_compaction_failed():
+    order = []
+    memory = TrackingMemory(order)
+    llm = ScriptedLLM([[StreamEvent(StreamEventType.TEXT_DELTA, "should not stream")]])
+    registry = ToolRegistry([NoopTool()])
+
+    class FailingProjectMemory(FakeProjectMemory):
+        async def before_user_request(self, *, compact_prepare):
+            self._order.append("project.before")
+            return FrameworkContext(
+                blocks=(),
+                restored_history=(),
+                session_summary=None,
+                diagnostics=(
+                    MemoryDiagnostic(
+                        code="restore_compaction_failed",
+                        message="restored history could not be compacted",
+                        path="session.jsonl",
+                    ),
+                ),
+            )
+
+    project_memory = FailingProjectMemory(order)
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        context_manager=TrackingContextManager(memory, order),
+        project_memory=project_memory,
+    )
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert [event.type for event in events] == [AgentEventType.ERROR]
+    assert events[0].error_code is AgentErrorCode.COMPACTION_ERROR
+    assert memory.messages() == []
+    assert llm.requests == []
+    assert project_memory.record_user_calls == []
 
 
 def test_agent_loop_sends_prepared_context_request_and_reports_compaction():

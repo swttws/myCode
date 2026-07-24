@@ -5,6 +5,7 @@ import time
 from collections.abc import AsyncIterable
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from mycode.agent.config import AgentConfig
 from mycode.agent.events import AgentErrorCode, AgentEvent, AgentEventType
@@ -19,13 +20,14 @@ from mycode.agent.state import AgentMode
 from mycode.compact.models import CompactAction, CompactError
 from mycode.llm import BaseLLM, LLMError, StreamEventType
 from mycode.memory import ConversationMemory
+from mycode.memory.models import FrameworkContext
 from mycode.prompt import (
     PromptBuildError,
     PromptConfigurationError,
     PromptBuilder,
     create_default_prompt_builder,
 )
-from mycode.prompt.models import SystemReminder
+from mycode.prompt.models import PromptContextBlock, SystemReminder
 from mycode.permission.models import (
     ApprovalDecision,
     ApprovalDecisionType,
@@ -50,6 +52,7 @@ class AgentLoop:
         context_manager,
         config: AgentConfig | None = None,
         prompt_builder: PromptBuilder | None = None,
+        project_memory: Any | None = None,
     ) -> None:
         self._llm = llm
         self._memory = memory
@@ -59,11 +62,26 @@ class AgentLoop:
         self._permission = permission
         self._prompt_builder = prompt_builder or create_default_prompt_builder(Path.cwd(), self.config.prompt)
         self._context_manager = context_manager
+        self._project_memory = project_memory
         self._next_turn_id = 0
 
     def clear_memory(self) -> None:
         # /clear 通过 ContextManager 同步清理历史、usage 锚点和归档会话；不重建模型、工具注册中心或运行配置。
         self._context_manager.clear()
+        if self._project_memory is not None:
+            self._project_memory.clear_session_state()
+
+    async def _prepare_project_memory_context(self) -> FrameworkContext:
+        if self._project_memory is None:
+            return _empty_framework_context()
+
+        async def compact_prepare(restored_history: Sequence[ChatMessage]) -> tuple[ChatMessage, ...]:
+            return tuple(restored_history)
+
+        try:
+            return await self._project_memory.before_user_request(compact_prepare=compact_prepare)
+        except Exception:
+            return _empty_framework_context()
 
     async def compact(
         self,
@@ -144,8 +162,6 @@ class AgentLoop:
         mode: AgentMode,
         approval_provider: ApprovalProvider | None = None,
     ) -> AsyncIterable[AgentEvent]:
-        self._memory.append(make_user_message(user_text))
-        yield AgentEvent(AgentEventType.USER_MESSAGE, content=user_text)
         self._next_turn_id += 1
         # 整次 run 共用一个截止时间，模型等待和工具执行都不能越过它。
         run_deadline = (
@@ -154,11 +170,28 @@ class AgentLoop:
             else None
         )
 
-        try:
-            turn_context = self._prompt_builder.begin_turn(
-                turn_id=self._next_turn_id,
-                plan_only=mode.plan_only,
+        framework_context = await self._prepare_project_memory_context()
+        blocking_diagnostic = _project_memory_blocking_diagnostic(framework_context)
+        if blocking_diagnostic is not None:
+            yield AgentEvent(
+                AgentEventType.ERROR,
+                content=blocking_diagnostic.message,
+                error_code=AgentErrorCode.COMPACTION_ERROR,
             )
+            return
+
+        turn_context = self._prompt_builder.begin_turn(
+            turn_id=self._next_turn_id,
+            plan_only=mode.plan_only,
+            framework_blocks=_convert_framework_blocks(getattr(framework_context, "blocks", ())),
+        )
+        current_user_message = make_user_message(user_text)
+        self._memory.append(current_user_message)
+        if self._project_memory is not None:
+            self._project_memory.record_user_message(current_user_message)
+        yield AgentEvent(AgentEventType.USER_MESSAGE, content=user_text)
+
+        try:
             for round_index in range(1, self.config.max_rounds + 1):
                 assistant_parts: list[str] = []
                 tool_calls = []
@@ -282,18 +315,30 @@ class AgentLoop:
 
                 if not tool_calls:
                     assistant_text = "".join(assistant_parts)
+                    final_message = make_assistant_text_message(assistant_text)
                     if assistant_text:
-                        self._memory.append(make_assistant_text_message(assistant_text))
+                        self._memory.append(final_message)
+                        if self._project_memory is not None:
+                            self._project_memory.record_assistant_message(final_message)
                     yield AgentEvent(
                         AgentEventType.FINAL_RESPONSE,
                         content=assistant_text,
                         round_index=round_index,
                     )
+                    if self._project_memory is not None:
+                        self._project_memory.after_final_response(
+                            user_message=current_user_message,
+                            assistant_message=final_message,
+                            framework_context=framework_context,
+                        )
                     return
 
                 for call in tool_calls:
                     # 先写入 assistant tool-call 历史，下一轮模型才能看到工具请求上下文。
-                    self._memory.append(make_assistant_tool_call_message(call))
+                    tool_call_message = make_assistant_tool_call_message(call)
+                    self._memory.append(tool_call_message)
+                    if self._project_memory is not None:
+                        self._project_memory.record_tool_history(assistant_tool_call=tool_call_message)
 
                 try:
                     batches = build_tool_batches(tool_calls, self._tool_registry)
@@ -345,13 +390,16 @@ class AgentLoop:
                             PermissionEffect.FORBIDDEN,
                         }:
                             result = self._permission.denied_result(call, permission_decision)
+                            result_message = make_tool_result_message(call, result)
+                            self._memory.append(result_message)
+                            if self._project_memory is not None:
+                                self._project_memory.record_tool_history(tool_result=result_message)
                             yield AgentEvent(
                                 AgentEventType.TOOL_RESULT,
                                 round_index=round_index,
                                 tool_call=call,
                                 tool_result=result,
                             )
-                            self._memory.append(make_tool_result_message(call, result))
                         elif permission_decision.effect is PermissionEffect.ASK:
                             try:
                                 approval_request = self._permission.create_approval_request(
@@ -363,13 +411,16 @@ class AgentLoop:
                             except Exception:
                                 # 审批上下文异常时沿用当前 ASK 的安全拒绝结果，绝不跳过检查执行工具。
                                 result = self._permission.denied_result(call, permission_decision)
+                                result_message = make_tool_result_message(call, result)
+                                self._memory.append(result_message)
+                                if self._project_memory is not None:
+                                    self._project_memory.record_tool_history(tool_result=result_message)
                                 yield AgentEvent(
                                     AgentEventType.TOOL_RESULT,
                                     round_index=round_index,
                                     tool_call=call,
                                     tool_result=result,
                                 )
-                                self._memory.append(make_tool_result_message(call, result))
                                 continue
                             yield AgentEvent(
                                 AgentEventType.APPROVAL_REQUIRED,
@@ -448,13 +499,16 @@ class AgentLoop:
 
                     for call, result in zip(executable_calls, results):
                         result = await self._permission.after_tool(call, result)
+                        result_message = make_tool_result_message(call, result)
+                        self._memory.append(result_message)
+                        if self._project_memory is not None:
+                            self._project_memory.record_tool_history(tool_result=result_message)
                         yield AgentEvent(
                             AgentEventType.TOOL_RESULT,
                             round_index=round_index,
                             tool_call=call,
                             tool_result=result,
                         )
-                        self._memory.append(make_tool_result_message(call, result))
 
             yield AgentEvent(
                 AgentEventType.ERROR,
@@ -532,3 +586,29 @@ def _make_deferred_tool_reminder(summaries) -> SystemReminder | None:
         full_content=content,
         concise_content=content,
     )
+
+
+def _convert_framework_blocks(blocks) -> tuple[PromptContextBlock, ...]:
+    converted: list[PromptContextBlock] = []
+    for block in blocks:
+        kind = getattr(block.kind, "value", block.kind)
+        converted.append(
+            PromptContextBlock(
+                id=block.id,
+                kind=str(kind),
+                priority=block.priority,
+                content=block.content,
+            )
+        )
+    return tuple(converted)
+
+
+def _project_memory_blocking_diagnostic(framework_context: FrameworkContext):
+    for diagnostic in getattr(framework_context, "diagnostics", ()):
+        if getattr(diagnostic, "code", None) == "restore_compaction_failed":
+            return diagnostic
+    return None
+
+
+def _empty_framework_context() -> FrameworkContext:
+    return FrameworkContext(blocks=(), restored_history=(), session_summary=None, diagnostics=())

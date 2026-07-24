@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from mycode.llm import ChatMessage, MessageOrigin
 from mycode.prompt.environment import EnvironmentCollector, format_environment_context
 from mycode.prompt.models import (
+    PromptContextBlock,
     PromptBuildMetadata,
     PromptBuildResult,
     PromptConfig,
@@ -39,10 +40,17 @@ class PromptBuilder:
         turn_id: int,
         plan_only: bool,
         reminders: Sequence[SystemReminder] = (),
+        framework_blocks: Sequence[PromptContextBlock] = (),
     ) -> TurnPromptContext:
         mode_reminder = self._reminder_policy.mode_reminder(plan_only=plan_only)
         all_reminders = tuple(reminders) + ((mode_reminder,) if mode_reminder is not None else ())
-        return TurnPromptContext(turn_id, self._environment_collector.collect(), plan_only, all_reminders)
+        return TurnPromptContext(
+            turn_id,
+            self._environment_collector.collect(),
+            plan_only,
+            all_reminders,
+            tuple(framework_blocks),
+        )
 
     def build(
         self,
@@ -73,6 +81,15 @@ class PromptBuilder:
             ChatMessage(role="system", content=system_text, origin=MessageOrigin.SYSTEM_INSTRUCTION),
             *history,
         ]
+        framework_context = _render_framework_context(turn.framework_blocks)
+        if framework_context is not None:
+            messages.append(
+                ChatMessage(
+                    role="user",
+                    content=framework_context,
+                    origin=MessageOrigin.FRAMEWORK_CONTEXT,
+                )
+            )
         reminder_content = self._reminder_policy.render(turn.reminders, round_index)
         if reminder_content is not None:
             # 运行时提醒只注入当前请求，绝不能回写到普通 conversation memory。
@@ -96,3 +113,19 @@ class PromptBuilder:
             diagnostics=tuple(diagnostics),
         )
         return PromptBuildResult(tuple(messages), sorted_tools, metadata)
+
+
+def _render_framework_context(blocks: Sequence[PromptContextBlock]) -> str | None:
+    if not blocks:
+        return None
+    lines = ["<framework-context>"]
+    for block in sorted(blocks, key=lambda item: (item.priority, item.id)):
+        lines.extend(
+            [
+                f'<block id="{block.id}" kind="{block.kind}">',
+                block.content,
+                "</block>",
+            ]
+        )
+    lines.append("</framework-context>")
+    return "\n".join(lines)

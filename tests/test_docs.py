@@ -230,3 +230,33 @@ def test_readme_documents_stage_07_context_management():
     ]
 
     assert all(value in readme for value in required)
+
+
+def test_readme_documents_stage_08_project_memory():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    required = [
+        "Stage 08",
+        "project memory",
+        "mycode.md",
+        ".mycode/instructions.md",
+        "~/.mycode/instructions.md",
+        "@include",
+        "JSONL",
+        "automatic restore",
+        "~/.mycode/projects",
+        "~/.mycode/memory",
+        "index.md",
+        "200 lines",
+        "25KB",
+        "user_preference",
+        "correction",
+        "project_knowledge",
+        "reference",
+        ".mewcode",
+        "vector database",
+        "RAG",
+        "team sync",
+        "graphical management UI",
+    ]
+
+    assert all(value in readme for value in required)
