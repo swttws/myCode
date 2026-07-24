@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import collections.abc
 from dataclasses import FrozenInstanceError, MISSING, fields, is_dataclass
+from typing import get_args, get_origin
 
 import pytest
 
@@ -18,6 +20,10 @@ def assert_frozen_dataclass(model: type) -> None:
 
 def assert_field_defaults(model: type, expected: list[tuple[str, object]]) -> None:
     assert [(field.name, field.default) for field in fields(model)] == expected
+
+
+def _annotation_name(value: object) -> str:
+    return getattr(value, "__forward_arg__", getattr(value, "__name__", str(value)))
 
 
 def test_slash_enum_values_are_fixed_by_stage_plan():
@@ -109,6 +115,21 @@ def test_slash_models_are_frozen_dataclasses_with_expected_fields():
             ("registry", MISSING),
         ],
     )
+
+
+def test_slash_command_handler_alias_matches_stage_contract():
+    slash = import_slash()
+
+    origin = get_origin(slash.SlashCommandHandler)
+    args = get_args(slash.SlashCommandHandler)
+
+    assert origin is collections.abc.Callable
+    assert [_annotation_name(argument) for argument in args[0]] == [
+        "SlashCommandContext",
+        "str",
+    ]
+    assert get_origin(args[1]) is collections.abc.Awaitable
+    assert get_args(args[1]) == (slash.SlashHandlerSignal,)
 
 
 def test_slash_model_defaults_and_immutability():
