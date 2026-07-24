@@ -238,6 +238,7 @@ def test_session_archive_store_selects_latest_recoverable_session_and_reports_ti
     assert result.time_gap_seconds > 86400
     assert result.time_gap_block is not None
     assert result.time_gap_block.kind is FrameworkContextKind.RESTORE_NOTICE
+    assert result.time_gap_block.content == "上一个项目会话在无活动 259199 秒后已恢复。"
 
 
 def test_session_archive_store_cleans_up_expired_sessions_without_deleting_current(
