@@ -50,6 +50,9 @@ class MemoryNoteStore:
             )
         return tuple(summaries)
 
+    def read_note(self, scope: MemoryScope, note_id: str) -> MemoryNote | None:
+        return self._find_note(scope, note_id)
+
     def load_index_bundle(self, scope: MemoryScope) -> MemoryIndexBundle:
         path = self._scope_dir(scope) / _INDEX_NAME
         diagnostics: list[MemoryDiagnostic] = []
@@ -247,7 +250,7 @@ class MemoryNoteStore:
         notes = self.load_notes(scope)
         lines = []
         for note in notes:
-            title = note.frontmatter.get("title", note.note_id)
+            title = _index_label(note)
             lines.append(f"- {title} ({note.kind.value}, id: {note.note_id}, updated: {note.updated_at})")
         # 索引注入有固定预算，先在文件层重建出确定顺序，注入前再按预算截断。
         _atomic_write_text(self._scope_dir(scope) / _INDEX_NAME, "\n".join(lines) + ("\n" if lines else ""))
@@ -327,6 +330,22 @@ def _note_id(title: str, body: str) -> str:
     slug = _slugify(title) or "note"
     digest = hashlib.sha256(f"{title}\0{body}".encode("utf-8")).hexdigest()[:8]
     return f"{slug}-{digest}"
+
+
+def _index_label(note: MemoryNote) -> str:
+    if note.kind in {MemoryKind.USER_PREFERENCE, MemoryKind.CORRECTION}:
+        body_label = _first_nonempty_body_line(note.body)
+        if body_label:
+            return body_label
+    return note.frontmatter.get("title", note.note_id)
+
+
+def _first_nonempty_body_line(body: str) -> str:
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:160]
+    return ""
 
 
 def _slugify(value: str) -> str:

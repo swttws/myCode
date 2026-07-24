@@ -26,6 +26,7 @@ from mycode.memory.note_prompt import NoteUpdatePrompt
 from mycode.memory.notes import MemoryNoteStore
 from mycode.memory.sessions import SessionArchiveStore
 from mycode.memory.paths import MemoryPaths
+from mycode.memory.tools import ReadMemoryNoteTool
 
 __all__ = [
     "ConversationMemory",
@@ -45,6 +46,7 @@ __all__ = [
     "MemoryScope",
     "NoteUpdatePrompt",
     "ProjectMemoryManager",
+    "ReadMemoryNoteTool",
     "create_project_memory_manager",
     "NoteUpdateAction",
     "NoteUpdateDecision",

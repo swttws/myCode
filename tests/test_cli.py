@@ -46,6 +46,17 @@ class FakeCompactArtifactTool:
         )
 
 
+class FakeMemoryNoteTool:
+    @property
+    def definition(self):
+        return ToolDefinition(
+            name="read_memory_note",
+            description="Read memory note.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            kind=ToolKind.READ,
+        )
+
+
 class FakeContextManager:
     def __init__(self, operations=None):
         self.artifact_tool = FakeCompactArtifactTool()
@@ -167,6 +178,10 @@ thinking:
     assert created["context_kwargs"]["model_timeout_seconds"] is None
     assert created["agent_kwargs"]["tool_registry"].get("read_file")._path_guard is permission_service.path_guard
     assert created["agent_kwargs"]["tool_registry"].get("read_compact_artifact") is fake_context.artifact_tool
+    assert (
+        created["agent_kwargs"]["tool_registry"].get("read_memory_note")
+        is created["agent_kwargs"]["project_memory"].memory_note_tool
+    )
     assert created["permission_workspace"] == tmp_path
     assert created["session_agent"].__class__ is FakeAgentLoop
     assert created["session_permissions"] is permission_service
@@ -186,6 +201,9 @@ def test_cli_builds_project_memory_and_passes_it_into_agent_loop(tmp_path, monke
         pass
 
     class FakeProjectMemory:
+        def __init__(self):
+            self.memory_note_tool = FakeMemoryNoteTool()
+
         async def close(self):
             return None
 
@@ -222,6 +240,7 @@ def test_cli_builds_project_memory_and_passes_it_into_agent_loop(tmp_path, monke
     class FakeAgentLoop:
         def __init__(self, *, project_memory=None, **kwargs):
             created["agent_project_memory"] = project_memory
+            created["agent_registry"] = kwargs["tool_registry"]
 
     class FakeTUI:
         def __init__(self, **kwargs):
@@ -249,6 +268,7 @@ def test_cli_builds_project_memory_and_passes_it_into_agent_loop(tmp_path, monke
     assert created["project_kwargs"]["workspace_root"] == tmp_path
     assert created["project_kwargs"]["home"] == home
     assert created["agent_project_memory"] is fake_project_memory
+    assert created["agent_registry"].get("read_memory_note") is fake_project_memory.memory_note_tool
 
 
 def test_cli_returns_error_before_tui_when_config_is_invalid(tmp_path, capsys):

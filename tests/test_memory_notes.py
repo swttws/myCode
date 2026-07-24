@@ -169,8 +169,33 @@ def test_memory_note_store_applies_create_update_merge_ignore_and_rebuilds_index
         "Do not introduce ad hoc string path parsing."
     )
     assert updated_note.frontmatter["source_session_id"] == "session-3"
-    assert "Always use pathlib" in index_text
+    assert "Use pathlib unless an existing local helper is clearer." in index_text
     assert created_note.note_id in index_text
+
+
+def test_memory_note_store_rebuilds_user_preference_index_from_body_conclusion(tmp_path):
+    paths, _workspace, _home = _make_paths(tmp_path)
+    store = MemoryNoteStore(paths=paths, now=lambda: _dt(2026, 7, 23, 10, 0, 0))
+
+    result = store.apply_decisions(
+        [
+            NoteUpdateDecision(
+                action=NoteUpdateAction.CREATE,
+                scope=MemoryScope.USER,
+                kind=MemoryKind.USER_PREFERENCE,
+                title="Method Naming Style",
+                body="用户偏好方法命名使用驼峰式命名。",
+                reason="The user expressed a durable preference.",
+            )
+        ],
+        source_session_id="session-1",
+    )
+    note = store.load_notes(MemoryScope.USER)[0]
+    index_text = (paths.user_memory_dir / "index.md").read_text(encoding="utf-8")
+
+    assert result.created == 1
+    assert f"- 用户偏好方法命名使用驼峰式命名。 (user_preference, id: {note.note_id}" in index_text
+    assert "Method Naming Style" not in index_text
 
 
 def test_memory_note_store_rejects_invalid_decisions_without_writing(tmp_path):
