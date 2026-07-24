@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -242,12 +243,12 @@ class ProjectMemoryManager:
                     )
                     return
                 elif event.type is StreamEventType.ERROR:
-                    self._background_diagnostics.append(
-                        MemoryDiagnostic(
-                            code="memory_note_llm_error",
-                            message=event.content or "note update model returned an error",
-                        )
+                    diagnostic = MemoryDiagnostic(
+                        code="memory_note_llm_error",
+                        message=event.content or "note update model returned an error",
                     )
+                    self._background_diagnostics.append(diagnostic)
+                    _print_background_error(diagnostic)
                     return
             decisions = self._note_prompt.parse("".join(text_parts))
             result = self._notes.apply_decisions(
@@ -259,12 +260,16 @@ class ProjectMemoryManager:
             # 关闭时取消后台笔记，避免退出流程被网络或模型调用拖住。
             raise
         except Exception as exc:
-            self._background_diagnostics.append(
-                MemoryDiagnostic(
-                    code="memory_note_update_failed",
-                    message=str(exc),
-                )
+            diagnostic = MemoryDiagnostic(
+                code="memory_note_update_failed",
+                message=str(exc),
             )
+            self._background_diagnostics.append(diagnostic)
+            _print_background_error(diagnostic)
+
+
+def _print_background_error(diagnostic: MemoryDiagnostic) -> None:
+    print(f"myCode 记忆更新错误：{diagnostic.code}: {diagnostic.message}", file=sys.stderr)
 
 
 def _render_memory_index(user_text: str, project_text: str) -> str:

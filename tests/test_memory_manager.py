@@ -118,6 +118,12 @@ class HangingLLM(BaseLLM):
         yield StreamEvent(StreamEventType.DONE)
 
 
+class RaisingLLM(BaseLLM):
+    async def stream_chat(self, messages, tools=None):
+        raise RuntimeError("Invalid JSON in SSE data.")
+        yield StreamEvent(StreamEventType.DONE)
+
+
 def _summary() -> SessionSummary:
     return SessionSummary(
         session_id="session-1",
@@ -331,6 +337,48 @@ def test_project_memory_manager_close_cancels_background_note_tasks():
     asyncio.run(scenario())
 
     assert sessions.close_calls == 1
+
+
+def test_project_memory_manager_prints_background_llm_error(capsys):
+    manager, _instructions, _sessions, _notes, _note_prompt, _llm, _memory = _manager(
+        restore_result=_restore_result()
+    )
+    manager._llm = FakeLLM((StreamEvent(StreamEventType.ERROR, "模型限流"),))
+
+    async def scenario():
+        manager.after_final_response(
+            user_message=ChatMessage(role="user", content="remember"),
+            assistant_message=ChatMessage(role="assistant", content="ok"),
+            framework_context=FrameworkContext(blocks=(), restored_history=()),
+        )
+        await asyncio.sleep(0)
+        await manager.close()
+
+    asyncio.run(scenario())
+
+    captured = capsys.readouterr()
+    assert "myCode 记忆更新错误：memory_note_llm_error: 模型限流" in captured.err
+
+
+def test_project_memory_manager_prints_background_llm_exception(capsys):
+    manager, _instructions, _sessions, _notes, _note_prompt, _llm, _memory = _manager(
+        restore_result=_restore_result()
+    )
+    manager._llm = RaisingLLM()
+
+    async def scenario():
+        manager.after_final_response(
+            user_message=ChatMessage(role="user", content="remember"),
+            assistant_message=ChatMessage(role="assistant", content="ok"),
+            framework_context=FrameworkContext(blocks=(), restored_history=()),
+        )
+        await asyncio.sleep(0)
+        await manager.close()
+
+    asyncio.run(scenario())
+
+    captured = capsys.readouterr()
+    assert "myCode 记忆更新错误：memory_note_update_failed: Invalid JSON in SSE data." in captured.err
 
 
 def test_memory_package_exports_factory_and_paths():

@@ -58,6 +58,35 @@ def test_openai_responses_maps_output_text_and_done_events():
     }
 
 
+def test_openai_responses_stops_on_done_marker_after_completed_event():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = "\n".join(
+            [
+                "event: response.output_text.delta",
+                'data: {"type":"response.output_text.delta","delta":"Hi"}',
+                "",
+                "event: response.completed",
+                'data: {"type":"response.completed"}',
+                "",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        return httpx.Response(200, content=body.encode("utf-8"))
+
+    config = LLMConfig("openai_responses", "gpt-test", "https://api.openai.test/v1", "sk-test", TEST_COMPACT_CONFIG)
+    llm = OpenAIResponsesLLM(config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    import asyncio
+
+    events = asyncio.run(collect_async(llm.stream_chat([ChatMessage(role="user", content="hello")])))
+
+    assert events == [
+        StreamEvent(StreamEventType.TEXT_DELTA, "Hi"),
+        StreamEvent(StreamEventType.DONE),
+    ]
+
+
 def test_openai_responses_includes_tools_when_provided():
     request_log: list[httpx.Request] = []
 

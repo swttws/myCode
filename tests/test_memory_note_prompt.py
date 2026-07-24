@@ -45,6 +45,15 @@ def test_note_update_prompt_builds_context_rich_json_instruction():
     assert "decisions" in message.content
     assert "返回一个 JSON 对象" in message.content
     assert "不要调用工具" in message.content
+    assert "只输出一个 JSON 对象" in message.content
+    assert "不要使用 Markdown 代码块" in message.content
+    assert "不要添加前后说明文字" in message.content
+    assert "json.loads" in message.content
+    assert '{"decisions":[]}' in message.content
+    assert '"action":"create"' in message.content
+    assert '"action":"merge"' in message.content
+    assert '"action":"update"' in message.content
+    assert '"action":"ignore"' in message.content
     assert "现有用户记忆索引" in message.content
     assert "最新助手消息" in message.content
 
@@ -95,6 +104,28 @@ def test_note_update_prompt_parses_valid_decisions():
     assert decisions[1].target_note_id == "api-contract-abcd1234"
     assert decisions[2].title == "Docs"
     assert decisions[3].reason == "Ephemeral status update."
+
+
+def test_note_update_prompt_parses_json_from_markdown_response():
+    prompt = NoteUpdatePrompt()
+    text = """
+The JSON you've provided is valid.
+
+```json
+{"decisions":[{"action":"create","scope":"project","kind":"project_knowledge","title":"API","body":"网关返回 Responses SSE。","reason":"用户明确要求记住。"}]}
+```
+
+### Explanation
+This should not prevent parsing.
+"""
+
+    decisions = prompt.parse(text)
+
+    assert len(decisions) == 1
+    assert decisions[0].action is NoteUpdateAction.CREATE
+    assert decisions[0].scope is MemoryScope.PROJECT
+    assert decisions[0].kind is MemoryKind.PROJECT_KNOWLEDGE
+    assert decisions[0].title == "API"
 
 
 def test_note_update_prompt_ignores_invalid_payloads_and_keeps_valid_ignore():
