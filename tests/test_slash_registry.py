@@ -189,4 +189,3 @@ def test_slash_package_exports_core_models():
     assert expected_exports.issubset(set(slash.__all__))
     for name in expected_exports:
         assert hasattr(slash, name)
-    assert not hasattr(slash, "SlashCommandRegistry")

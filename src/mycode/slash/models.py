@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
 from mycode.permission.models import PermissionMode, RuleSource
 
 if TYPE_CHECKING:
-    from mycode.compact import ContextTokenStatus
+    from mycode.compact.models import ContextTokenStatus
     from mycode.mcp.models import MCPServerState
-    from mycode.memory import MemoryStatusSnapshot, SessionStatusSnapshot
+    from mycode.memory.models import MemoryStatusSnapshot, SessionStatusSnapshot
 
 
 StatusValue = TypeVar("StatusValue")

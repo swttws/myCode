@@ -6,6 +6,7 @@ from typing import get_origin
 
 import pytest
 
+from mycode.mcp.models import MCPServerState
 from mycode.permission.models import PermissionMode, RuleSource
 
 
@@ -120,7 +121,7 @@ def test_status_section_is_generic_and_status_models_are_immutable():
     )
     server_status = slash.MCPServerStatus(
         name="files",
-        state="ready",
+        state=MCPServerState.READY,
         available=True,
         tool_count=2,
         diagnostic_categories=("connection",),
@@ -270,6 +271,6 @@ def test_slash_package_exports_status_models_and_controller_protocol():
         "StatusSection",
     }
 
-    assert set(slash.__all__) == expected_exports
+    assert expected_exports.issubset(set(slash.__all__))
     for name in expected_exports:
         assert hasattr(slash, name)

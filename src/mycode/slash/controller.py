@@ -10,8 +10,8 @@ from mycode.slash.models import (
 )
 
 if TYPE_CHECKING:
-    from mycode.compact import ContextTokenStatus
-    from mycode.memory import MemoryStatusSnapshot, SessionStatusSnapshot
+    from mycode.compact.models import ContextTokenStatus
+    from mycode.memory.models import MemoryStatusSnapshot, SessionStatusSnapshot
 
 
 @runtime_checkable
