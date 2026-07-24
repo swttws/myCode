@@ -6,6 +6,8 @@ from typing import get_args, get_origin
 
 import pytest
 
+from mycode.slash.models import SlashCommand, SlashCommandType, SlashHandlerSignal
+
 
 def import_slash():
     import mycode.slash as slash
@@ -189,3 +191,90 @@ def test_slash_package_exports_core_models():
     assert expected_exports.issubset(set(slash.__all__))
     for name in expected_exports:
         assert hasattr(slash, name)
+
+
+async def _registry_handler(context, arguments):
+    return SlashHandlerSignal.CONTINUE
+
+
+def _command(
+    name: str,
+    *,
+    aliases: tuple[str, ...] = (),
+    hidden: bool = False,
+) -> SlashCommand:
+    return SlashCommand(
+        name=name,
+        aliases=aliases,
+        description=f"{name} description",
+        usage=f"/{name}",
+        command_type=SlashCommandType.LOCAL,
+        handler=_registry_handler,
+        hidden=hidden,
+    )
+
+
+def test_slash_registry_accepts_distinct_commands_without_mutating_input_sequence():
+    from mycode.slash.registry import SlashCommandRegistry
+
+    commands = [
+        _command("help", aliases=("h",)),
+        _command("status", aliases=("st",)),
+    ]
+    original = list(commands)
+
+    registry = SlashCommandRegistry(commands)
+
+    assert registry._commands == tuple(original)
+    assert commands == original
+
+
+@pytest.mark.parametrize(
+    ("field_name", "identifier"),
+    [
+        ("name", ""),
+        ("name", "/help"),
+        ("name", "he lp"),
+        ("aliases", ""),
+        ("aliases", "two words"),
+    ],
+)
+def test_slash_registry_rejects_invalid_identifiers(field_name: str, identifier: str):
+    from mycode.slash.registry import SlashCommandRegistrationError, SlashCommandRegistry
+
+    kwargs = {"name": "help", "aliases": ("h",)}
+    if field_name == "name":
+        kwargs["name"] = identifier
+    else:
+        kwargs["aliases"] = (identifier,)
+
+    with pytest.raises(SlashCommandRegistrationError):
+        SlashCommandRegistry([_command(**kwargs)])
+
+
+@pytest.mark.parametrize(
+    ("commands", "identifier", "first_name", "second_name"),
+    [
+        ([_command("help"), _command("help")], "help", "help", "help"),
+        ([_command("Help"), _command("help")], "help", "Help", "help"),
+        ([_command("help", aliases=("h", "H"))], "h", "help", "help"),
+        ([_command("help", aliases=("h",)), _command("status", aliases=("H",))], "h", "help", "status"),
+        ([_command("help"), _command("status", aliases=("HELP",))], "help", "help", "status"),
+        ([_command("status", hidden=True), _command("Status")], "status", "status", "Status"),
+    ],
+)
+def test_slash_registry_rejects_case_insensitive_identifier_conflicts(
+    commands: list[SlashCommand],
+    identifier: str,
+    first_name: str,
+    second_name: str,
+):
+    from mycode.slash.registry import SlashCommandRegistrationError, SlashCommandRegistry
+
+    with pytest.raises(SlashCommandRegistrationError) as excinfo:
+        SlashCommandRegistry(commands)
+
+    message = str(excinfo.value)
+    assert identifier in message.lower()
+    assert first_name in message
+    assert second_name in message
