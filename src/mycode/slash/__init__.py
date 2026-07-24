@@ -1,5 +1,11 @@
+from mycode.slash.controller import SlashCommandController
 from mycode.slash.models import (
+    ApplicationStatusSnapshot,
+    GitStatusSnapshot,
+    MCPServerStatus,
+    MCPStatusSnapshot,
     ParsedSlashInput,
+    PermissionStatusSnapshot,
     SlashCommand,
     SlashCommandContext,
     SlashCommandHandler,
@@ -10,12 +16,19 @@ from mycode.slash.models import (
     SlashHandlerSignal,
     SlashInputKind,
     SlashMode,
+    StatusSection,
 )
 
 __all__ = [
+    "ApplicationStatusSnapshot",
+    "GitStatusSnapshot",
+    "MCPServerStatus",
+    "MCPStatusSnapshot",
     "ParsedSlashInput",
+    "PermissionStatusSnapshot",
     "SlashCommand",
     "SlashCommandContext",
+    "SlashCommandController",
     "SlashCommandHandler",
     "SlashCommandType",
     "SlashCompletionCandidate",
@@ -24,4 +37,5 @@ __all__ = [
     "SlashHandlerSignal",
     "SlashInputKind",
     "SlashMode",
+    "StatusSection",
 ]

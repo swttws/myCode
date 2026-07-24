@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
+
+from mycode.permission.models import PermissionMode, RuleSource
+
+if TYPE_CHECKING:
+    from mycode.compact import ContextTokenStatus
+    from mycode.mcp.models import MCPServerState
+    from mycode.memory import MemoryStatusSnapshot, SessionStatusSnapshot
+
+
+StatusValue = TypeVar("StatusValue")
 
 
 class SlashCommandType(str, Enum):
@@ -32,6 +42,57 @@ class SlashDispatchKind(str, Enum):
 class SlashMode(str, Enum):
     DEFAULT = "default"
     PLAN = "plan"
+
+
+@dataclass(frozen=True)
+class PermissionStatusSnapshot:
+    mode: PermissionMode
+    source: RuleSource | None
+
+
+@dataclass(frozen=True)
+class GitStatusSnapshot:
+    is_repository: bool
+    repository_root: str | None
+    branch: str | None
+    upstream: str | None
+    ahead: int
+    behind: int
+    staged: int
+    unstaged: int
+    untracked: int
+
+
+@dataclass(frozen=True)
+class MCPServerStatus:
+    name: str
+    state: MCPServerState
+    available: bool
+    tool_count: int
+    diagnostic_categories: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MCPStatusSnapshot:
+    servers: tuple[MCPServerStatus, ...]
+
+
+@dataclass(frozen=True)
+class StatusSection(Generic[StatusValue]):
+    value: StatusValue | None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class ApplicationStatusSnapshot:
+    workspace_root: str
+    mode: SlashMode
+    permission: StatusSection[PermissionStatusSnapshot]
+    token: StatusSection[ContextTokenStatus]
+    session: StatusSection[SessionStatusSnapshot]
+    memory: StatusSection[MemoryStatusSnapshot]
+    git: StatusSection[GitStatusSnapshot]
+    mcp: StatusSection[MCPStatusSnapshot]
 
 
 @dataclass(frozen=True)

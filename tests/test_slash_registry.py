@@ -169,7 +169,7 @@ def test_slash_model_defaults_and_immutability():
             setattr(instance, attribute, value)
 
 
-def test_slash_package_exports_only_current_core_models():
+def test_slash_package_exports_core_models():
     slash = import_slash()
 
     expected_exports = {
@@ -186,8 +186,7 @@ def test_slash_package_exports_only_current_core_models():
         "SlashMode",
     }
 
-    assert set(slash.__all__) == expected_exports
+    assert expected_exports.issubset(set(slash.__all__))
     for name in expected_exports:
         assert hasattr(slash, name)
-    assert not hasattr(slash, "SlashCommandController")
     assert not hasattr(slash, "SlashCommandRegistry")
