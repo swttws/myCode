@@ -13,6 +13,7 @@ from mycode.compact.models import (
     CompactPolicy,
     CompactReport,
     CompactStatus,
+    ContextTokenStatus,
     PreparedContext,
 )
 from mycode.compact.summary import ConversationCompactor, select_recent_messages, summary_input_messages
@@ -132,6 +133,20 @@ class ContextManager:
     @property
     def artifact_tool(self) -> ReadCompactArtifactTool:
         return ReadCompactArtifactTool(self._store)
+
+    def estimate_current(self, *, build_request) -> ContextTokenStatus:
+        history = tuple(self._memory.messages())
+        request = build_request(history)
+        snapshot = self._estimator.snapshot(request.messages, request.tools)
+        estimate = self._estimator.estimate(snapshot)
+        context_window_tokens = self._config.context_window_tokens
+        usage_ratio = estimate.tokens / context_window_tokens if context_window_tokens > 0 else 0.0
+        return ContextTokenStatus(
+            estimated_tokens=estimate.tokens,
+            context_window_tokens=context_window_tokens,
+            usage_ratio=max(0.0, usage_ratio),
+            source=estimate.source,
+        )
 
     async def compact_manual(
         self,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from mycode.agent import AgentLoop, AgentMode, ApprovalProvider
 from mycode.permission.models import PermissionMode, RuleSource
 from mycode.permission.service import PermissionService
@@ -34,6 +36,15 @@ class ChatSession:
     async def compact(self):
         async for event in self._agent.compact(mode=self._mode):
             yield event
+
+    async def token_status(self):
+        return await asyncio.to_thread(self._agent.context_token_status, mode=self._mode)
+
+    async def session_status(self):
+        return await asyncio.to_thread(self._agent.session_status)
+
+    async def memory_status(self):
+        return await asyncio.to_thread(self._agent.memory_status)
 
     def set_plan_only(self, enabled: bool) -> None:
         self._mode.plan_only = enabled

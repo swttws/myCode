@@ -7,10 +7,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mycode.config import ConfigError, load_config
-from mycode.dev_logging import configure_dev_logging_from_env
 from mycode.agent import AgentConfig, AgentLoop
 from mycode.compact import create_context_manager
+from mycode.config import ConfigError, load_config
+from mycode.dev_logging import configure_dev_logging_from_env
 from mycode.memory import InMemoryConversationMemory, create_project_memory_manager
 from mycode.mcp import (
     MCPConfig,
@@ -24,6 +24,12 @@ from mycode.permission.models import PermissionConfigError
 from mycode.permission.service import PermissionInterceptor, PermissionService
 from mycode.protocols import ProtocolError, create_llm
 from mycode.session import ChatSession
+from mycode.slash import (
+    SlashCommandCompleter,
+    SlashCommandDispatcher,
+    SlashCommandRegistrationError,
+    create_default_slash_registry,
+)
 from mycode.tool import ToolExecutor, create_default_tool_registry
 from mycode.tui import ChatTUI
 
@@ -51,16 +57,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     configure_dev_logging_from_env()
     args = build_parser().parse_args(argv)
+    workspace_root = Path.cwd()
     logger.info(
         "启动 myCode CLI，配置文件：%s，MCP 配置：%s，工作目录：%s",
         args.config or "自动查找",
         args.mcp_config or "自动查找",
-        Path.cwd(),
+        workspace_root,
     )
     try:
         config = load_config(args.config)
         mcp_config, mcp_config_diagnostics = load_mcp_config(args.mcp_config)
         llm = create_llm(config)
+        registry = create_default_slash_registry()
+        dispatcher = SlashCommandDispatcher(registry)
+        completer = SlashCommandCompleter(registry)
     except (ConfigError, ProtocolError) as exc:
         logger.error("myCode 配置错误：%s", exc)
         print(f"myCode 配置错误：{exc}", file=sys.stderr)
@@ -69,9 +79,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("myCode MCP 配置错误：%s", exc)
         print(f"myCode MCP 配置错误：{exc}", file=sys.stderr)
         return 1
+    except SlashCommandRegistrationError as exc:
+        logger.error("myCode slash 命令注册冲突：%s", exc)
+        print(f"myCode slash 命令注册冲突：{exc}", file=sys.stderr)
+        return 1
 
     try:
-        permissions = PermissionService.create(Path.cwd())
+        permissions = PermissionService.create(workspace_root)
     except PermissionConfigError as exc:
         logger.error("myCode 权限配置错误：%s", exc)
         print(f"myCode 权限配置错误：{exc}", file=sys.stderr)
@@ -84,6 +98,10 @@ def main(argv: list[str] | None = None) -> int:
             permissions=permissions,
             mcp_config=mcp_config,
             mcp_config_diagnostics=mcp_config_diagnostics,
+            workspace_root=workspace_root,
+            registry=registry,
+            dispatcher=dispatcher,
+            completer=completer,
         )
     )
     logger.info("myCode CLI 退出，退出码：%s", exit_code)
@@ -97,20 +115,24 @@ async def _run_application(
     permissions,
     mcp_config: MCPConfig,
     mcp_config_diagnostics: tuple[MCPDiagnostic, ...],
+    workspace_root: Path,
+    registry,
+    dispatcher: SlashCommandDispatcher,
+    completer: SlashCommandCompleter,
 ) -> int:
     pool = MCPServerPool(mcp_config)
     context_manager = None
     project_memory = None
     try:
-        # 权限服务和文件工具必须共享同一 PathGuard，避免策略检查与实际执行使用不同边界。
         memory = InMemoryConversationMemory()
         tool_registry = create_default_tool_registry(
-            Path.cwd(), path_guard=permissions.path_guard
+            workspace_root,
+            path_guard=permissions.path_guard,
         )
         agent_config = AgentConfig()
         try:
             context_manager = create_context_manager(
-                workspace_root=Path.cwd(),
+                workspace_root=workspace_root,
                 home=Path.home(),
                 llm=llm,
                 memory=memory,
@@ -124,23 +146,21 @@ async def _run_application(
         tool_registry.register(context_manager.artifact_tool)
         try:
             project_memory = create_project_memory_manager(
-                workspace_root=Path.cwd(),
+                workspace_root=workspace_root,
                 home=Path.home(),
                 llm=llm,
                 memory=memory,
                 now=lambda: datetime.now(timezone.utc),
             )
         except (OSError, RuntimeError, ValueError) as exc:
-            logger.error("myCode 闀挎湡璁板繂鍒濆鍖栭敊璇細%s", exc)
-            print(f"myCode 闀挎湡璁板繂鍒濆鍖栭敊璇細{exc}", file=sys.stderr)
+            logger.error("myCode 项目记忆错误：%s", exc)
+            print(f"myCode 项目记忆错误：{exc}", file=sys.stderr)
             return 1
 
-        # 初始化失败以诊断形式上报；可用 server 和本地工具仍可继续启动。
         tool_registry.register(project_memory.memory_note_tool)
         connection_diagnostics = await pool.initialize_all()
         _report_mcp_diagnostics(mcp_config_diagnostics + connection_diagnostics)
 
-        # 注册当前远端工具，并通过 pool listener 持续同步重连后的工具变化。
         register_mcp_tools(pool, tool_registry)
         tool_executor = ToolExecutor(tool_registry)
         permission_interceptor = PermissionInterceptor(permissions)
@@ -155,10 +175,17 @@ async def _run_application(
             project_memory=project_memory,
         )
         session = ChatSession(agent=agent, permissions=permissions)
-        tui = ChatTUI(session=session, show_thinking=config.thinking.show)
+        tui = ChatTUI(
+            session=session,
+            dispatcher=dispatcher,
+            registry=registry,
+            completer=completer,
+            mcp_pool=pool,
+            workspace_root=workspace_root,
+            show_thinking=config.thinking.show,
+        )
         return await tui.run()
     finally:
-        # 无论 TUI 正常退出、抛错还是被取消，都要回收 HTTP 流和 stdio 子进程。
         try:
             if project_memory is not None:
                 await project_memory.close()
@@ -184,7 +211,7 @@ def _report_mcp_diagnostics(diagnostics: tuple[MCPDiagnostic, ...]) -> None:
             diagnostic.message,
         )
         print(
-            f"myCode MCP 警告：{server}：category={diagnostic.category}，"
+            f"myCode MCP 警告：{server}，category={diagnostic.category}，"
             f"transport={transport}，{diagnostic.message}",
             file=sys.stderr,
         )

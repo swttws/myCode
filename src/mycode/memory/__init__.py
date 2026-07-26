@@ -10,13 +10,17 @@ from mycode.memory.models import (
     MemoryKind,
     MemoryNote,
     MemoryScope,
+    MemoryScopeStatus,
+    MemoryStatusSnapshot,
     NoteUpdateAction,
     NoteUpdateDecision,
     NoteUpdateResult,
     SessionRecord,
     SessionRecordType,
+    SessionSource,
     SessionRestoreResult,
     SessionSummary,
+    SessionStatusSnapshot,
 )
 from mycode.memory.base import ConversationMemory
 from mycode.memory.in_memory import InMemoryConversationMemory
@@ -44,6 +48,8 @@ __all__ = [
     "MemoryNoteStore",
     "MemoryPaths",
     "MemoryScope",
+    "MemoryScopeStatus",
+    "MemoryStatusSnapshot",
     "NoteUpdatePrompt",
     "ProjectMemoryManager",
     "ReadMemoryNoteTool",
@@ -53,7 +59,9 @@ __all__ = [
     "NoteUpdateResult",
     "SessionRecord",
     "SessionRecordType",
+    "SessionSource",
     "SessionRestoreResult",
     "SessionArchiveStore",
     "SessionSummary",
+    "SessionStatusSnapshot",
 ]

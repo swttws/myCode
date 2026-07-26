@@ -260,3 +260,28 @@ def test_readme_documents_stage_08_project_memory():
     ]
 
     assert all(value in readme for value in required)
+
+
+def test_readme_documents_stage_09_slash_commands():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    command_section = readme.split("## 交互命令", 1)[1].split("## 当前阶段不做", 1)[0]
+    public_commands = [
+        "/help",
+        "/compact",
+        "/clear",
+        "/plan",
+        "/do",
+        "/session",
+        "/memory",
+        "/permission",
+        "/status",
+        "/review",
+    ]
+
+    assert all(command in command_section for command in public_commands)
+    assert "/plan-only" not in command_section
+    assert "/exit" in command_section
+    assert "/quit" in command_section
+    assert "隐藏" in command_section
+    assert "[DEFAULT]" in readme
+    assert "[PLAN]" in readme

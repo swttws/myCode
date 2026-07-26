@@ -95,6 +95,9 @@ class SessionArchiveStore:
         self._last_selection_now = reference_now
         return self._latest_recoverable_session(reference_now)
 
+    def current_summary(self) -> SessionSummary:
+        return self._scan_session(self._current_session_path).summary
+
     def restore_latest(self) -> SessionRestoreResult:
         reference_now = self._last_selection_now or _normalize_datetime(self._now())
         self._last_selection_now = None

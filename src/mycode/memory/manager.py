@@ -16,6 +16,11 @@ from mycode.memory.models import (
     MemoryKind,
     MemoryNote,
     MemoryScope,
+    MemoryScopeStatus,
+    MemoryStatusSnapshot,
+    SessionSource,
+    SessionSummary,
+    SessionStatusSnapshot,
 )
 from mycode.memory.paths import MemoryPaths
 from mycode.memory.note_prompt import NoteUpdatePrompt
@@ -50,6 +55,7 @@ class ProjectMemoryManager:
         self._memory_note_tool = ReadMemoryNoteTool(notes)
         self._time_gap_notice_seconds = time_gap_notice_seconds
         self._restored = False
+        self._restored_summary: SessionSummary | None = None
         self._closed = False
         self._recorded_message_ids: set[int] = set()
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -75,8 +81,12 @@ class ProjectMemoryManager:
             restore_result = self._sessions.restore_latest()
             self._restored = True
             session_summary = restore_result.summary
-            diagnostics.extend(restore_result.diagnostics)
             restored_history = tuple(restore_result.history)
+            if session_summary is not None and restored_history:
+                self._restored_summary = session_summary
+            elif session_summary is None:
+                self._restored_summary = None
+            diagnostics.extend(restore_result.diagnostics)
             if restored_history:
                 compacted = await self._prepare_restored_history(
                     restored_history,
@@ -178,6 +188,59 @@ class ProjectMemoryManager:
         self._recorded_message_ids.clear()
         # /clear 后短期上下文已经被用户显式清空，本进程内不再把旧 JSONL 自动覆写回来。
         self._restored = True
+        self._restored_summary = None
+
+    def session_status(self) -> SessionStatusSnapshot:
+        summary = self._sessions.current_summary()
+        source = SessionSource.RESTORED if self._restored_summary is not None else SessionSource.NEW
+        restored_from_session_id = (
+            self._restored_summary.session_id if self._restored_summary is not None else None
+        )
+        updated_at = summary.updated_at
+        if updated_at is None and self._restored_summary is not None:
+            updated_at = self._restored_summary.updated_at
+        return SessionStatusSnapshot(
+            session_id=summary.session_id,
+            message_count=len(self._memory.messages()),
+            source=source,
+            restored_from_session_id=restored_from_session_id,
+            updated_at=updated_at,
+        )
+
+    def memory_status(self) -> MemoryStatusSnapshot:
+        if self._paths is None:
+            raise RuntimeError("memory paths are unavailable")
+
+        user_index = self._notes.load_index_bundle(MemoryScope.USER)
+        project_index = self._notes.load_index_bundle(MemoryScope.PROJECT)
+        user_notes = self._notes.load_notes(MemoryScope.USER)
+        project_notes = self._notes.load_notes(MemoryScope.PROJECT)
+        user_diagnostic_codes = _diagnostic_codes(user_index.diagnostics)
+        project_diagnostic_codes = _diagnostic_codes(project_index.diagnostics)
+        background_diagnostic_codes = _diagnostic_codes(tuple(self._background_diagnostics))
+        return MemoryStatusSnapshot(
+            user=MemoryScopeStatus(
+                scope=MemoryScope.USER,
+                path=str(self._paths.user_memory_dir),
+                note_count=len(user_notes),
+                index_line_count=user_index.line_count,
+                index_byte_count=user_index.byte_count,
+                diagnostic_codes=user_diagnostic_codes,
+            ),
+            project=MemoryScopeStatus(
+                scope=MemoryScope.PROJECT,
+                path=str(self._paths.project_memory_dir),
+                note_count=len(project_notes),
+                index_line_count=project_index.line_count,
+                index_byte_count=project_index.byte_count,
+                diagnostic_codes=project_diagnostic_codes,
+            ),
+            diagnostic_codes=_merge_recent_diagnostic_codes(
+                user_diagnostic_codes,
+                project_diagnostic_codes,
+                background_diagnostic_codes,
+            ),
+        )
 
     async def close(self) -> None:
         if self._closed:
@@ -335,6 +398,32 @@ def _call_diagnostics(func: Callable[[], Sequence[MemoryDiagnostic]], code: str)
         return tuple(func())
     except Exception as exc:
         return (MemoryDiagnostic(code=code, message=str(exc)),)
+
+
+def _diagnostic_codes(diagnostics: Sequence[MemoryDiagnostic]) -> tuple[str, ...]:
+    codes: list[str] = []
+    seen: set[str] = set()
+    for diagnostic in diagnostics:
+        code = getattr(diagnostic, "code", "")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        codes.append(code)
+    return tuple(codes)
+
+
+def _merge_recent_diagnostic_codes(*groups: Sequence[str], limit: int = 10) -> tuple[str, ...]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for code in group:
+            if code in seen:
+                continue
+            seen.add(code)
+            merged.append(code)
+    if limit <= 0:
+        return ()
+    return tuple(merged[-limit:])
 
 
 def create_project_memory_manager(

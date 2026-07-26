@@ -44,13 +44,14 @@ def patch_tui(monkeypatch, inputs, output, home):
         def create(cls, workspace_root):
             return real_create(workspace_root, home=home)
 
-    def fake_tui_factory(*, session, show_thinking):
+    def fake_tui_factory(*, session, show_thinking, **kwargs):
         console = Console(file=output, force_terminal=False, color_system=None, width=100)
         return ChatTUI(
             session=session,
             console=console,
             input_func=lambda: next(inputs),
             show_thinking=show_thinking,
+            **kwargs,
         )
 
     monkeypatch.setattr(cli, "ChatTUI", fake_tui_factory)
