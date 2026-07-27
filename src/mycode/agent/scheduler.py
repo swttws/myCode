@@ -32,6 +32,12 @@ def build_tool_batches(calls: list[ToolCall], registry: ToolRegistry) -> list[To
             raise ToolScheduleError("invalid_tool_kind", f"invalid tool kind: {kind}")
 
         if kind == ToolKind.READ:
+            if tool.definition.parallel_safe is False:
+                if pending_reads:
+                    batches.append(ToolBatch(kind=ToolKind.READ, calls=tuple(pending_reads)))
+                    pending_reads = []
+                batches.append(ToolBatch(kind=ToolKind.READ, calls=(call,)))
+                continue
             # 读工具先暂存，直到遇到写工具或输入结束时再形成一个并发批次。
             pending_reads.append(call)
             continue

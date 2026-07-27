@@ -12,6 +12,8 @@ class SlashCommandRegistrationError(ValueError):
 class SlashCommandRegistry:
     def __init__(self, commands: Sequence[SlashCommand]) -> None:
         command_tuple = tuple(commands)
+        self._static_commands = command_tuple
+        self._dynamic_commands: tuple[SlashCommand, ...] = ()
         index: dict[str, SlashCommand] = {}
 
         for command in command_tuple:
@@ -20,6 +22,21 @@ class SlashCommandRegistry:
                 self._register_identifier(index, alias, command)
 
         # Validate against a temporary index first so failures do not leave partial state.
+        self._commands = command_tuple
+        self._index = index
+
+    def replace_dynamic_commands(
+        self,
+        commands: Sequence[SlashCommand],
+    ) -> None:
+        dynamic_commands = tuple(commands)
+        command_tuple = self._static_commands + dynamic_commands
+        index: dict[str, SlashCommand] = {}
+        for command in command_tuple:
+            self._register_identifier(index, command.name, command)
+            for alias in command.aliases:
+                self._register_identifier(index, alias, command)
+        self._dynamic_commands = dynamic_commands
         self._commands = command_tuple
         self._index = index
 

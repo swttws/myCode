@@ -7,6 +7,7 @@ from mycode import cli
 from mycode.mcp import MCPConfig
 from mycode.permission.pathing import PathGuard
 from mycode.slash import SlashCommandRegistrationError
+from mycode.tool import ToolKind
 
 
 def _write_config(path: Path) -> None:
@@ -40,6 +41,7 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
     class FakeRegistry:
         def __init__(self):
             self.registered = []
+            self.dynamic_commands = ()
 
         def register(self, item):
             self.registered.append(item)
@@ -72,16 +74,25 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
         def deferred_summaries(self):
             return ()
 
+        def replace_dynamic_commands(self, commands):
+            self.dynamic_commands = tuple(commands)
+
+    class FakeTool:
+        def __init__(self, name):
+            self.definition = type("Definition", (), {"name": name, "kind": ToolKind.READ})()
+
     fake_registry = FakeRegistry()
 
     class FakeDispatcher:
-        def __init__(self, registry):
+        def __init__(self, registry, *, before_dispatch=None):
             created["dispatcher_registry"] = registry
+            created["before_dispatch"] = before_dispatch
             self.registry = registry
 
     class FakeCompleter:
-        def __init__(self, registry):
+        def __init__(self, registry, *, before_complete=None):
             created["completer_registry"] = registry
+            created["before_complete"] = before_complete
 
     class FakeLLM:
         pass
@@ -101,7 +112,7 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
 
     class FakeContextManager:
         def __init__(self):
-            self.artifact_tool = object()
+            self.artifact_tool = FakeTool("artifact")
             self.closed = False
 
         def close(self):
@@ -109,7 +120,7 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
 
     class FakeProjectMemory:
         def __init__(self):
-            self.memory_note_tool = object()
+            self.memory_note_tool = FakeTool("memory_note")
 
         async def close(self):
             return None
@@ -137,9 +148,12 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
             created["agent_kwargs"] = kwargs
 
     class FakeChatSession:
-        def __init__(self, *, agent, permissions):
+        def __init__(self, **kwargs):
+            agent = kwargs["agent"]
+            permissions = kwargs["permissions"]
             created["session_agent"] = agent
             created["session_permissions"] = permissions
+            created["session_kwargs"] = kwargs
 
     class FakeTUI:
         def __init__(self, **kwargs):
@@ -160,7 +174,10 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
     def fake_create_default_tool_registry(workspace_root, *, path_guard):
         created["tool_workspace"] = workspace_root
         created["tool_path_guard"] = path_guard
-        return FakeToolRegistry()
+        registry = FakeToolRegistry()
+        for name in ("read_file", "find_files", "search_code", "run_command"):
+            registry.register(FakeTool(name))
+        return registry
 
     def fake_create_context_manager(**kwargs):
         created["context_kwargs"] = kwargs
@@ -190,12 +207,15 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
     assert created["registry_created"] is True
     assert created["dispatcher_registry"] is fake_registry
     assert created["completer_registry"] is fake_registry
+    assert created["before_dispatch"] is not None
+    assert created["before_complete"] is not None
     assert created["permission_workspace"] == tmp_path
     assert created["tool_workspace"] == tmp_path
     assert created["tool_path_guard"].workspace_root == tmp_path
     assert created["context_kwargs"]["workspace_root"] == tmp_path
     assert created["project_kwargs"]["workspace_root"] == tmp_path
     assert created["agent_kwargs"]["tool_registry"].__class__ is FakeToolRegistry
+    assert "skill_runtime" in created["agent_kwargs"]
     assert created["tui_kwargs"]["dispatcher"].registry is fake_registry
     assert created["tui_kwargs"]["registry"] is fake_registry
     assert created["tui_kwargs"]["completer"].__class__ is FakeCompleter
@@ -204,6 +224,8 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
     assert created["tui_kwargs"]["show_thinking"] is True
     assert created["session_agent"].__class__ is FakeAgentLoop
     assert created["session_permissions"].path_guard.workspace_root == tmp_path
+    assert created["session_kwargs"]["skill_runtime"] is created["agent_kwargs"]["skill_runtime"]
+    assert "skill_executor" in created["session_kwargs"]
 
 
 def test_cli_returns_error_when_slash_registry_registration_fails(

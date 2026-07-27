@@ -53,6 +53,7 @@ class AgentLoop:
         config: AgentConfig | None = None,
         prompt_builder: PromptBuilder | None = None,
         project_memory: Any | None = None,
+        skill_runtime: Any | None = None,
     ) -> None:
         self._llm = llm
         self._memory = memory
@@ -63,6 +64,7 @@ class AgentLoop:
         self._prompt_builder = prompt_builder or create_default_prompt_builder(Path.cwd(), self.config.prompt)
         self._context_manager = context_manager
         self._project_memory = project_memory
+        self._skill_runtime = skill_runtime
         self._next_turn_id = 0
         self._latest_framework_context = _empty_framework_context()
 
@@ -77,14 +79,12 @@ class AgentLoop:
         turn_context = self._prompt_builder.begin_turn(
             turn_id=self._next_turn_id + 1,
             plan_only=mode.plan_only,
-            framework_blocks=_convert_framework_blocks(
-                getattr(self._latest_framework_context, "blocks", ())
-            ),
+            framework_blocks=self._framework_blocks(getattr(self._latest_framework_context, "blocks", ())),
         )
 
         def build_request(history):
             deferred_reminder = _make_deferred_tool_reminder(
-                self._tool_registry.deferred_summaries()
+                self._deferred_summaries()
             )
             round_turn_context = (
                 replace(
@@ -94,9 +94,14 @@ class AgentLoop:
                 if deferred_reminder is not None
                 else turn_context
             )
+            if self._skill_runtime is not None:
+                round_turn_context = replace(
+                    round_turn_context,
+                    framework_blocks=self._framework_blocks(getattr(self._latest_framework_context, "blocks", ())),
+                )
             return self._prompt_builder.build(
                 history=history,
-                tools=self._tool_registry.model_definitions(),
+                tools=self._model_definitions(),
                 turn=round_turn_context,
                 round_index=1,
             )
@@ -112,6 +117,18 @@ class AgentLoop:
         if self._project_memory is None:
             raise RuntimeError("project memory unavailable")
         return self._project_memory.memory_status()
+
+    def history_snapshot(self) -> tuple[ChatMessage, ...]:
+        return tuple(self._memory.messages())
+
+    def record_external_exchange(self, user_text: str, assistant_text: str) -> None:
+        user_message = make_user_message(user_text)
+        assistant_message = make_assistant_text_message(assistant_text)
+        self._memory.append(user_message)
+        self._memory.append(assistant_message)
+        if self._project_memory is not None:
+            self._project_memory.record_user_message(user_message)
+            self._project_memory.record_assistant_message(assistant_message)
 
     async def _prepare_project_memory_context(self) -> FrameworkContext:
         if self._project_memory is None:
@@ -145,7 +162,7 @@ class AgentLoop:
 
             def build_request(history):
                 deferred_reminder = _make_deferred_tool_reminder(
-                    self._tool_registry.deferred_summaries()
+                    self._deferred_summaries()
                 )
                 round_turn_context = (
                     replace(
@@ -155,9 +172,11 @@ class AgentLoop:
                     if deferred_reminder is not None
                     else turn_context
                 )
+                if self._skill_runtime is not None:
+                    round_turn_context = replace(round_turn_context, framework_blocks=self._framework_blocks(()))
                 return self._prompt_builder.build(
                     history=history,
-                    tools=self._tool_registry.model_definitions(),
+                    tools=self._model_definitions(),
                     turn=round_turn_context,
                     round_index=1,
                 )
@@ -203,6 +222,9 @@ class AgentLoop:
         *,
         mode: AgentMode,
         approval_provider: ApprovalProvider | None = None,
+        initial_skill_scope=None,
+        initial_framework_blocks=(),
+        isolated_depth: int = 0,
     ) -> AsyncIterable[AgentEvent]:
         self._next_turn_id += 1
         # 整次 run 共用一个截止时间，模型等待和工具执行都不能越过它。
@@ -213,6 +235,8 @@ class AgentLoop:
         )
 
         framework_context = await self._prepare_project_memory_context()
+        if self._skill_runtime is not None:
+            self._skill_runtime.refresh()
         blocking_diagnostic = _project_memory_blocking_diagnostic(framework_context)
         if blocking_diagnostic is not None:
             yield AgentEvent(
@@ -222,11 +246,24 @@ class AgentLoop:
             )
             return
 
+        base_framework_blocks = tuple(getattr(framework_context, "blocks", ())) + tuple(initial_framework_blocks)
         turn_context = self._prompt_builder.begin_turn(
             turn_id=self._next_turn_id,
             plan_only=mode.plan_only,
-            framework_blocks=_convert_framework_blocks(getattr(framework_context, "blocks", ())),
+            framework_blocks=self._framework_blocks(base_framework_blocks),
         )
+        if self._skill_runtime is not None:
+            if initial_skill_scope is not None:
+                if hasattr(self._skill_runtime, "set_current_scope_object"):
+                    self._skill_runtime.set_current_scope_object(initial_skill_scope)
+                else:
+                    self._skill_runtime.set_current_scope(initial_skill_scope.name)
+            self._skill_runtime.set_current_run_context(
+                history=tuple(self._memory.messages()),
+                framework_blocks=turn_context.framework_blocks,
+                approval_provider=approval_provider,
+                isolated_depth=isolated_depth,
+            )
         current_user_message = make_user_message(user_text)
         self._memory.append(current_user_message)
         if self._project_memory is not None:
@@ -240,7 +277,7 @@ class AgentLoop:
                 # 只注入延迟工具摘要；模型通过 tool_search 发现后，完整 schema 才进入下一轮。
                 def build_request(history):
                     deferred_reminder = _make_deferred_tool_reminder(
-                        self._tool_registry.deferred_summaries()
+                        self._deferred_summaries()
                     )
                     round_turn_context = (
                         replace(
@@ -250,9 +287,14 @@ class AgentLoop:
                         if deferred_reminder is not None
                         else turn_context
                     )
+                    if self._skill_runtime is not None:
+                        round_turn_context = replace(
+                            round_turn_context,
+                            framework_blocks=self._framework_blocks(base_framework_blocks),
+                        )
                     return self._prompt_builder.build(
                         history=history,
-                        tools=self._tool_registry.model_definitions(),
+                        tools=self._model_definitions(),
                         turn=round_turn_context,
                         round_index=round_index,
                     )
@@ -374,6 +416,7 @@ class AgentLoop:
                             framework_context=framework_context,
                         )
                     self._latest_framework_context = framework_context
+                    self._clear_skill_current_scope()
                     return
 
                 for call in tool_calls:
@@ -418,6 +461,17 @@ class AgentLoop:
                                 round_index=round_index,
                                 error_code=AgentErrorCode.UNKNOWN_TOOL,
                             )
+                            return
+
+                        if not self._skill_allows_tool(call.name):
+                            yield AgentEvent(
+                                AgentEventType.ERROR,
+                                content=f"tool not allowed by active skill: {call.name}",
+                                round_index=round_index,
+                                tool_call=call,
+                                error_code=AgentErrorCode.TOOL_ERROR,
+                            )
+                            self._clear_skill_current_scope()
                             return
 
                         permission_decision = await self._permission.before_tool(
@@ -542,6 +596,7 @@ class AgentLoop:
 
                     for call, result in zip(executable_calls, results):
                         result = await self._permission.after_tool(call, result)
+                        self._maybe_set_skill_scope(result)
                         result_message = make_tool_result_message(call, result)
                         self._memory.append(result_message)
                         if self._project_memory is not None:
@@ -559,6 +614,7 @@ class AgentLoop:
                 round_index=self.config.max_rounds,
                 error_code=AgentErrorCode.MAX_ROUNDS_EXCEEDED,
             )
+            self._clear_skill_current_scope()
         except (PromptBuildError, PromptConfigurationError) as exc:
             yield AgentEvent(
                 AgentEventType.ERROR,
@@ -572,11 +628,48 @@ class AgentLoop:
                 error_code=AgentErrorCode.LLM_ERROR,
             )
         except asyncio.CancelledError:
+            self._clear_skill_current_scope()
             yield AgentEvent(
                 AgentEventType.CANCELLED,
                 content="cancelled",
                 error_code=AgentErrorCode.CANCELLED,
             )
+
+    def _framework_blocks(self, blocks) -> tuple[PromptContextBlock, ...]:
+        converted = _convert_framework_blocks(blocks)
+        if self._skill_runtime is None:
+            return converted
+        return converted + tuple(self._skill_runtime.prompt_blocks())
+
+    def _model_definitions(self):
+        if self._skill_runtime is None:
+            return self._tool_registry.model_definitions()
+        return self._tool_registry.model_definitions(visible_names=self._skill_runtime.visible_tool_names())
+
+    def _deferred_summaries(self):
+        if self._skill_runtime is not None and self._skill_runtime.visible_tool_names() is not None:
+            return []
+        return self._tool_registry.deferred_summaries()
+
+    def _skill_allows_tool(self, name: str) -> bool:
+        if self._skill_runtime is None:
+            return True
+        return self._skill_runtime.allows_tool(name)
+
+    def _maybe_set_skill_scope(self, result: ToolResult) -> None:
+        if self._skill_runtime is None or not result.ok:
+            return
+        if result.tool_name != getattr(self._skill_runtime, "LOAD_TOOL_NAME", "load_skill"):
+            return
+        content = result.content
+        if content.get("action") == "activated" and content.get("set_scope") is True:
+            name = content.get("name")
+            if isinstance(name, str):
+                self._skill_runtime.set_current_scope(name)
+
+    def _clear_skill_current_scope(self) -> None:
+        if self._skill_runtime is not None:
+            self._skill_runtime.clear_current_scope()
 
 
 def _minimum_timeout(*values: float | None) -> float | None:

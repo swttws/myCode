@@ -204,6 +204,9 @@ def test_slash_command_controller_is_runtime_checkable_protocol():
         async def send_user_message(self, text: str) -> None:
             self.sent_text = text
 
+        async def execute_skill(self, name: str, arguments: str) -> None:
+            self.executed_skill = (name, arguments)
+
         async def compact_context(self) -> None:
             self.compacted = True
 
@@ -257,9 +260,11 @@ def test_slash_command_controller_is_runtime_checkable_protocol():
     assert isinstance(controller, slash.SlashCommandController)
     assert controller.current_mode() is slash.SlashMode.DEFAULT
     asyncio.run(controller.send_user_message("hello"))
+    asyncio.run(controller.execute_skill("review", "main"))
     asyncio.run(controller.compact_context())
     status = asyncio.run(controller.application_status())
     assert status.workspace_root == "D:/repo"
+    assert controller.executed_skill == ("review", "main")
 
 
 def test_slash_package_exports_status_models_and_controller_protocol():

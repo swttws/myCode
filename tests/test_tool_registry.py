@@ -15,7 +15,7 @@ from mycode.tool import (
 
 
 class FakeTool:
-    def __init__(self, name: str = "fake") -> None:
+    def __init__(self, name: str = "fake", *, parallel_safe: bool = True) -> None:
         self._definition = ToolDefinition(
             name=name,
             description="Fake test tool.",
@@ -25,6 +25,7 @@ class FakeTool:
                 "required": ["value"],
             },
             kind=ToolKind.READ,
+            parallel_safe=parallel_safe,
         )
 
     @property
@@ -53,6 +54,10 @@ def test_tool_definition_declares_tool_kind():
 
 def test_tool_definition_defaults_to_no_persistable_grant_arguments():
     assert FakeTool().definition.grant_arguments == ()
+
+
+def test_tool_definition_defaults_to_parallel_safe():
+    assert FakeTool().definition.parallel_safe is True
 
 
 def test_tool_registry_rejects_duplicate_tool_names():
@@ -109,6 +114,21 @@ def test_tool_registry_separates_full_model_and_deferred_views():
         DeferredToolSummary("alpha_remote", "Fake test tool."),
         DeferredToolSummary("zeta_remote", "Fake test tool."),
     ]
+
+
+def test_tool_registry_filters_model_definitions_by_visible_names_and_expands_deferred_tools():
+    local = FakeTool("local")
+    hidden = FakeTool("hidden")
+    deferred = DeferredFakeTool("remote")
+    registry = ToolRegistry([local, hidden, deferred])
+
+    assert [definition.name for definition in registry.model_definitions(visible_names=frozenset({"local"}))] == [
+        "local"
+    ]
+    assert [
+        definition.name
+        for definition in registry.model_definitions(visible_names=frozenset({"remote"}))
+    ] == ["remote"]
 
 
 def test_tool_registry_marks_only_registered_deferred_tool_as_discovered():

@@ -18,12 +18,6 @@ from mycode.slash.status import format_application_status
 
 logger = logging.getLogger(__name__)
 
-REVIEW_PROMPT = (
-    "请审查当前 Git 工作区的所有未提交改动，包括已暂存、未暂存和未跟踪文件，并忽略 Git 已忽略文件。"
-    "优先查找会导致错误行为的缺陷、行为回归、安全风险和缺失测试。请先按严重程度列出发现，并给出对应文件与位置；"
-    "如果没有发现，明确说明，并指出剩余测试风险。"
-)
-
 _COMMAND_TYPE_LABELS = {
     SlashCommandType.LOCAL: "本地",
     SlashCommandType.UI_STATE: "界面状态",
@@ -40,7 +34,6 @@ _PUBLIC_COMMAND_ORDER: tuple[str, ...] = (
     "memory",
     "permission",
     "status",
-    "review",
 )
 
 
@@ -161,14 +154,6 @@ async def handle_status(context: SlashCommandContext, arguments: str) -> SlashHa
     return SlashHandlerSignal.CONTINUE
 
 
-async def handle_review(context: SlashCommandContext, arguments: str) -> SlashHandlerSignal:
-    if _has_arguments(arguments):
-        _show_usage(context.controller, "review")
-        return SlashHandlerSignal.CONTINUE
-    await context.controller.send_user_message(REVIEW_PROMPT)
-    return SlashHandlerSignal.CONTINUE
-
-
 async def handle_exit(context: SlashCommandContext, arguments: str) -> SlashHandlerSignal:
     del context, arguments
     return SlashHandlerSignal.EXIT
@@ -253,14 +238,6 @@ def _default_commands() -> tuple[SlashCommand, ...]:
             usage="/status",
             command_type=SlashCommandType.LOCAL,
             handler=handle_status,
-        ),
-        SlashCommand(
-            name="review",
-            aliases=("rev",),
-            description="展开固定审查提示词",
-            usage="/review",
-            command_type=SlashCommandType.PROMPT,
-            handler=handle_review,
         ),
         SlashCommand(
             name="exit",
@@ -419,7 +396,6 @@ _COMMAND_BY_NAME = {
 
 
 __all__ = [
-    "REVIEW_PROMPT",
     "create_default_slash_registry",
     "handle_clear",
     "handle_compact",
@@ -429,7 +405,6 @@ __all__ = [
     "handle_memory",
     "handle_permission",
     "handle_plan",
-    "handle_review",
     "handle_session",
     "handle_status",
 ]

@@ -96,6 +96,34 @@ Long-term notes are Markdown files split by scope. User memory lives in `~/.myco
 
 Stage 08 deliberately does not migrate `.mewcode`, does not build a vector database, does not implement RAG, does not provide team sync, and does not add a graphical management UI. The memory package keeps this boundary local, file-backed, deterministic, and testable.
 
+## Stage 10 Skill 系统
+
+Skill 把可复用的 AI 操作封装成目录型能力包。myCode 会按项目、用户、内置三层发现 Skill：项目级目录是 `<workspace>/.mycode/skills`，用户级目录是 `~/.mycode/skills`，内置模板随包安装。每个 Skill 独占一个目录，入口文件固定为 `SKILL.md`；目录下可以放模板、示例、脚本和参考文档，但加载入口时只返回 SOP 和资源清单，资源必须再通过 `load_skill` 按相对路径逐个读取。
+
+`SKILL.md` 使用 YAML frontmatter 加 Markdown 正文。常用字段如下：
+
+```markdown
+---
+name: review
+description: 审查当前变更并列出风险
+allowed_tools:
+  - read_file
+  - search_code
+  - run_command
+mode: shared
+---
+
+按步骤审查：{{arguments}}
+```
+
+`allowed_tools` 是执行该 Skill 时可见的普通工具白名单，可以为空；系统级 `load_skill` 始终可用。`mode: shared` 复用主对话历史和主模型，结果完整留在主历史中；`mode: isolated` 会创建临时对话，只把最终摘要回流到主历史。独立模式需要配置 `context.strategy`，支持 `none`、`recent` 和 `summary`：`none` 不带主历史，`recent` 携带最近 N 个完整轮次，`summary` 在执行前用一次无工具模型调用生成临时背景。`model` 字段只对独立模式生效，只替换模型 ID。
+
+Skill 采用两阶段加载。首次请求只把 Skill 名称和 description 放进系统上下文；模型需要完整 SOP 时调用 `load_skill`，正文里的 `{{arguments}}` 会被原始参数替换，不执行表达式或模板代码。成功加载后 SOP 会作为高优先级框架上下文持续注入，直到 `/clear` 清除会话状态。
+
+运行中不会启动后台 watcher；补全、斜杠执行和 `load_skill` 调用前会做热更新检查。新增 Skill 会在下一次使用前出现，修改后的 SOP 会在下一次请求生效，删除高优先级版本会回退到低优先级版本。若热更新引入未知工具或固定命令冲突，本次更新会被拒绝并继续使用最后一个有效版本。
+
+默认内置 `commit`、`review` 和 `test` 三个 Skill。`commit` 与 `review` 是 shared；`test` 是 isolated，并携带最近 3 个完整轮次。项目级或用户级同名 Skill 可以覆盖内置版本。当前不做 Skill 市场、远程仓库、发布安装服务、版本依赖解析、图形化编辑器，也不自动执行 Skill 目录里的脚本。
+
 ## Stage 06 MCP 远端工具
 
 MCP server 使用独立 YAML 配置，不与 LLM 配置混合。可以用 `--mcp-config path/to/file.yaml` 显式指定；省略参数时依次查找当前目录的 `mycode.mcp.yaml` 和用户目录的 `~/.mycode/mcp.yaml`。两处都不存在时 MCP 保持禁用，本地工具和普通聊天仍可使用。
@@ -257,7 +285,7 @@ Stage 03 新增 `src/mycode/agent` 包作为 Agent 主边界。Agent Loop 每轮
 - `/memory`：显示当前记忆摘要。
 - `/permission`：显示当前有效权限档位和来源。
 - `/status`：显示当前工作区、模式、权限、Token、会话、记忆、Git 和 MCP 状态。
-- `/review`：展开固定审查提示词并进入普通对话。
+- `/commit`、`/review`、`/test`：来自内置 Skill；同名项目级或用户级 Skill 会按优先级覆盖。
 - `/exit`、`/quit`：退出 myCode；这两个命令在 `/help` 中隐藏。
 
 

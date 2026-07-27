@@ -96,7 +96,12 @@ class ChatTUI:
         self._console.print(text, markup=False, style="red" if error else None)
 
     async def send_user_message(self, text: str) -> None:
-        await self._render_stream(text)
+        await self._render_stream(self._session.send(text, approval_provider=self._approval_provider))
+
+    async def execute_skill(self, name: str, arguments: str) -> None:
+        await self._render_stream(
+            self._session.send_skill(name, arguments, approval_provider=self._approval_provider)
+        )
 
     async def compact_context(self) -> None:
         await self._render_compaction_stream()
@@ -206,9 +211,9 @@ class ChatTUI:
     def _prompt_label(self) -> str:
         return f"{self._mode_toolbar()} you> "
 
-    async def _render_stream(self, user_text: str) -> None:
+    async def _render_stream(self, events) -> None:
         self._console.print("[bold green]assistant>[/bold green] ", end="")
-        async for event in self._session.send(user_text, approval_provider=self._approval_provider):
+        async for event in events:
             if event.type == AgentEventType.TEXT_DELTA:
                 self._console.print(event.content, end="")
             elif event.type == AgentEventType.THINKING_DELTA and self._show_thinking:

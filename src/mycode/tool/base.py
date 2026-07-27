@@ -22,6 +22,7 @@ class ToolDefinition:
     parameters: JSONSchema
     kind: ToolKind
     grant_arguments: tuple[str, ...] = ()
+    parallel_safe: bool = True
 
 
 @dataclass(frozen=True)

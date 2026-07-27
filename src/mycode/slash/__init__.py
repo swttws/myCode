@@ -1,5 +1,5 @@
 from mycode.slash.controller import SlashCommandController
-from mycode.slash.builtins import REVIEW_PROMPT, create_default_slash_registry
+from mycode.slash.builtins import create_default_slash_registry
 from mycode.slash.dispatcher import SlashCommandDispatcher
 from mycode.slash.completion import SlashCommandCompleter
 from mycode.slash.models import (
@@ -46,7 +46,6 @@ __all__ = [
     "SlashHandlerSignal",
     "SlashInputKind",
     "SlashMode",
-    "REVIEW_PROMPT",
     "SlashCommandCompleter",
     "collect_git_status",
     "collect_mcp_status",
