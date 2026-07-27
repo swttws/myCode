@@ -1,5 +1,3 @@
-
-# 模型配置不要修改，protocol  model  base_url  api_key
 protocol: openai_chat
 model: 
 base_url: 

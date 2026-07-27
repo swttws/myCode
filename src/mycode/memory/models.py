@@ -28,6 +28,11 @@ class SessionRecordType(str, Enum):
     MESSAGE = "message"
 
 
+class SessionSource(str, Enum):
+    NEW = "new"
+    RESTORED = "restored"
+
+
 class FrameworkContextKind(str, Enum):
     INSTRUCTIONS = "instructions"
     MEMORY_INDEX = "memory_index"
@@ -86,6 +91,15 @@ class SessionSummary:
     message_count: int
     updated_at: str | None = None
     recoverable: bool = False
+
+
+@dataclass(frozen=True)
+class SessionStatusSnapshot:
+    session_id: str
+    message_count: int
+    source: SessionSource
+    restored_from_session_id: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -157,4 +171,21 @@ class NoteUpdateResult:
     updated: int
     ignored: int
     diagnostics: tuple[MemoryDiagnostic, ...] = ()
+
+
+@dataclass(frozen=True)
+class MemoryScopeStatus:
+    scope: MemoryScope
+    path: str
+    note_count: int
+    index_line_count: int
+    index_byte_count: int
+    diagnostic_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MemoryStatusSnapshot:
+    user: MemoryScopeStatus
+    project: MemoryScopeStatus
+    diagnostic_codes: tuple[str, ...]
 

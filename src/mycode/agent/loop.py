@@ -17,10 +17,10 @@ from mycode.agent.history import (
 )
 from mycode.agent.scheduler import ToolScheduleError, build_tool_batches
 from mycode.agent.state import AgentMode
-from mycode.compact.models import CompactAction, CompactError
+from mycode.compact.models import CompactAction, CompactError, ContextTokenStatus
 from mycode.llm import BaseLLM, LLMError, StreamEventType
 from mycode.memory import ConversationMemory
-from mycode.memory.models import FrameworkContext
+from mycode.memory.models import FrameworkContext, MemoryStatusSnapshot, SessionStatusSnapshot
 from mycode.prompt import (
     PromptBuildError,
     PromptConfigurationError,
@@ -64,12 +64,54 @@ class AgentLoop:
         self._context_manager = context_manager
         self._project_memory = project_memory
         self._next_turn_id = 0
+        self._latest_framework_context = _empty_framework_context()
 
     def clear_memory(self) -> None:
         # /clear 通过 ContextManager 同步清理历史、usage 锚点和归档会话；不重建模型、工具注册中心或运行配置。
         self._context_manager.clear()
         if self._project_memory is not None:
             self._project_memory.clear_session_state()
+        self._latest_framework_context = _empty_framework_context()
+
+    def context_token_status(self, *, mode: AgentMode) -> ContextTokenStatus:
+        turn_context = self._prompt_builder.begin_turn(
+            turn_id=self._next_turn_id + 1,
+            plan_only=mode.plan_only,
+            framework_blocks=_convert_framework_blocks(
+                getattr(self._latest_framework_context, "blocks", ())
+            ),
+        )
+
+        def build_request(history):
+            deferred_reminder = _make_deferred_tool_reminder(
+                self._tool_registry.deferred_summaries()
+            )
+            round_turn_context = (
+                replace(
+                    turn_context,
+                    reminders=turn_context.reminders + (deferred_reminder,),
+                )
+                if deferred_reminder is not None
+                else turn_context
+            )
+            return self._prompt_builder.build(
+                history=history,
+                tools=self._tool_registry.model_definitions(),
+                turn=round_turn_context,
+                round_index=1,
+            )
+
+        return self._context_manager.estimate_current(build_request=build_request)
+
+    def session_status(self) -> SessionStatusSnapshot:
+        if self._project_memory is None:
+            raise RuntimeError("project memory unavailable")
+        return self._project_memory.session_status()
+
+    def memory_status(self) -> MemoryStatusSnapshot:
+        if self._project_memory is None:
+            raise RuntimeError("project memory unavailable")
+        return self._project_memory.memory_status()
 
     async def _prepare_project_memory_context(self) -> FrameworkContext:
         if self._project_memory is None:
@@ -331,6 +373,7 @@ class AgentLoop:
                             assistant_message=final_message,
                             framework_context=framework_context,
                         )
+                    self._latest_framework_context = framework_context
                     return
 
                 for call in tool_calls:

@@ -85,6 +85,14 @@ class TokenEstimate:
 
 
 @dataclass(frozen=True)
+class ContextTokenStatus:
+    estimated_tokens: int
+    context_window_tokens: int
+    usage_ratio: float
+    source: str
+
+
+@dataclass(frozen=True)
 class ArchivedArtifact:
     path: str
     kind: Literal["tool_result", "user_message", "history"]
