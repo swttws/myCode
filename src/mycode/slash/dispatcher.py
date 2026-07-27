@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from mycode.slash.controller import SlashCommandController
 from mycode.slash.models import (
@@ -18,8 +20,14 @@ logger = logging.getLogger(__name__)
 
 
 class SlashCommandDispatcher:
-    def __init__(self, registry: SlashCommandRegistry) -> None:
+    def __init__(
+        self,
+        registry: SlashCommandRegistry,
+        *,
+        before_dispatch: Callable[[], Sequence[Any]] | None = None,
+    ) -> None:
         self._registry = registry
+        self._before_dispatch = before_dispatch
 
     @property
     def registry(self) -> SlashCommandRegistry:
@@ -39,6 +47,10 @@ class SlashCommandDispatcher:
                 kind=SlashDispatchKind.NOT_COMMAND,
                 normal_text=parsed.text,
             )
+
+        if self._before_dispatch is not None:
+            for diagnostic in self._before_dispatch():
+                controller.show_message(diagnostic.message, error=True)
 
         command_name = parsed.command_name or ""
         command = self._registry.resolve(command_name)

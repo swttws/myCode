@@ -22,6 +22,9 @@ class SlashCommandController(Protocol):
     def send_user_message(self, text: str) -> Awaitable[None]:
         ...
 
+    def execute_skill(self, name: str, arguments: str) -> Awaitable[None]:
+        ...
+
     def compact_context(self) -> Awaitable[None]:
         ...
 

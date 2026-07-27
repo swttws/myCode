@@ -5,12 +5,13 @@ from mycode.tool import ToolCall, ToolDefinition, ToolKind, ToolRegistry, ToolRe
 
 
 class FakeTool:
-    def __init__(self, name: str, kind) -> None:
+    def __init__(self, name: str, kind, *, parallel_safe: bool = True) -> None:
         self._definition = ToolDefinition(
             name=name,
             description=f"{name} test tool.",
             parameters={"type": "object", "properties": {}, "required": []},
             kind=kind,
+            parallel_safe=parallel_safe,
         )
 
     @property
@@ -64,6 +65,24 @@ def test_build_tool_batches_keeps_consecutive_writes_separate():
     batches = build_tool_batches([call("write_a"), call("write_b")], registry)
 
     assert [[tool_call.name for tool_call in batch.calls] for batch in batches] == [["write_a"], ["write_b"]]
+
+
+def test_build_tool_batches_keeps_non_parallel_safe_read_as_own_boundary():
+    registry = ToolRegistry(
+        [
+            FakeTool("read_a", ToolKind.READ),
+            FakeTool("load_skill", ToolKind.READ, parallel_safe=False),
+            FakeTool("read_b", ToolKind.READ),
+        ]
+    )
+
+    batches = build_tool_batches([call("read_a"), call("load_skill"), call("read_b")], registry)
+
+    assert [[tool_call.name for tool_call in batch.calls] for batch in batches] == [
+        ["read_a"],
+        ["load_skill"],
+        ["read_b"],
+    ]
 
 
 def test_build_tool_batches_reports_unknown_tool():

@@ -24,6 +24,13 @@ from mycode.permission.models import PermissionConfigError
 from mycode.permission.service import PermissionInterceptor, PermissionService
 from mycode.protocols import ProtocolError, create_llm
 from mycode.session import ChatSession
+from mycode.skill.catalog import SkillCatalog
+from mycode.skill.executor import SkillExecutor
+from mycode.skill.load_tool import SkillLoadTool
+from mycode.skill.loader import SkillLoader
+from mycode.skill.models import SkillDiagnostic, SkillStartupError
+from mycode.skill.runtime import SkillRuntime
+from mycode.skill.slash import SkillSlashBridge
 from mycode.slash import (
     SlashCommandCompleter,
     SlashCommandDispatcher,
@@ -69,8 +76,6 @@ def main(argv: list[str] | None = None) -> int:
         mcp_config, mcp_config_diagnostics = load_mcp_config(args.mcp_config)
         llm = create_llm(config)
         registry = create_default_slash_registry()
-        dispatcher = SlashCommandDispatcher(registry)
-        completer = SlashCommandCompleter(registry)
     except (ConfigError, ProtocolError) as exc:
         logger.error("myCode 配置错误：%s", exc)
         print(f"myCode 配置错误：{exc}", file=sys.stderr)
@@ -100,8 +105,6 @@ def main(argv: list[str] | None = None) -> int:
             mcp_config_diagnostics=mcp_config_diagnostics,
             workspace_root=workspace_root,
             registry=registry,
-            dispatcher=dispatcher,
-            completer=completer,
         )
     )
     logger.info("myCode CLI 退出，退出码：%s", exit_code)
@@ -117,8 +120,6 @@ async def _run_application(
     mcp_config_diagnostics: tuple[MCPDiagnostic, ...],
     workspace_root: Path,
     registry,
-    dispatcher: SlashCommandDispatcher,
-    completer: SlashCommandCompleter,
 ) -> int:
     pool = MCPServerPool(mcp_config)
     context_manager = None
@@ -164,6 +165,43 @@ async def _run_application(
         register_mcp_tools(pool, tool_registry)
         tool_executor = ToolExecutor(tool_registry)
         permission_interceptor = PermissionInterceptor(permissions)
+        skill_loader = SkillLoader(
+            workspace_root=workspace_root,
+            home=Path.home(),
+            builtin_root=_builtin_skill_root(),
+        )
+        skill_catalog = SkillCatalog(
+            loader=skill_loader,
+            tool_names=lambda: _tool_names(tool_registry),
+            reserved_slash_names=_reserved_slash_names(registry),
+        )
+        skill_runtime = SkillRuntime(skill_catalog)
+        skill_executor = SkillExecutor(
+            runtime=skill_runtime,
+            main_llm=llm,
+            llm_config=config,
+            llm_factory=create_llm,
+            tool_registry=tool_registry,
+            tool_executor=tool_executor,
+            permission=permission_interceptor,
+            agent_config=agent_config,
+            workspace_root=workspace_root,
+        )
+        tool_registry.register(SkillLoadTool(runtime=skill_runtime, executor=skill_executor))
+        try:
+            skill_catalog.initialize()
+            skill_slash_bridge = SkillSlashBridge(runtime=skill_runtime, registry=registry)
+            _report_skill_diagnostics(skill_slash_bridge.refresh())
+            dispatcher = SlashCommandDispatcher(registry, before_dispatch=skill_slash_bridge.refresh)
+            completer = SlashCommandCompleter(registry, before_complete=skill_slash_bridge.refresh_silent)
+        except SkillStartupError as exc:
+            logger.error("myCode Skill 配置错误：%s", exc)
+            print(f"myCode Skill 配置错误：{exc}", file=sys.stderr)
+            return 1
+        except SlashCommandRegistrationError as exc:
+            logger.error("myCode slash 命令注册冲突：%s", exc)
+            print(f"myCode slash 命令注册冲突：{exc}", file=sys.stderr)
+            return 1
         agent = AgentLoop(
             llm=llm,
             memory=memory,
@@ -173,8 +211,14 @@ async def _run_application(
             context_manager=context_manager,
             config=agent_config,
             project_memory=project_memory,
+            skill_runtime=skill_runtime,
         )
-        session = ChatSession(agent=agent, permissions=permissions)
+        session = ChatSession(
+            agent=agent,
+            permissions=permissions,
+            skill_runtime=skill_runtime,
+            skill_executor=skill_executor,
+        )
         tui = ChatTUI(
             session=session,
             dispatcher=dispatcher,
@@ -197,6 +241,26 @@ async def _run_application(
                 await pool.close()
 
 
+def _builtin_skill_root() -> Path:
+    return Path(__file__).resolve().parent / "skill" / "builtins"
+
+
+def _tool_names(registry) -> frozenset[str]:
+    return frozenset(definition.name for definition in registry.definitions())
+
+
+def _reserved_slash_names(registry) -> frozenset[str]:
+    commands = getattr(registry, "_static_commands", None)
+    if commands is None:
+        public_commands = getattr(registry, "public_commands", None)
+        commands = public_commands() if callable(public_commands) else ()
+    names: set[str] = set()
+    for command in commands:
+        names.add(command.name)
+        names.update(command.aliases)
+    return frozenset(names)
+
+
 def _report_mcp_diagnostics(diagnostics: tuple[MCPDiagnostic, ...]) -> None:
     for diagnostic in diagnostics:
         server = diagnostic.server_name or "配置文件"
@@ -214,4 +278,15 @@ def _report_mcp_diagnostics(diagnostics: tuple[MCPDiagnostic, ...]) -> None:
             f"myCode MCP 警告：{server}，category={diagnostic.category}，"
             f"transport={transport}，{diagnostic.message}",
             file=sys.stderr,
+        )
+
+
+def _report_skill_diagnostics(diagnostics: tuple[SkillDiagnostic, ...]) -> None:
+    for diagnostic in diagnostics:
+        logger.warning(
+            "Skill 诊断：skill=%s，code=%s，path=%s，reason=%s",
+            diagnostic.skill_name or "unknown",
+            diagnostic.code,
+            diagnostic.path,
+            diagnostic.message,
         )

@@ -177,7 +177,6 @@ def test_create_default_slash_registry_registers_expected_commands_and_aliases()
         "memory",
         "permission",
         "status",
-        "review",
     ]
     assert [command.aliases for command in registry.public_commands()] == [
         ("h", "?"),
@@ -189,7 +188,6 @@ def test_create_default_slash_registry_registers_expected_commands_and_aliases()
         ("mem",),
         ("perm",),
         ("stat",),
-        ("rev",),
     ]
     assert [command.command_type for command in registry.public_commands()] == [
         SlashCommandType.LOCAL,
@@ -201,9 +199,8 @@ def test_create_default_slash_registry_registers_expected_commands_and_aliases()
         SlashCommandType.LOCAL,
         SlashCommandType.UI_STATE,
         SlashCommandType.LOCAL,
-        SlashCommandType.PROMPT,
     ]
-    assert [command.hidden for command in registry.public_commands()] == [False] * 10
+    assert [command.hidden for command in registry.public_commands()] == [False] * 9
     assert registry.resolve("help") is registry.resolve("h")
     assert registry.resolve("help") is registry.resolve("?")
     assert registry.resolve("compact") is registry.resolve("comp")
@@ -214,7 +211,8 @@ def test_create_default_slash_registry_registers_expected_commands_and_aliases()
     assert registry.resolve("memory") is registry.resolve("mem")
     assert registry.resolve("permission") is registry.resolve("perm")
     assert registry.resolve("status") is registry.resolve("stat")
-    assert registry.resolve("review") is registry.resolve("rev")
+    assert registry.resolve("review") is None
+    assert registry.resolve("rev") is None
 
     exit_command = registry.resolve("exit")
     assert exit_command is not None
@@ -246,7 +244,6 @@ def test_help_lists_public_commands_in_registration_order_and_hides_exit():
             "/memory",
             "/permission",
             "/status",
-            "/review",
         ],
     )
     assert "/exit" not in text
@@ -450,24 +447,11 @@ def test_status_command_formats_application_status_without_forwarding_user_messa
     assert "/tmp/user-memory" in text
 
 
-def test_review_command_sends_fixed_prompt_and_rejects_extra_arguments():
-    controller = FakeController()
+def test_review_is_no_longer_registered_as_fixed_builtin_command():
+    registry = builtins.create_default_slash_registry()
 
-    result = _run_command("review", controller)
-
-    assert result is SlashHandlerSignal.CONTINUE
-    assert controller.user_messages == [builtins.REVIEW_PROMPT]
-    assert controller.messages == []
-
-    controller = FakeController()
-    result = _run_command("review", controller, "unexpected")
-
-    assert result is SlashHandlerSignal.CONTINUE
-    assert controller.user_messages == []
-    assert len(controller.messages) == 1
-    text, is_error = controller.messages[0]
-    assert is_error is True
-    assert "/review" in text
+    assert registry.resolve("review") is None
+    assert registry.resolve("rev") is None
 
 
 def test_hidden_exit_command_returns_exit_and_quit_alias_matches_it():

@@ -27,9 +27,11 @@ from mycode.permission.models import (
     RuleSource,
 )
 from mycode.slash import (
-    REVIEW_PROMPT,
+    SlashCommand,
     SlashCommandCompleter,
+    SlashCommandType,
     SlashCommandDispatcher,
+    SlashHandlerSignal,
     create_default_slash_registry,
 )
 from mycode.tui import ChatTUI
@@ -40,6 +42,7 @@ class FakeSession:
     def __init__(self, *, send_scripts=None) -> None:
         self.send_scripts = list(send_scripts or [])
         self.send_calls: list[str] = []
+        self.skill_calls: list[tuple[str, str]] = []
         self.approval_decisions: list[ApprovalDecisionType] = []
         self.compact_count = 0
         self.clear_count = 0
@@ -84,6 +87,18 @@ class FakeSession:
         self.send_calls.append(user_text)
         if not self.send_scripts:
             raise AssertionError(f"unexpected user message: {user_text!r}")
+
+        for event in self.send_scripts.pop(0):
+            yield event
+            if event.type is AgentEventType.APPROVAL_REQUIRED:
+                assert approval_provider is not None
+                decision = await approval_provider(event.approval_request)
+                self.approval_decisions.append(decision.type)
+
+    async def send_skill(self, name, arguments="", *, approval_provider=None):
+        self.skill_calls.append((name, arguments))
+        if not self.send_scripts:
+            raise AssertionError(f"unexpected skill command: {name!r}")
 
         for event in self.send_scripts.pop(0):
             yield event
@@ -142,6 +157,7 @@ class FakeMCPPool:
 
 def _make_tui(session, workspace_root: Path, inputs):
     registry = create_default_slash_registry()
+    registry.replace_dynamic_commands([_dynamic_review_command()])
     output = StringIO()
     return (
         ChatTUI(
@@ -155,6 +171,22 @@ def _make_tui(session, workspace_root: Path, inputs):
             input_func=lambda: next(inputs),
         ),
         output,
+    )
+
+
+def _dynamic_review_command():
+    async def handler(context, arguments):
+        await context.controller.execute_skill("review", arguments)
+        return SlashHandlerSignal.CONTINUE
+
+    return SlashCommand(
+        name="review",
+        aliases=(),
+        description="审查当前变更",
+        usage="/review [arguments]",
+        command_type=SlashCommandType.PROMPT,
+        handler=handler,
+        argument_hint="[arguments]",
     )
 
 
@@ -294,12 +326,8 @@ def test_review_command_uses_normal_agent_and_permission_flow(tmp_path):
     assert asyncio.run(tui.run()) == 0
 
     text = output.getvalue()
-    assert session.send_calls == [REVIEW_PROMPT]
-    assert "/review" not in session.send_calls[0]
-    assert "已暂存" in session.send_calls[0]
-    assert "未暂存" in session.send_calls[0]
-    assert "未跟踪" in session.send_calls[0]
-    assert "忽略" in session.send_calls[0]
+    assert session.send_calls == []
+    assert session.skill_calls == [("review", "")]
     assert session.approval_decisions == [ApprovalDecisionType.APPROVE_ONCE]
     assert session.permission_updates == [PermissionMode.PERMISSIVE]
     assert session.permission == (PermissionMode.PERMISSIVE, RuleSource.SESSION)

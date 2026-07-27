@@ -35,12 +35,13 @@ class ToolRegistry:
         # 稳定工具顺序让相同工具集合保持可缓存的请求前缀。
         return sorted((tool.definition for tool in self._tools.values()), key=lambda definition: definition.name)
 
-    def model_definitions(self) -> list[ToolDefinition]:
+    def model_definitions(self, *, visible_names: frozenset[str] | None = None) -> list[ToolDefinition]:
         return sorted(
             (
                 tool.definition
                 for name, tool in self._tools.items()
-                if not _is_deferred(tool) or name in self._discovered
+                if (visible_names is None or name in visible_names)
+                and (not _is_deferred(tool) or name in self._discovered or visible_names is not None)
             ),
             key=lambda definition: definition.name,
         )
