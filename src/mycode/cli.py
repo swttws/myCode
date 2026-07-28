@@ -11,6 +11,10 @@ from mycode.agent import AgentConfig, AgentLoop
 from mycode.compact import create_context_manager
 from mycode.config import ConfigError, load_config
 from mycode.dev_logging import configure_dev_logging_from_env
+from mycode.hook.config import load_hook_config
+from mycode.hook.context import build_event_hook_context
+from mycode.hook.models import HookConfig, HookConfigError, HookEvent
+from mycode.hook.runtime import HookRuntime
 from mycode.memory import InMemoryConversationMemory, create_project_memory_manager
 from mycode.mcp import (
     MCPConfig,
@@ -58,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to MCP server YAML config.",
     )
+    parser.add_argument(
+        "--hook-config",
+        type=Path,
+        default=None,
+        help="Path to Hook YAML config.",
+    )
     return parser
 
 
@@ -74,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(args.config)
         mcp_config, mcp_config_diagnostics = load_mcp_config(args.mcp_config)
+        hook_config = load_hook_config(
+            workspace_root=workspace_root,
+            explicit_path=args.hook_config,
+        )
         llm = create_llm(config)
         registry = create_default_slash_registry()
     except (ConfigError, ProtocolError) as exc:
@@ -83,6 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     except MCPConfigError as exc:
         logger.error("myCode MCP 配置错误：%s", exc)
         print(f"myCode MCP 配置错误：{exc}", file=sys.stderr)
+        return 1
+    except HookConfigError as exc:
+        logger.error("myCode Hook 配置错误：%s", exc)
+        print(f"myCode Hook 配置错误：{exc}", file=sys.stderr)
         return 1
     except SlashCommandRegistrationError as exc:
         logger.error("myCode slash 命令注册冲突：%s", exc)
@@ -103,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             permissions=permissions,
             mcp_config=mcp_config,
             mcp_config_diagnostics=mcp_config_diagnostics,
+            hook_config=hook_config,
             workspace_root=workspace_root,
             registry=registry,
         )
@@ -118,6 +137,7 @@ async def _run_application(
     permissions,
     mcp_config: MCPConfig,
     mcp_config_diagnostics: tuple[MCPDiagnostic, ...],
+    hook_config: HookConfig,
     workspace_root: Path,
     registry,
 ) -> int:
@@ -126,6 +146,13 @@ async def _run_application(
     project_memory = None
     try:
         memory = InMemoryConversationMemory()
+        hook_runtime = HookRuntime(
+            config=hook_config,
+            workspace_root=workspace_root,
+            path_guard=permissions.path_guard,
+        )
+        await _trigger_startup_hook(hook_runtime, HookEvent.APP_STARTED, workspace_root)
+        await _trigger_startup_hook(hook_runtime, HookEvent.HOOKS_LOADED, workspace_root)
         tool_registry = create_default_tool_registry(
             workspace_root,
             path_guard=permissions.path_guard,
@@ -212,12 +239,15 @@ async def _run_application(
             config=agent_config,
             project_memory=project_memory,
             skill_runtime=skill_runtime,
+            hook_runtime=hook_runtime,
         )
         session = ChatSession(
             agent=agent,
             permissions=permissions,
             skill_runtime=skill_runtime,
             skill_executor=skill_executor,
+            hook_runtime=hook_runtime,
+            workspace_root=workspace_root,
         )
         tui = ChatTUI(
             session=session,
@@ -259,6 +289,23 @@ def _reserved_slash_names(registry) -> frozenset[str]:
         names.add(command.name)
         names.update(command.aliases)
     return frozenset(names)
+
+
+async def _trigger_startup_hook(
+    hook_runtime: HookRuntime,
+    event: HookEvent,
+    workspace_root: Path,
+) -> None:
+    try:
+        await hook_runtime.trigger(
+            build_event_hook_context(event=event, workspace_root=workspace_root)
+        )
+    except Exception as exc:
+        logger.warning(
+            "Hook 启动事件异常：event=%s，reason=%s",
+            event.value,
+            str(exc) or exc.__class__.__name__,
+        )
 
 
 def _report_mcp_diagnostics(diagnostics: tuple[MCPDiagnostic, ...]) -> None:

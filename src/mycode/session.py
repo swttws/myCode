@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from pathlib import Path
 
 from mycode.agent import AgentLoop, AgentMode, ApprovalProvider
 from mycode.agent.events import AgentEvent, AgentEventType, AgentErrorCode
+from mycode.hook.context import build_event_hook_context
+from mycode.hook.models import HookEvent
+from mycode.hook.runtime import NullHookRuntime
 from mycode.permission.models import PermissionMode, RuleSource
 from mycode.permission.service import PermissionService
 from mycode.skill.models import SkillMode, SkillRunContext
+
+logger = logging.getLogger(__name__)
 
 
 class ChatSession:
@@ -19,12 +26,18 @@ class ChatSession:
         mode: AgentMode | None = None,
         skill_runtime=None,
         skill_executor=None,
+        hook_runtime=None,
+        workspace_root: Path | None = None,
     ) -> None:
         self._agent = agent
         self._permissions = permissions
         self._mode = mode or AgentMode()
         self._skill_runtime = skill_runtime
         self._skill_executor = skill_executor
+        self._hook_runtime = hook_runtime or NullHookRuntime()
+        self._workspace_root = workspace_root or Path.cwd()
+        self._started = False
+        self._closed = False
 
     async def send(
         self,
@@ -32,6 +45,7 @@ class ChatSession:
         *,
         approval_provider: ApprovalProvider | None = None,
     ):
+        await self.start()
         async for event in self._agent.run(
             user_text,
             mode=self._mode,
@@ -46,6 +60,7 @@ class ChatSession:
         *,
         approval_provider: ApprovalProvider | None = None,
     ):
+        await self.start()
         if self._skill_runtime is None:
             yield AgentEvent(
                 AgentEventType.ERROR,
@@ -131,7 +146,32 @@ class ChatSession:
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self._permissions.set_session_mode(mode)
 
-    def clear(self) -> None:
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._closed = False
+        await self._trigger_session_hook(HookEvent.SESSION_START)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._trigger_session_hook(HookEvent.SESSION_END)
+
+    def clear(self):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.clear_async())
+            return None
+        return self.clear_async()
+
+    async def clear_async(self) -> None:
+        await self._trigger_session_hook(HookEvent.SESSION_CLEAR)
+        self._clear_state()
+
+    def _clear_state(self) -> None:
         # 清空上下文时同步复位 plan-only，避免旧模式影响下一轮。
         self._agent.clear_memory()
         if self._skill_runtime is not None:
@@ -139,3 +179,21 @@ class ChatSession:
         self._mode.reset()
         # 只清会话规则和档位；用户目录中的项目授权必须跨 /clear 保留。
         self._permissions.clear_session()
+        self._started = False
+        self._closed = False
+
+    async def _trigger_session_hook(self, event: HookEvent) -> None:
+        try:
+            await self._hook_runtime.trigger(
+                build_event_hook_context(
+                    event=event,
+                    workspace_root=self._workspace_root,
+                    plan_only=self._mode.plan_only,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Hook 会话事件异常：event=%s，reason=%s",
+                event.value,
+                str(exc) or exc.__class__.__name__,
+            )

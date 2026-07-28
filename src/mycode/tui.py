@@ -81,6 +81,7 @@ class ChatTUI:
                 user_text = await self._read_input()
             except (EOFError, KeyboardInterrupt):
                 self._console.print()
+                await self._close_session()
                 return 0
 
             result = await self._dispatcher.dispatch(user_text, self)
@@ -90,6 +91,7 @@ class ChatTUI:
                 await self.send_user_message(result.normal_text)
                 continue
             if result.kind is SlashDispatchKind.EXIT:
+                await self._close_session()
                 return 0
 
     def show_message(self, text: str, *, error: bool = False) -> None:
@@ -106,8 +108,8 @@ class ChatTUI:
     async def compact_context(self) -> None:
         await self._render_compaction_stream()
 
-    def clear_session(self) -> None:
-        self._session.clear()
+    def clear_session(self):
+        return self._session.clear()
 
     def current_mode(self) -> SlashMode:
         return SlashMode.PLAN if self._session.is_plan_only() else SlashMode.DEFAULT
@@ -260,6 +262,17 @@ class ChatTUI:
             elif event.type == AgentEventType.CANCELLED:
                 self._console.print(f"\n[yellow]已取消：{event.content}[/yellow]")
         self._console.print()
+
+    async def _close_session(self) -> None:
+        close = getattr(self._session, "close", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("session close failed")
 
     async def _approval_provider(self, request: ApprovalRequest) -> ApprovalDecision:
         decision = request.decision

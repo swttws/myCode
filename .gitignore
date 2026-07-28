@@ -9,3 +9,4 @@ __pycache__/
 /examples/*
 !/examples/mycode.permissions.yaml
 !/examples/mycode.mcp.yaml
+!/examples/mycode.hooks.yaml
