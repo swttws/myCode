@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Sequence
 
@@ -74,7 +75,9 @@ async def handle_clear(context: SlashCommandContext, arguments: str) -> SlashHan
     if _has_arguments(arguments):
         _show_usage(context.controller, "clear")
         return SlashHandlerSignal.CONTINUE
-    context.controller.clear_session()
+    result = context.controller.clear_session()
+    if inspect.isawaitable(result):
+        await result
     context.controller.show_message("上下文已清空。")
     return SlashHandlerSignal.CONTINUE
 

@@ -28,7 +28,7 @@ class SlashCommandController(Protocol):
     def compact_context(self) -> Awaitable[None]:
         ...
 
-    def clear_session(self) -> None:
+    def clear_session(self) -> object:
         ...
 
     def current_mode(self) -> SlashMode:

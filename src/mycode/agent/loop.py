@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterable
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,14 @@ from mycode.agent.history import (
 from mycode.agent.scheduler import ToolScheduleError, build_tool_batches
 from mycode.agent.state import AgentMode
 from mycode.compact.models import CompactAction, CompactError, ContextTokenStatus
+from mycode.hook.context import (
+    build_error_hook_context,
+    build_event_hook_context,
+    build_message_hook_context,
+)
+from mycode.hook.models import HookEvent
+from mycode.hook.models import HookContext
+from mycode.hook.runtime import NullHookRuntime
 from mycode.llm import BaseLLM, LLMError, StreamEventType
 from mycode.memory import ConversationMemory
 from mycode.memory.models import FrameworkContext, MemoryStatusSnapshot, SessionStatusSnapshot
@@ -54,6 +62,7 @@ class AgentLoop:
         prompt_builder: PromptBuilder | None = None,
         project_memory: Any | None = None,
         skill_runtime: Any | None = None,
+        hook_runtime: Any | None = None,
     ) -> None:
         self._llm = llm
         self._memory = memory
@@ -65,6 +74,7 @@ class AgentLoop:
         self._context_manager = context_manager
         self._project_memory = project_memory
         self._skill_runtime = skill_runtime
+        self._hook_runtime = hook_runtime or NullHookRuntime()
         self._next_turn_id = 0
         self._latest_framework_context = _empty_framework_context()
 
@@ -87,18 +97,17 @@ class AgentLoop:
                 self._deferred_summaries()
             )
             round_turn_context = (
-                replace(
+                _replace_turn_context(
                     turn_context,
                     reminders=turn_context.reminders + (deferred_reminder,),
                 )
                 if deferred_reminder is not None
                 else turn_context
             )
-            if self._skill_runtime is not None:
-                round_turn_context = replace(
-                    round_turn_context,
-                    framework_blocks=self._framework_blocks(getattr(self._latest_framework_context, "blocks", ())),
-                )
+            round_turn_context = _replace_turn_context(
+                round_turn_context,
+                framework_blocks=self._framework_blocks(getattr(self._latest_framework_context, "blocks", ())),
+            )
             return self._prompt_builder.build(
                 history=history,
                 tools=self._model_definitions(),
@@ -165,15 +174,17 @@ class AgentLoop:
                     self._deferred_summaries()
                 )
                 round_turn_context = (
-                    replace(
+                    _replace_turn_context(
                         turn_context,
                         reminders=turn_context.reminders + (deferred_reminder,),
                     )
                     if deferred_reminder is not None
                     else turn_context
                 )
-                if self._skill_runtime is not None:
-                    round_turn_context = replace(round_turn_context, framework_blocks=self._framework_blocks(()))
+                round_turn_context = _replace_turn_context(
+                    round_turn_context,
+                    framework_blocks=self._framework_blocks(()),
+                )
                 return self._prompt_builder.build(
                     history=history,
                     tools=self._model_definitions(),
@@ -227,6 +238,25 @@ class AgentLoop:
         isolated_depth: int = 0,
     ) -> AsyncIterable[AgentEvent]:
         self._next_turn_id += 1
+        turn_id = self._next_turn_id
+        hook_finished = False
+
+        async def finish_hook_request() -> None:
+            nonlocal hook_finished
+            if hook_finished:
+                return
+            hook_finished = True
+            await self._trigger_hook(
+                build_event_hook_context(
+                    event=HookEvent.USER_REQUEST_END,
+                    workspace_root=Path.cwd(),
+                    turn_id=turn_id,
+                    user_text=user_text,
+                    plan_only=mode.plan_only,
+                )
+            )
+            self._hook_runtime.clear_request_state()
+
         # 整次 run 共用一个截止时间，模型等待和工具执行都不能越过它。
         run_deadline = (
             time.monotonic() + self.config.run_timeout_seconds
@@ -264,14 +294,42 @@ class AgentLoop:
                 approval_provider=approval_provider,
                 isolated_depth=isolated_depth,
             )
+        await self._trigger_hook(
+            build_event_hook_context(
+                event=HookEvent.USER_REQUEST_START,
+                workspace_root=Path.cwd(),
+                turn_id=turn_id,
+                user_text=user_text,
+                plan_only=mode.plan_only,
+            )
+        )
         current_user_message = make_user_message(user_text)
         self._memory.append(current_user_message)
         if self._project_memory is not None:
             self._project_memory.record_user_message(current_user_message)
+        await self._trigger_hook(
+            build_message_hook_context(
+                event=HookEvent.USER_MESSAGE,
+                workspace_root=Path.cwd(),
+                message=current_user_message,
+                turn_id=turn_id,
+                plan_only=mode.plan_only,
+            )
+        )
         yield AgentEvent(AgentEventType.USER_MESSAGE, content=user_text)
 
         try:
             for round_index in range(1, self.config.max_rounds + 1):
+                await self._trigger_hook(
+                    build_event_hook_context(
+                        event=HookEvent.MODEL_ROUND_START,
+                        workspace_root=Path.cwd(),
+                        turn_id=turn_id,
+                        round_index=round_index,
+                        user_text=user_text,
+                        plan_only=mode.plan_only,
+                    )
+                )
                 assistant_parts: list[str] = []
                 tool_calls = []
                 # 只注入延迟工具摘要；模型通过 tool_search 发现后，完整 schema 才进入下一轮。
@@ -280,18 +338,17 @@ class AgentLoop:
                         self._deferred_summaries()
                     )
                     round_turn_context = (
-                        replace(
+                        _replace_turn_context(
                             turn_context,
                             reminders=turn_context.reminders + (deferred_reminder,),
                         )
                         if deferred_reminder is not None
                         else turn_context
                     )
-                    if self._skill_runtime is not None:
-                        round_turn_context = replace(
-                            round_turn_context,
-                            framework_blocks=self._framework_blocks(base_framework_blocks),
-                        )
+                    round_turn_context = _replace_turn_context(
+                        round_turn_context,
+                        framework_blocks=self._framework_blocks(base_framework_blocks),
+                    )
                     return self._prompt_builder.build(
                         history=history,
                         tools=self._model_definitions(),
@@ -397,9 +454,30 @@ class AgentLoop:
                 except AttributeError:
                     pass
 
+                await self._trigger_hook(
+                    build_event_hook_context(
+                        event=HookEvent.MODEL_ROUND_END,
+                        workspace_root=Path.cwd(),
+                        turn_id=turn_id,
+                        round_index=round_index,
+                        user_text=user_text,
+                        plan_only=mode.plan_only,
+                    )
+                )
+
                 if not tool_calls:
                     assistant_text = "".join(assistant_parts)
                     final_message = make_assistant_text_message(assistant_text)
+                    await self._trigger_hook(
+                        build_message_hook_context(
+                            event=HookEvent.ASSISTANT_MESSAGE,
+                            workspace_root=Path.cwd(),
+                            message=final_message,
+                            turn_id=turn_id,
+                            round_index=round_index,
+                            plan_only=mode.plan_only,
+                        )
+                    )
                     if assistant_text:
                         self._memory.append(final_message)
                         if self._project_memory is not None:
@@ -417,6 +495,7 @@ class AgentLoop:
                         )
                     self._latest_framework_context = framework_context
                     self._clear_skill_current_scope()
+                    await finish_hook_request()
                     return
 
                 for call in tool_calls:
@@ -481,12 +560,48 @@ class AgentLoop:
                             round_index=round_index,
                         )
                         if permission_decision.effect is PermissionEffect.ALLOW:
-                            executable_calls.append(call)
+                            hook_result = await self._hook_runtime.before_tool(
+                                call=call,
+                                definition=tool.definition,
+                                round_index=round_index,
+                                turn_id=turn_id,
+                                plan_only=mode.plan_only,
+                            )
+                            if hook_result.blocked_tool_result is not None:
+                                result = hook_result.blocked_tool_result
+                                await self._trigger_tool_result_message(
+                                    call,
+                                    tool.definition,
+                                    result,
+                                    round_index=round_index,
+                                    turn_id=turn_id,
+                                    plan_only=mode.plan_only,
+                                )
+                                result_message = make_tool_result_message(call, result)
+                                self._memory.append(result_message)
+                                if self._project_memory is not None:
+                                    self._project_memory.record_tool_history(tool_result=result_message)
+                                yield AgentEvent(
+                                    AgentEventType.TOOL_RESULT,
+                                    round_index=round_index,
+                                    tool_call=call,
+                                    tool_result=result,
+                                )
+                            else:
+                                executable_calls.append(call)
                         elif permission_decision.effect in {
                             PermissionEffect.DENY,
                             PermissionEffect.FORBIDDEN,
                         }:
                             result = self._permission.denied_result(call, permission_decision)
+                            await self._trigger_tool_result_message(
+                                call,
+                                tool.definition,
+                                result,
+                                round_index=round_index,
+                                turn_id=turn_id,
+                                plan_only=mode.plan_only,
+                            )
                             result_message = make_tool_result_message(call, result)
                             self._memory.append(result_message)
                             if self._project_memory is not None:
@@ -538,13 +653,49 @@ class AgentLoop:
                                 approval_decision,
                             )
                             if resolution.outcome is ApprovalOutcome.EXECUTE:
-                                executable_calls.append(call)
+                                hook_result = await self._hook_runtime.before_tool(
+                                    call=call,
+                                    definition=tool.definition,
+                                    round_index=round_index,
+                                    turn_id=turn_id,
+                                    plan_only=mode.plan_only,
+                                )
+                                if hook_result.blocked_tool_result is not None:
+                                    result = hook_result.blocked_tool_result
+                                    await self._trigger_tool_result_message(
+                                        call,
+                                        tool.definition,
+                                        result,
+                                        round_index=round_index,
+                                        turn_id=turn_id,
+                                        plan_only=mode.plan_only,
+                                    )
+                                    result_message = make_tool_result_message(call, result)
+                                    self._memory.append(result_message)
+                                    if self._project_memory is not None:
+                                        self._project_memory.record_tool_history(tool_result=result_message)
+                                    yield AgentEvent(
+                                        AgentEventType.TOOL_RESULT,
+                                        round_index=round_index,
+                                        tool_call=call,
+                                        tool_result=result,
+                                    )
+                                else:
+                                    executable_calls.append(call)
                             elif resolution.outcome in {
                                 ApprovalOutcome.REJECTED,
                                 ApprovalOutcome.ERROR,
                             }:
                                 result = resolution.tool_result or self._permission.denied_result(
                                     call, permission_decision
+                                )
+                                await self._trigger_tool_result_message(
+                                    call,
+                                    tool.definition,
+                                    result,
+                                    round_index=round_index,
+                                    turn_id=turn_id,
+                                    plan_only=mode.plan_only,
                                 )
                                 yield AgentEvent(
                                     AgentEventType.TOOL_RESULT,
@@ -596,7 +747,26 @@ class AgentLoop:
 
                     for call, result in zip(executable_calls, results):
                         result = await self._permission.after_tool(call, result)
+                        tool = self._tool_registry.get(call.name)
+                        if tool is not None:
+                            await self._hook_runtime.after_tool(
+                                call=call,
+                                definition=tool.definition,
+                                result=result,
+                                round_index=round_index,
+                                turn_id=turn_id,
+                                plan_only=mode.plan_only,
+                            )
                         self._maybe_set_skill_scope(result)
+                        if tool is not None:
+                            await self._trigger_tool_result_message(
+                                call,
+                                tool.definition,
+                                result,
+                                round_index=round_index,
+                                turn_id=turn_id,
+                                plan_only=mode.plan_only,
+                            )
                         result_message = make_tool_result_message(call, result)
                         self._memory.append(result_message)
                         if self._project_memory is not None:
@@ -615,13 +785,34 @@ class AgentLoop:
                 error_code=AgentErrorCode.MAX_ROUNDS_EXCEEDED,
             )
             self._clear_skill_current_scope()
+            await finish_hook_request()
         except (PromptBuildError, PromptConfigurationError) as exc:
+            await self._trigger_hook(
+                build_error_hook_context(
+                    workspace_root=Path.cwd(),
+                    error_code=AgentErrorCode.PROMPT_ERROR.value,
+                    error_message=str(exc),
+                    turn_id=turn_id,
+                    plan_only=mode.plan_only,
+                )
+            )
+            await finish_hook_request()
             yield AgentEvent(
                 AgentEventType.ERROR,
                 content=str(exc),
                 error_code=AgentErrorCode.PROMPT_ERROR,
             )
         except LLMError as exc:
+            await self._trigger_hook(
+                build_error_hook_context(
+                    workspace_root=Path.cwd(),
+                    error_code=AgentErrorCode.LLM_ERROR.value,
+                    error_message=str(exc),
+                    turn_id=turn_id,
+                    plan_only=mode.plan_only,
+                )
+            )
+            await finish_hook_request()
             yield AgentEvent(
                 AgentEventType.ERROR,
                 content=str(exc),
@@ -629,6 +820,16 @@ class AgentLoop:
             )
         except asyncio.CancelledError:
             self._clear_skill_current_scope()
+            await self._trigger_hook(
+                build_error_hook_context(
+                    workspace_root=Path.cwd(),
+                    error_code=AgentErrorCode.CANCELLED.value,
+                    error_message="cancelled",
+                    turn_id=turn_id,
+                    plan_only=mode.plan_only,
+                )
+            )
+            await finish_hook_request()
             yield AgentEvent(
                 AgentEventType.CANCELLED,
                 content="cancelled",
@@ -637,9 +838,39 @@ class AgentLoop:
 
     def _framework_blocks(self, blocks) -> tuple[PromptContextBlock, ...]:
         converted = _convert_framework_blocks(blocks)
-        if self._skill_runtime is None:
-            return converted
-        return converted + tuple(self._skill_runtime.prompt_blocks())
+        skill_blocks = (
+            tuple(self._skill_runtime.prompt_blocks())
+            if self._skill_runtime is not None
+            else ()
+        )
+        return converted + skill_blocks + tuple(self._hook_runtime.prompt_blocks())
+
+    async def _trigger_hook(self, context) -> None:
+        await self._hook_runtime.trigger(context)
+
+    async def _trigger_tool_result_message(
+        self,
+        call,
+        definition,
+        result: ToolResult,
+        *,
+        round_index: int,
+        turn_id: int,
+        plan_only: bool,
+    ) -> None:
+        await self._trigger_hook(
+            HookContext(
+                event=HookEvent.TOOL_RESULT_MESSAGE,
+                workspace_root=Path.cwd(),
+                turn_id=turn_id,
+                round_index=round_index,
+                tool_call=call,
+                tool_definition=definition,
+                raw_arguments=call.arguments or {},
+                tool_result=result,
+                plan_only=plan_only,
+            )
+        )
 
     def _model_definitions(self):
         if self._skill_runtime is None:
@@ -678,6 +909,12 @@ def _minimum_timeout(*values: float | None) -> float | None:
     if not finite_values:
         return None
     return min(finite_values)
+
+
+def _replace_turn_context(turn_context, **changes):
+    if is_dataclass(turn_context):
+        return replace(turn_context, **changes)
+    return turn_context
 
 
 def _run_timeout_won(model_timeout: float | None, run_remaining: float | None) -> bool:

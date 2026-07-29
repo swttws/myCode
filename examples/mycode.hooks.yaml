@@ -1,0 +1,62 @@
+version: 1
+hooks:
+  - id: session-start-note
+    event: session_start
+    once: true
+    timeout_seconds: 2
+    action:
+      type: command
+      command: python -c "print('myCode hook session start')"
+
+  - id: remind-before-model
+    event: model_round_start
+    action:
+      type: prompt
+      content: "先检查当前请求是否需要测试、权限或路径边界说明。"
+
+  - id: block-dangerous-command
+    event: tool_before
+    if:
+      all:
+        tool: run_command
+        arguments.command:
+          regex: "(?i)\\b(del|format|rm\\s+-rf)\\b"
+        session.plan_only: false
+    action:
+      type: prompt
+      block: true
+      reason: "Hook 安全策略拦截了危险命令。"
+      content: "请改用只读检查或更小范围的安全命令。"
+
+  - id: notify-failed-tool
+    event: tool_after
+    background: true
+    timeout_seconds: 3
+    if:
+      any:
+        result.ok: false
+        tool: "glob:*command"
+    action:
+      type: http
+      method: POST
+      url: "http://127.0.0.1:8765/hooks"
+      headers:
+        X-myCode-Hook: "example"
+      json:
+        source: mycode-hook-example
+        event: tool_after
+
+  - id: runtime-error-placeholder
+    event: runtime_error
+    if:
+      all:
+        error.code: "glob:*"
+        error.message:
+          regex: "Traceback"
+          not: true
+    action:
+      type: sub_agent
+      task: "summarize-runtime-error"
+      input:
+        source: hook-example
+      output: "sub_agent placeholder only"

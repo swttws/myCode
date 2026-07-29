@@ -124,6 +124,65 @@ Skill 采用两阶段加载。首次请求只把 Skill 名称和 description 放
 
 默认内置 `commit`、`review` 和 `test` 三个 Skill。`commit` 与 `review` 是 shared；`test` 是 isolated，并携带最近 3 个完整轮次。项目级或用户级同名 Skill 可以覆盖内置版本。当前不做 Skill 市场、远程仓库、发布安装服务、版本依赖解析、图形化编辑器，也不自动执行 Skill 目录里的脚本。
 
+## Stage 11 Hook 系统
+
+Hook 用声明式规则把生命周期节点上的固定动作自动化。默认配置文件是工作区根目录的 `mycode.hooks.yaml`；也可以用 `--hook-config path/to/file.yaml` 显式指定。默认文件不存在时等价于空规则，显式指定的文件不存在或内容非法会启动失败。
+
+一条规则由三要素组成：`event` 表示触发时刻，`if` 表示条件表达式，`action` 表示动作。`if` 可以省略，表示无条件触发；`event` 和 `action` 必须声明。完整示例见 `examples/mycode.hooks.yaml`。
+
+生命周期事件覆盖五组：
+
+- 会话级：`session_start`、`session_end`、`session_clear`。
+- 轮次级：`user_request_start`、`user_request_end`、`model_round_start`、`model_round_end`。
+- 消息级：`user_message`、`assistant_message`、`tool_result_message`。
+- 工具级：`tool_before`、`tool_after`。
+- 系统级：`app_started`、`hooks_loaded`、`runtime_error`。
+
+条件语法复用权限规则的匹配风格。逻辑组合只能二选一：`all` 表示全部满足，`any` 表示任一满足，同一层不能混用。匹配值支持精确匹配、隐式 glob、显式 `glob:`、简写正则 `re:`、映射正则 `regex`，以及反向匹配：字符串前缀 `!` 或映射里的 `not: true`。可匹配字段包括 `event`、`round_index`、`session.plan_only`、`message.content`、`tool`、`arguments.*`、`raw_arguments.*`、`result.ok`、`error.code` 等稳定上下文字段。
+
+支持四种动作：
+
+```yaml
+action:
+  type: command
+  command: python -c "print('format checked')"
+  cwd: .
+  env:
+    MYCODE_HOOK: "1"
+```
+
+```yaml
+action:
+  type: prompt
+  content: "把这段内容作为 framework context 注入给下一轮模型。"
+```
+
+```yaml
+action:
+  type: http
+  method: POST
+  url: "http://127.0.0.1:8765/hooks"
+  headers:
+    X-myCode-Hook: "local"
+  json:
+    source: mycode
+```
+
+```yaml
+action:
+  type: sub_agent
+  task: "summarize-failure"
+  input:
+    source: hook
+  output: "placeholder only"
+```
+
+执行控制字段放在规则层：`once: true` 表示同一个运行时进程内只执行一次，`background: true` 表示后台异步执行，`timeout_seconds` 设置命令或 HTTP 超时。`tool_before` 是拦截点，不能配置 `background: true`，因为它必须同步决定是否放行工具。
+
+`tool_before` 可以基于规范化后的工具参数做细粒度安全策略。命中 `block: true` 时，myCode 不执行真实工具，而是把拒绝原因作为结构化 `ToolResult` 回填给模型，结果里包含 `reason_code=hook_blocked` 和 `hook_rule_id`，让模型在下一轮调整方案。Hook 只会在权限系统已经允许或审批通过后进一步收紧工具执行；它不能放宽权限、不能跳过审批，也不能覆盖内置 `FORBIDDEN` 安全底线。
+
+Hook 自身失败只写日志，不中断 Agent 主流程。HTTP 请求失败、命令非零退出、prompt 动作异常和 sub_agent 占位失败都会被隔离，后续规则和当前用户请求继续执行。本阶段不做子 Agent 真实运行、once 持久化、显式优先级、热加载、远程规则加载、脚本化条件或图形化编辑入口。
+
 ## Stage 06 MCP 远端工具
 
 MCP server 使用独立 YAML 配置，不与 LLM 配置混合。可以用 `--mcp-config path/to/file.yaml` 显式指定；省略参数时依次查找当前目录的 `mycode.mcp.yaml` 和用户目录的 `~/.mycode/mcp.yaml`。两处都不存在时 MCP 保持禁用，本地工具和普通聊天仍可使用。
