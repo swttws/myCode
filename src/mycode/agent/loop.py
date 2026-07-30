@@ -88,6 +88,13 @@ class _RoundState:
 @dataclass
 class _ToolPermissionOutcome:
     executable: bool = False
+    tool_result: ToolResult | None = None
+    definition: Any | None = None
+    trigger_result_message: bool = False
+    record_project_memory: bool = True
+    yield_before_memory: bool = False
+    should_stop: bool = False
+    clear_skill_scope: bool = False
 
 
 @dataclass(frozen=True)
@@ -304,10 +311,122 @@ class AgentLoop:
 
         try:
             for round_index in range(1, self.config.max_rounds + 1):
-                async for event in self._run_model_round(state, round_index):
+                prepared = await self._prepare_round_request(state, round_index)
+                for event in prepared.events:
+                    yield event
+                if prepared.should_stop:
+                    state.finished = True
+                    return
+
+                round_state = _RoundState()
+                async for event in self._stream_model_response(
+                    state,
+                    round_index,
+                    prepared.prepared_context,
+                    round_state,
+                ):
                     yield event
                 if state.finished:
                     return
+
+                await self._trigger_hook(
+                    build_event_hook_context(
+                        event=HookEvent.MODEL_ROUND_END,
+                        workspace_root=Path.cwd(),
+                        turn_id=state.turn_id,
+                        round_index=round_index,
+                        user_text=state.user_text,
+                        plan_only=state.mode.plan_only,
+                    )
+                )
+
+                if not round_state.tool_calls:
+                    async for event in self._finish_text_response(state, round_state, round_index):
+                        yield event
+                    return
+
+                self._record_assistant_tool_calls(round_state.tool_calls)
+
+                try:
+                    batches = build_tool_batches(round_state.tool_calls, self._tool_registry)
+                except ToolScheduleError as exc:
+                    error_code = (
+                        AgentErrorCode.UNKNOWN_TOOL
+                        if exc.code == "unknown_tool"
+                        else AgentErrorCode.INVALID_TOOL_KIND
+                    )
+                    state.finished = True
+                    yield AgentEvent(
+                        AgentEventType.ERROR,
+                        content=str(exc),
+                        round_index=round_index,
+                        error_code=error_code,
+                    )
+                    return
+
+                for batch in batches:
+                    for call in batch.calls:
+                        yield AgentEvent(
+                            AgentEventType.TOOL_CALL_STARTED,
+                            round_index=round_index,
+                            tool_call=call,
+                        )
+
+                    executable_calls: list[ToolCall] = []
+                    for call in batch.calls:
+                        outcome = _ToolPermissionOutcome()
+                        async for event in self._resolve_tool_call_permission(
+                            state,
+                            call,
+                            round_index,
+                            outcome,
+                        ):
+                            yield event
+                        if outcome.clear_skill_scope:
+                            self._clear_skill_current_scope()
+                        if outcome.should_stop:
+                            state.finished = True
+                            return
+                        if outcome.tool_result is not None:
+                            async for event in self._record_tool_result(
+                                state,
+                                call,
+                                outcome.tool_result,
+                                round_index=round_index,
+                                definition=outcome.definition,
+                                trigger_result_message=outcome.trigger_result_message,
+                                record_project_memory=outcome.record_project_memory,
+                                yield_before_memory=outcome.yield_before_memory,
+                            ):
+                                yield event
+                        if outcome.executable:
+                            executable_calls.append(call)
+
+                    executed = await self._execute_tool_batch(
+                        batch,
+                        executable_calls,
+                        round_index=round_index,
+                        run_deadline=state.run_deadline,
+                    )
+                    if executed.error_event is not None:
+                        state.finished = True
+                        yield executed.error_event
+                        return
+
+                    for call, result in zip(executable_calls, executed.results):
+                        tool = self._tool_registry.get(call.name)
+                        async for event in self._record_tool_result(
+                            state,
+                            call,
+                            result,
+                            round_index=round_index,
+                            definition=tool.definition if tool is not None else None,
+                            apply_after_tool=True,
+                            trigger_after_tool=True,
+                            trigger_result_message=tool is not None,
+                            apply_skill_scope=True,
+                        ):
+                            yield event
 
             yield self._max_rounds_exceeded_event()
             self._clear_skill_current_scope()
@@ -419,49 +538,6 @@ class AgentLoop:
             )
         )
         self._hook_runtime.clear_request_state()
-
-    async def _run_model_round(
-        self,
-        state: _RunState,
-        round_index: int,
-    ) -> AsyncIterator[AgentEvent]:
-        prepared = await self._prepare_round_request(state, round_index)
-        for event in prepared.events:
-            yield event
-        if prepared.should_stop:
-            state.finished = True
-            return
-
-        round_state = _RoundState()
-        async for event in self._stream_model_response(
-            state,
-            round_index,
-            prepared.prepared_context,
-            round_state,
-        ):
-            yield event
-        if state.finished:
-            return
-
-        await self._trigger_hook(
-            build_event_hook_context(
-                event=HookEvent.MODEL_ROUND_END,
-                workspace_root=Path.cwd(),
-                turn_id=state.turn_id,
-                round_index=round_index,
-                user_text=state.user_text,
-                plan_only=state.mode.plan_only,
-            )
-        )
-
-        if not round_state.tool_calls:
-            async for event in self._finish_text_response(state, round_state, round_index):
-                yield event
-            return
-
-        self._record_assistant_tool_calls(round_state.tool_calls)
-        async for event in self._run_tool_batches(state, round_state.tool_calls, round_index):
-            yield event
 
     async def _prepare_round_request(
         self,
@@ -662,78 +738,6 @@ class AgentLoop:
             if self._project_memory is not None:
                 self._project_memory.record_tool_history(assistant_tool_call=tool_call_message)
 
-    async def _run_tool_batches(
-        self,
-        state: _RunState,
-        tool_calls: list[ToolCall],
-        round_index: int,
-    ) -> AsyncIterator[AgentEvent]:
-        try:
-            batches = build_tool_batches(tool_calls, self._tool_registry)
-        except ToolScheduleError as exc:
-            error_code = (
-                AgentErrorCode.UNKNOWN_TOOL
-                if exc.code == "unknown_tool"
-                else AgentErrorCode.INVALID_TOOL_KIND
-            )
-            state.finished = True
-            yield AgentEvent(
-                AgentEventType.ERROR,
-                content=str(exc),
-                round_index=round_index,
-                error_code=error_code,
-            )
-            return
-
-        for batch in batches:
-            for call in batch.calls:
-                yield AgentEvent(
-                    AgentEventType.TOOL_CALL_STARTED,
-                    round_index=round_index,
-                    tool_call=call,
-                )
-
-            executable_calls: list[ToolCall] = []
-            for call in batch.calls:
-                outcome = _ToolPermissionOutcome()
-                async for event in self._resolve_tool_call_permission(
-                    state,
-                    call,
-                    round_index,
-                    outcome,
-                ):
-                    yield event
-                if state.finished:
-                    return
-                if outcome.executable:
-                    executable_calls.append(call)
-
-            executed = await self._execute_tool_batch(
-                batch,
-                executable_calls,
-                round_index=round_index,
-                run_deadline=state.run_deadline,
-            )
-            if executed.error_event is not None:
-                state.finished = True
-                yield executed.error_event
-                return
-
-            for call, result in zip(executable_calls, executed.results):
-                tool = self._tool_registry.get(call.name)
-                async for event in self._record_tool_result(
-                    state,
-                    call,
-                    result,
-                    round_index=round_index,
-                    definition=tool.definition if tool is not None else None,
-                    apply_after_tool=True,
-                    trigger_after_tool=True,
-                    trigger_result_message=tool is not None,
-                    apply_skill_scope=True,
-                ):
-                    yield event
-
     async def _resolve_tool_call_permission(
         self,
         state: _RunState,
@@ -743,7 +747,7 @@ class AgentLoop:
     ) -> AsyncIterator[AgentEvent]:
         tool = self._tool_registry.get(call.name)
         if tool is None:
-            state.finished = True
+            outcome.should_stop = True
             yield AgentEvent(
                 AgentEventType.ERROR,
                 content=f"unknown tool: {call.name}",
@@ -753,7 +757,8 @@ class AgentLoop:
             return
 
         if not self._skill_allows_tool(call.name):
-            state.finished = True
+            outcome.should_stop = True
+            outcome.clear_skill_scope = True
             yield AgentEvent(
                 AgentEventType.ERROR,
                 content=f"tool not allowed by active skill: {call.name}",
@@ -761,7 +766,6 @@ class AgentLoop:
                 tool_call=call,
                 error_code=AgentErrorCode.TOOL_ERROR,
             )
-            self._clear_skill_current_scope()
             return
 
         permission_decision = await self._permission.before_tool(
@@ -779,31 +783,18 @@ class AgentLoop:
                 plan_only=state.mode.plan_only,
             )
             if hook_result.blocked_tool_result is not None:
-                async for event in self._record_tool_result(
-                    state,
-                    call,
-                    hook_result.blocked_tool_result,
-                    round_index=round_index,
-                    definition=tool.definition,
-                    trigger_result_message=True,
-                ):
-                    yield event
+                outcome.tool_result = hook_result.blocked_tool_result
+                outcome.definition = tool.definition
+                outcome.trigger_result_message = True
             else:
                 outcome.executable = True
         elif permission_decision.effect in {
             PermissionEffect.DENY,
             PermissionEffect.FORBIDDEN,
         }:
-            result = self._permission.denied_result(call, permission_decision)
-            async for event in self._record_tool_result(
-                state,
-                call,
-                result,
-                round_index=round_index,
-                definition=tool.definition,
-                trigger_result_message=True,
-            ):
-                yield event
+            outcome.tool_result = self._permission.denied_result(call, permission_decision)
+            outcome.definition = tool.definition
+            outcome.trigger_result_message = True
         elif permission_decision.effect is PermissionEffect.ASK:
             try:
                 approval_request = self._permission.create_approval_request(
@@ -813,16 +804,9 @@ class AgentLoop:
                     round_index=round_index,
                 )
             except Exception:
-                result = self._permission.denied_result(call, permission_decision)
-                async for event in self._record_tool_result(
-                    state,
-                    call,
-                    result,
-                    round_index=round_index,
-                    definition=tool.definition,
-                    trigger_result_message=False,
-                ):
-                    yield event
+                outcome.tool_result = self._permission.denied_result(call, permission_decision)
+                outcome.definition = tool.definition
+                outcome.trigger_result_message = False
                 return
             yield AgentEvent(
                 AgentEventType.APPROVAL_REQUIRED,
@@ -851,15 +835,9 @@ class AgentLoop:
                     plan_only=state.mode.plan_only,
                 )
                 if hook_result.blocked_tool_result is not None:
-                    async for event in self._record_tool_result(
-                        state,
-                        call,
-                        hook_result.blocked_tool_result,
-                        round_index=round_index,
-                        definition=tool.definition,
-                        trigger_result_message=True,
-                    ):
-                        yield event
+                    outcome.tool_result = hook_result.blocked_tool_result
+                    outcome.definition = tool.definition
+                    outcome.trigger_result_message = True
                 else:
                     outcome.executable = True
             elif resolution.outcome in {
@@ -869,19 +847,13 @@ class AgentLoop:
                 result = resolution.tool_result or self._permission.denied_result(
                     call, permission_decision
                 )
-                async for event in self._record_tool_result(
-                    state,
-                    call,
-                    result,
-                    round_index=round_index,
-                    definition=tool.definition,
-                    trigger_result_message=True,
-                    record_project_memory=False,
-                    yield_before_memory=True,
-                ):
-                    yield event
+                outcome.tool_result = result
+                outcome.definition = tool.definition
+                outcome.trigger_result_message = True
+                outcome.record_project_memory = False
+                outcome.yield_before_memory = True
             elif resolution.outcome is ApprovalOutcome.CANCELLED:
-                state.finished = True
+                outcome.should_stop = True
                 yield AgentEvent(
                     AgentEventType.CANCELLED,
                     content="\u7528\u6237\u53d6\u6d88\u4e86\u5de5\u5177\u5ba1\u6279\u3002",
