@@ -19,6 +19,11 @@ base_url: https://api.anthropic.test
 api_key: sk-test
 compact:
   context_window_tokens: 128000
+sub_agent:
+  models:
+    haiku: claude-test-haiku
+    sonnet: claude-test
+    opus: claude-test-opus
 thinking:
   show: true
 """,
@@ -117,12 +122,14 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
 
         def close(self):
             self.closed = True
+            created.setdefault("cleanup_order", []).append("context")
 
     class FakeProjectMemory:
         def __init__(self):
             self.memory_note_tool = FakeTool("memory_note")
 
         async def close(self):
+            created.setdefault("cleanup_order", []).append("memory")
             return None
 
     class FakePool:
@@ -142,6 +149,7 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
         async def close(self):
             self.closed = True
             created["pool_closed"] = True
+            created.setdefault("cleanup_order", []).append("pool")
 
     class FakeAgentLoop:
         def __init__(self, **kwargs):
@@ -154,6 +162,9 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
             created["session_agent"] = agent
             created["session_permissions"] = permissions
             created["session_kwargs"] = kwargs
+
+        async def close(self):
+            created.setdefault("cleanup_order", []).append("session")
 
     class FakeTUI:
         def __init__(self, **kwargs):
@@ -175,6 +186,7 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
         created["tool_workspace"] = workspace_root
         created["tool_path_guard"] = path_guard
         registry = FakeToolRegistry()
+        created["tool_registry"] = registry
         for name in ("read_file", "find_files", "search_code", "run_command"):
             registry.register(FakeTool(name))
         return registry
@@ -216,6 +228,11 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
     assert created["project_kwargs"]["workspace_root"] == tmp_path
     assert created["agent_kwargs"]["tool_registry"].__class__ is FakeToolRegistry
     assert "skill_runtime" in created["agent_kwargs"]
+    assert "parent_snapshot_store" in created["agent_kwargs"]
+    assert "notification_inbox" in created["agent_kwargs"]
+    assert created["agent_kwargs"]["main_model_id"] == "claude-test"
+    assert callable(created["agent_kwargs"]["permission_mode_provider"])
+    assert created["tool_registry"].get("Agent") is not None
     assert created["tui_kwargs"]["dispatcher"].registry is fake_registry
     assert created["tui_kwargs"]["registry"] is fake_registry
     assert created["tui_kwargs"]["completer"].__class__ is FakeCompleter
@@ -226,6 +243,8 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
     assert created["session_permissions"].path_guard.workspace_root == tmp_path
     assert created["session_kwargs"]["skill_runtime"] is created["agent_kwargs"]["skill_runtime"]
     assert "skill_executor" in created["session_kwargs"]
+    assert created["session_kwargs"]["subagent_service"] is not None
+    assert created["cleanup_order"] == ["session", "memory", "context", "pool"]
 
 
 def test_cli_returns_error_when_slash_registry_registration_fails(

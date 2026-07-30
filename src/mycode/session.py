@@ -28,6 +28,7 @@ class ChatSession:
         skill_executor=None,
         hook_runtime=None,
         workspace_root: Path | None = None,
+        subagent_service=None,
     ) -> None:
         self._agent = agent
         self._permissions = permissions
@@ -36,6 +37,7 @@ class ChatSession:
         self._skill_executor = skill_executor
         self._hook_runtime = hook_runtime or NullHookRuntime()
         self._workspace_root = workspace_root or Path.cwd()
+        self._subagent_service = subagent_service
         self._started = False
         self._closed = False
 
@@ -157,6 +159,7 @@ class ChatSession:
         if self._closed:
             return
         self._closed = True
+        await self._close_subagent_service()
         await self._trigger_session_hook(HookEvent.SESSION_END)
 
     def clear(self):
@@ -169,7 +172,23 @@ class ChatSession:
 
     async def clear_async(self) -> None:
         await self._trigger_session_hook(HookEvent.SESSION_CLEAR)
+        await self._clear_subagent_service()
         self._clear_state()
+
+    async def detach_active_subagent(self):
+        if self._subagent_service is None:
+            return None
+        return await self._subagent_service.detach_active()
+
+    def list_subagent_tasks(self):
+        if self._subagent_service is None:
+            return ()
+        return self._subagent_service.list_tasks()
+
+    def get_subagent_task(self, task_id: str):
+        if self._subagent_service is None:
+            raise KeyError(f"subagent_service_unavailable: {task_id}")
+        return self._subagent_service.get_task(task_id)
 
     def _clear_state(self) -> None:
         # 清空上下文时同步复位 plan-only，避免旧模式影响下一轮。
@@ -195,5 +214,27 @@ class ChatSession:
             logger.warning(
                 "Hook 会话事件异常：event=%s，reason=%s",
                 event.value,
+                str(exc) or exc.__class__.__name__,
+            )
+
+    async def _clear_subagent_service(self) -> None:
+        if self._subagent_service is None:
+            return
+        try:
+            await self._subagent_service.clear()
+        except Exception as exc:
+            logger.warning(
+                "子 Agent 服务清理异常：%s",
+                str(exc) or exc.__class__.__name__,
+            )
+
+    async def _close_subagent_service(self) -> None:
+        if self._subagent_service is None:
+            return
+        try:
+            await self._subagent_service.close()
+        except Exception as exc:
+            logger.warning(
+                "子 Agent 服务关闭异常：%s",
                 str(exc) or exc.__class__.__name__,
             )

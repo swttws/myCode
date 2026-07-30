@@ -70,6 +70,11 @@ base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
 compact:
   context_window_tokens: 128000
+sub_agent:
+  models:
+    haiku: your-openai-model
+    sonnet: your-openai-model
+    opus: your-openai-model
 ```
 
 `api_key` 可以直接写字面值，也可以使用 `${ENV_NAME}` 引用环境变量。建议使用环境变量。
@@ -231,6 +236,11 @@ base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
 compact:
   context_window_tokens: 128000
+sub_agent:
+  models:
+    haiku: your-openai-model
+    sonnet: your-openai-model
+    opus: your-openai-model
 ```
 
 `openai_responses` 支持 Stage 03 的工具系统，会把工具注册为 Responses API 的 function tools。工具读写分类只用于本地 Agent 调度，不会进入 OpenAI payload。
@@ -244,6 +254,11 @@ base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
 compact:
   context_window_tokens: 128000
+sub_agent:
+  models:
+    haiku: your-openai-model
+    sonnet: your-openai-model
+    opus: your-openai-model
 usage:
   request_stream_usage: true
 ```
@@ -259,13 +274,32 @@ base_url: https://api.anthropic.com
 api_key: ${ANTHROPIC_API_KEY}
 compact:
   context_window_tokens: 200000
+sub_agent:
+  models:
+    haiku: your-claude-model
+    sonnet: your-claude-model
+    opus: your-claude-model
 thinking:
   enabled: true
   budget_tokens: 2048
   show: false
 ```
 
-`thinking` 是可选配置，只对 Anthropic 生效。默认不显示 thinking，也不会把 thinking 写入普通 assistant 历史。Stage 03 只为 Anthropic 保留纯对话和 thinking 流式能力，暂不实现 Anthropic 工具调用。
+`thinking` 是可选配置，只对 Anthropic 生效。默认不显示 thinking，也不会把 thinking 写入普通 assistant 历史。Stage 12 支持 Anthropic 工具调用：请求会发送顶层 system、工具 schema 和历史中的 assistant `tool_use` / user `tool_result`，流式响应会把 `input_json_delta.partial_json` 聚合成统一工具调用。Anthropic tool_use 与 `tool_result` 历史往返会被统一保留。
+
+## Stage 12 子 Agent
+
+Stage 12 adds bounded sub-agent delegation without changing the model-facing tool name per role. The model sees one fixed `Agent` tool. `Agent(action=run)` starts work, with `type=defined` for a configured role and `type=fork` for a frozen copy of the parent context. `action=list` and `action=get` are read-only queries over the live task manager, so task state is not reconstructed from chat history.
+
+Role files are discovered from project `.mycode/agents`, user `~/.mycode/agents`, packaged builtins, and the reserved plugin source. Builtin roles are `general`, `explore`, and `review`; higher-priority project or user files can override the same role name, while invalid higher-priority files fall back to the next valid candidate and emit diagnostics.
+
+Every primary config must provide `sub_agent.models` with `haiku`, `sonnet`, and `opus`. Optional defaults include `foreground_timeout_seconds: 120`, `max_concurrency: 4`, bounded task/result/notification sizes, and a background tool allowlist. These settings are validated at startup before the single `Agent` tool is registered.
+
+Defined sub-agents start from core rules, workspace environment, project instructions, the role body, and the delegated task. Fork sub-agents reuse the parent system prefix, message prefix, and tool schema prefix from a safe snapshot. Both modes isolate task memory, permissions, file caches, usage, hooks, and cancellation state; sub-agents cannot call `Agent` recursively.
+
+Foreground tasks return inline when they finish before the threshold. Otherwise they detach into the background; `type=fork` always returns a background task id. During streaming, pressing `Ctrl+B` detaches the active foreground sub-agent without cancelling its in-flight work.
+
+Use `/tasks` to list current-session sub-agent tasks and `/task <id>` to inspect a retained task result, error, rounds, detached state, and usage fields. Background completion is injected only at the next model notification safe point or the next user request, at most once per task. `/clear` and normal exit perform session cleanup: queued/running tasks are cancelled, retained results and notifications are cleared, and the next session starts from a fresh task id sequence.
 
 ## 核心工具
 
@@ -342,6 +376,8 @@ Stage 03 新增 `src/mycode/agent` 包作为 Agent 主边界。Agent Loop 每轮
 - `/do`：关闭写工具审批模式。
 - `/session`：显示当前会话摘要。
 - `/memory`：显示当前记忆摘要。
+- `/tasks`：列出当前会话里的子 Agent 任务。
+- `/task <id>`：显示指定子 Agent 任务详情。
 - `/permission`：显示当前有效权限档位和来源。
 - `/status`：显示当前工作区、模式、权限、Token、会话、记忆、Git 和 MCP 状态。
 - `/commit`、`/review`、`/test`：来自内置 Skill；同名项目级或用户级 Skill 会按优先级覆盖。
@@ -350,6 +386,6 @@ Stage 03 新增 `src/mycode/agent` 包作为 Agent 主边界。Agent Loop 每轮
 
 ## 当前阶段不做
 
-当前阶段不做 Agent 递归调用、子任务委派或多 Agent 调度，不做项目索引、RAG、长期记忆、代码符号图谱，也不做复杂 TUI 全屏面板。
+当前阶段支持有限的子 Agent 委派，但仍不做 Agent 递归调用、团队编排、跨会话任务持久化、任务取消/重跑入口、文件冲突解决、项目索引、RAG、代码符号图谱或复杂 TUI 全屏面板。
 
-本阶段也不实现 Anthropic 工具调用，不做真实网络或真实 API key 依赖的验收，不做工具失败后的自动回滚。后续能力会基于当前的 LLM、protocols、memory、tool 和 agent 边界继续扩展。
+Anthropic 工具调用已覆盖 `tool_use` 和 `tool_result` 历史往返；本阶段仍不做真实网络或真实 API key 依赖的验收，不做工具失败后的自动回滚。后续能力会基于当前的 LLM、protocols、memory、tool 和 agent 边界继续扩展。

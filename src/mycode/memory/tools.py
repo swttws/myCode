@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from mycode.memory.models import MemoryScope
 from mycode.memory.notes import MemoryNoteStore
-from mycode.tool.base import ToolArguments, ToolDefinition, ToolKind, ToolResult
+from mycode.tool.base import (
+    ToolArguments,
+    ToolDefinition,
+    ToolKind,
+    ToolResult,
+    ToolRuntimeScope,
+)
 
 
 class ReadMemoryNoteTool:
@@ -31,6 +37,7 @@ class ReadMemoryNoteTool:
                 "required": ["scope", "note_id"],
             },
             kind=ToolKind.READ,
+            runtime_scope=ToolRuntimeScope.PARENT_ONLY,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:

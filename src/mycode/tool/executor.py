@@ -40,6 +40,13 @@ class ToolExecutor:
                 error="invalid JSON arguments",
             )
 
+        definition = tool.definition
+        timeout_seconds = (
+            definition.execution_timeout_seconds
+            if definition.execution_timeout_seconds is not None
+            else self._timeout_seconds
+        )
+
         try:
             logger.info("开始执行工具：%s", call.name)
             execute_async = getattr(tool, "execute_async", None)
@@ -50,7 +57,7 @@ class ToolExecutor:
             )
             result = await asyncio.wait_for(
                 operation,
-                timeout=self._timeout_seconds,
+                timeout=timeout_seconds,
             )
             logger.info("工具执行完成：%s，成功：%s", call.name, result.ok)
             return result
@@ -60,7 +67,7 @@ class ToolExecutor:
                 ok=False,
                 tool_name=call.name,
                 content={"tool_call_id": call.id, "timed_out": True},
-                error=f"tool execution timeout after {self._timeout_seconds} seconds",
+                error=f"tool execution timeout after {timeout_seconds} seconds",
             )
         except Exception as exc:
             logger.exception("工具执行异常：%s", call.name)

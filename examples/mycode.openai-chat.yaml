@@ -1,8 +1,13 @@
 protocol: openai_chat
-model: 
-base_url: 
+model: your-openai-chat-model
+base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
 compact:
   context_window_tokens: 128000
+sub_agent:
+  models:
+    haiku: your-openai-chat-model
+    sonnet: your-openai-chat-model
+    opus: your-openai-chat-model
 usage:
   request_stream_usage: true

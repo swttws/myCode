@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
@@ -15,6 +16,13 @@ class ToolKind(str, Enum):
     WRITE = "write"
 
 
+class ToolRuntimeScope(str, Enum):
+    # 本地运行时作用域，不会进入供应商 tool payload。
+    SHARED = "shared"
+    TASK_LOCAL = "task_local"
+    PARENT_ONLY = "parent_only"
+
+
 @dataclass(frozen=True)
 class ToolDefinition:
     name: str
@@ -23,6 +31,25 @@ class ToolDefinition:
     kind: ToolKind
     grant_arguments: tuple[str, ...] = ()
     parallel_safe: bool = True
+    runtime_scope: ToolRuntimeScope = ToolRuntimeScope.SHARED
+    execution_timeout_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in (ToolKind.READ, ToolKind.WRITE):
+            raise ValueError(f"invalid tool kind: {self.kind}")
+        if self.runtime_scope not in (
+            ToolRuntimeScope.SHARED,
+            ToolRuntimeScope.TASK_LOCAL,
+            ToolRuntimeScope.PARENT_ONLY,
+        ):
+            raise ValueError(f"invalid tool runtime scope: {self.runtime_scope}")
+        timeout = self.execution_timeout_seconds
+        if timeout is None:
+            return
+        if isinstance(timeout, bool) or type(timeout) not in (int, float):
+            raise ValueError("execution_timeout_seconds must be a positive finite number.")
+        if not math.isfinite(float(timeout)) or float(timeout) <= 0:
+            raise ValueError("execution_timeout_seconds must be a positive finite number.")
 
 
 @dataclass(frozen=True)

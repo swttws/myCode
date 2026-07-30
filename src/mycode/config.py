@@ -4,7 +4,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 import yaml
 
@@ -13,6 +13,9 @@ from mycode.compact.models import (
     DEFAULT_TOOL_RESULT_THRESHOLD_TOKENS,
     CompactConfig,
 )
+
+if TYPE_CHECKING:
+    from mycode.subagent.models import SubAgentConfig
 
 
 class ConfigError(ValueError):
@@ -40,6 +43,7 @@ class LLMConfig:
     compact: CompactConfig
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
     usage: UsageConfig = field(default_factory=UsageConfig)
+    sub_agent: "SubAgentConfig | None" = None
 
 
 ENV_VAR_PATTERN = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
@@ -62,6 +66,9 @@ def load_config(
     compact = _parse_compact(raw)
     thinking = _parse_thinking(raw.get("thinking"))
     usage = _parse_usage(raw.get("usage"))
+    from mycode.subagent.config import parse_subagent_config
+
+    sub_agent = parse_subagent_config(raw.get("sub_agent"))
 
     return LLMConfig(
         protocol=str(raw["protocol"]),
@@ -71,6 +78,7 @@ def load_config(
         compact=compact,
         thinking=thinking,
         usage=usage,
+        sub_agent=sub_agent,
     )
 
 

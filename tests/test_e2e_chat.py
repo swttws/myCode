@@ -30,6 +30,11 @@ base_url: https://api.anthropic.test
 api_key: sk-test
 compact:
   context_window_tokens: 128000
+sub_agent:
+  models:
+    haiku: claude-test
+    sonnet: claude-test
+    opus: claude-test
 """,
         encoding="utf-8",
     )

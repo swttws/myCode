@@ -12,7 +12,13 @@ from typing import Callable, IO, Literal
 
 from mycode.compact.estimator import TokenEstimator
 from mycode.compact.models import PREVIEW_ALLOWANCE_TOKENS, ArchivedArtifact, ArtifactSlice
-from mycode.tool import ToolArguments, ToolDefinition, ToolKind, ToolResult
+from mycode.tool import (
+    ToolArguments,
+    ToolDefinition,
+    ToolKind,
+    ToolResult,
+    ToolRuntimeScope,
+)
 
 
 STALE_AFTER_SECONDS = 86_400
@@ -287,6 +293,7 @@ class ReadCompactArtifactTool:
             },
             kind=ToolKind.READ,
             grant_arguments=(),
+            runtime_scope=ToolRuntimeScope.PARENT_ONLY,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:

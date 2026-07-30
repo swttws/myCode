@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from mycode.agent import ToolScheduleError, build_tool_batches
 from mycode.tool import ToolCall, ToolDefinition, ToolKind, ToolRegistry, ToolResult
@@ -24,7 +25,13 @@ class FakeTool:
 
 class BrokenRegistry:
     def get(self, name):
-        return FakeTool(name, "mutating")
+        return SimpleNamespace(
+            definition=SimpleNamespace(
+                name=name,
+                kind="mutating",
+                parallel_safe=True,
+            )
+        )
 
 
 def call(name: str) -> ToolCall:

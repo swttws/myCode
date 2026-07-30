@@ -33,6 +33,8 @@ _PUBLIC_COMMAND_ORDER: tuple[str, ...] = (
     "do",
     "session",
     "memory",
+    "tasks",
+    "task",
     "permission",
     "status",
 )
@@ -115,6 +117,32 @@ async def handle_memory(context: SlashCommandContext, arguments: str) -> SlashHa
         return SlashHandlerSignal.CONTINUE
     snapshot = await context.controller.memory_status()
     context.controller.show_message(_format_memory_status(snapshot))
+    return SlashHandlerSignal.CONTINUE
+
+
+async def handle_tasks(context: SlashCommandContext, arguments: str) -> SlashHandlerSignal:
+    if _has_arguments(arguments):
+        _show_usage(context.controller, "tasks")
+        return SlashHandlerSignal.CONTINUE
+    context.controller.show_message(_format_subagent_task_list(context.controller.list_subagent_tasks()))
+    return SlashHandlerSignal.CONTINUE
+
+
+async def handle_task(context: SlashCommandContext, arguments: str) -> SlashHandlerSignal:
+    parts = arguments.split()
+    if len(parts) != 1:
+        _show_usage(context.controller, "task")
+        return SlashHandlerSignal.CONTINUE
+    task_id = parts[0]
+    try:
+        snapshot = context.controller.get_subagent_task(task_id)
+    except KeyError:
+        context.controller.show_message(
+            f"task_not_found：未找到子 Agent 任务 {task_id}",
+            error=True,
+        )
+        return SlashHandlerSignal.CONTINUE
+    context.controller.show_message(_format_subagent_task_detail(snapshot))
     return SlashHandlerSignal.CONTINUE
 
 
@@ -226,6 +254,23 @@ def _default_commands() -> tuple[SlashCommand, ...]:
             handler=handle_memory,
         ),
         SlashCommand(
+            name="tasks",
+            aliases=(),
+            description="列出当前会话的子 Agent 任务",
+            usage="/tasks",
+            command_type=SlashCommandType.LOCAL,
+            handler=handle_tasks,
+        ),
+        SlashCommand(
+            name="task",
+            aliases=(),
+            description="显示指定子 Agent 任务详情",
+            usage="/task <id>",
+            command_type=SlashCommandType.LOCAL,
+            handler=handle_task,
+            argument_hint="<id>",
+        ),
+        SlashCommand(
             name="permission",
             aliases=("perm",),
             description="查询或设置会话权限档位",
@@ -331,6 +376,73 @@ def _format_memory_scope(label: str, scope) -> str:
     )
 
 
+def _format_subagent_task_list(summaries) -> str:
+    summaries = tuple(sorted(summaries, key=lambda item: getattr(item, "sequence", 0)))
+    if not summaries:
+        return "当前会话没有子 Agent 任务。"
+    lines = ["子 Agent 任务："]
+    for summary in summaries:
+        lines.append(
+            " - "
+            f"{summary.id} "
+            f"{_enum_text(summary.kind)} "
+            f"role={_optional(summary.role_name)} "
+            f"state={_enum_text(summary.state)} "
+            f"rounds={summary.rounds} "
+            f"detached={str(summary.detached).lower()} "
+            f"error={_optional(summary.error_code)} "
+            f"usage={_format_usage(summary.usage)}"
+        )
+    return "\n".join(lines)
+
+
+def _format_subagent_task_detail(snapshot) -> str:
+    lines = [
+        f"任务 ID：{snapshot.id}",
+        f"类型：{_enum_text(snapshot.kind)}",
+        f"角色：{_optional(snapshot.role_name)}",
+        f"状态：{_enum_text(snapshot.state)}",
+        f"轮次：{snapshot.rounds}",
+        f"后台：{str(snapshot.detached).lower()}",
+        f"错误码：{_optional(snapshot.error_code)}",
+        f"错误信息：{_optional(snapshot.error_message)}",
+        f"usage：{_format_usage(snapshot.usage)}",
+    ]
+    if snapshot.result is not None:
+        lines.extend(
+            [
+                "结果摘要：",
+                snapshot.result.summary,
+                "完整结果：",
+                snapshot.result.detail,
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _format_usage(usage) -> str:
+    return (
+        f"input={_value_or_unknown(getattr(usage, 'input_tokens', None))}, "
+        f"output={_value_or_unknown(getattr(usage, 'output_tokens', None))}, "
+        f"total={_value_or_unknown(getattr(usage, 'total_tokens', None))}, "
+        f"cache-read={_value_or_unknown(getattr(usage, 'cache_read_tokens', None))}, "
+        f"cache-write={_value_or_unknown(getattr(usage, 'cache_write_tokens', None))}"
+    )
+
+
+def _value_or_unknown(value) -> str:
+    return "未知" if value is None else str(value)
+
+
+def _optional(value) -> str:
+    return "无" if value is None else str(value)
+
+
+def _enum_text(value) -> str:
+    enum_value = getattr(value, "value", None)
+    return enum_value if isinstance(enum_value, str) else str(value)
+
+
 def _show_usage(controller: SlashCommandController, command_name: str) -> None:
     command = _COMMAND_BY_NAME[command_name]
     controller.show_message(f"用法：{command.usage}", error=True)
@@ -410,4 +522,6 @@ __all__ = [
     "handle_plan",
     "handle_session",
     "handle_status",
+    "handle_task",
+    "handle_tasks",
 ]

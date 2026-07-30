@@ -24,7 +24,7 @@ from mycode.mcp import (
     load_mcp_config,
     register_mcp_tools,
 )
-from mycode.permission.models import PermissionConfigError
+from mycode.permission.models import PermissionConfigError, PermissionMode
 from mycode.permission.service import PermissionInterceptor, PermissionService
 from mycode.protocols import ProtocolError, create_llm
 from mycode.session import ChatSession
@@ -41,6 +41,16 @@ from mycode.slash import (
     SlashCommandRegistrationError,
     create_default_slash_registry,
 )
+from mycode.subagent.catalog import AgentCatalog
+from mycode.subagent.config import validate_subagent_tool_names
+from mycode.subagent.context import ParentAgentSnapshotStore
+from mycode.subagent.loader import AgentRoleLoader
+from mycode.subagent.notifications import SubAgentNotificationInbox
+from mycode.subagent.runtime import SubAgentRuntimeFactory
+from mycode.subagent.service import SubAgentService
+from mycode.subagent.tasks import SubAgentTaskManager
+from mycode.subagent.tool import AgentTool
+from mycode.subagent.tooling import TaskToolRegistryFactory, create_task_permission_service
 from mycode.tool import ToolExecutor, create_default_tool_registry
 from mycode.tui import ChatTUI
 
@@ -144,6 +154,7 @@ async def _run_application(
     pool = MCPServerPool(mcp_config)
     context_manager = None
     project_memory = None
+    session = None
     try:
         memory = InMemoryConversationMemory()
         hook_runtime = HookRuntime(
@@ -229,6 +240,22 @@ async def _run_application(
             logger.error("myCode slash 命令注册冲突：%s", exc)
             print(f"myCode slash 命令注册冲突：{exc}", file=sys.stderr)
             return 1
+        subagent_bundle = _create_subagent_service(
+            config=config,
+            workspace_root=workspace_root,
+            permissions=permissions,
+            tool_registry=tool_registry,
+        )
+        if subagent_bundle is None:
+            return 1
+        snapshot_store, notification_inbox, subagent_service = subagent_bundle
+        tool_registry.register(
+            AgentTool(
+                service=subagent_service,
+                snapshot_store=snapshot_store,
+                config=config.sub_agent,
+            )
+        )
         agent = AgentLoop(
             llm=llm,
             memory=memory,
@@ -240,6 +267,14 @@ async def _run_application(
             project_memory=project_memory,
             skill_runtime=skill_runtime,
             hook_runtime=hook_runtime,
+            parent_snapshot_store=snapshot_store,
+            notification_inbox=notification_inbox,
+            main_model_id=config.model,
+            permission_mode_provider=getattr(
+                permissions,
+                "effective_mode",
+                lambda: (PermissionMode.DEFAULT, None),
+            ),
         )
         session = ChatSession(
             agent=agent,
@@ -248,6 +283,7 @@ async def _run_application(
             skill_executor=skill_executor,
             hook_runtime=hook_runtime,
             workspace_root=workspace_root,
+            subagent_service=subagent_service,
         )
         tui = ChatTUI(
             session=session,
@@ -261,18 +297,93 @@ async def _run_application(
         return await tui.run()
     finally:
         try:
-            if project_memory is not None:
-                await project_memory.close()
+            if session is not None:
+                await session.close()
         finally:
             try:
-                if context_manager is not None:
-                    context_manager.close()
+                if project_memory is not None:
+                    await project_memory.close()
             finally:
-                await pool.close()
+                try:
+                    if context_manager is not None:
+                        context_manager.close()
+                finally:
+                    await pool.close()
 
 
 def _builtin_skill_root() -> Path:
     return Path(__file__).resolve().parent / "skill" / "builtins"
+
+
+def _builtin_subagent_root() -> Path:
+    return Path(__file__).resolve().parent / "subagent" / "builtins"
+
+
+def _create_subagent_service(
+    *,
+    config,
+    workspace_root: Path,
+    permissions,
+    tool_registry,
+):
+    subagent_config = getattr(config, "sub_agent", None)
+    if subagent_config is None:
+        print("myCode 子 Agent 配置错误：缺少 sub_agent 配置。", file=sys.stderr)
+        return None
+    available_tool_names = _tool_names(tool_registry)
+    if "Agent" in available_tool_names:
+        print("myCode 子 Agent 配置错误：工具名 Agent 已被占用。", file=sys.stderr)
+        return None
+    try:
+        validate_subagent_tool_names(subagent_config, set(available_tool_names))
+    except ConfigError as exc:
+        print(f"myCode 子 Agent 配置错误：{exc}", file=sys.stderr)
+        return None
+
+    loader = AgentRoleLoader(
+        project_root=workspace_root,
+        home=Path.home(),
+        builtin_dir=_builtin_subagent_root(),
+        known_tool_names=available_tool_names | {"Agent"},
+    )
+    catalog = AgentCatalog(loader)
+    snapshot = catalog.initialize()
+    _report_subagent_diagnostics(snapshot.diagnostics)
+    snapshot_store = ParentAgentSnapshotStore()
+    notification_inbox = SubAgentNotificationInbox(
+        max_notification_bytes=subagent_config.max_notification_bytes,
+    )
+    runtime_factory = SubAgentRuntimeFactory(
+        config=subagent_config,
+        llm_config=config,
+        llm_factory=create_llm,
+        catalog=catalog,
+        parent_tool_registry=tool_registry,
+        task_tool_registry_factory=TaskToolRegistryFactory(workspace_root=workspace_root),
+        permission_factory=lambda mode: _create_task_permission_interceptor(
+            workspace_root,
+            mode,
+        ),
+        workspace_root=workspace_root,
+        workspace_environment=f"workspace={workspace_root}",
+        project_instructions=(),
+    )
+    task_manager = SubAgentTaskManager(
+        config=subagent_config,
+        notification_inbox=notification_inbox,
+    )
+    service = SubAgentService(
+        config=subagent_config,
+        runtime_factory=runtime_factory,
+        task_manager=task_manager,
+    )
+    return snapshot_store, notification_inbox, service
+
+
+def _create_task_permission_interceptor(workspace_root: Path, mode: PermissionMode):
+    service = create_task_permission_service(workspace_root)
+    service.set_session_mode(mode)
+    return PermissionInterceptor(service)
 
 
 def _tool_names(registry) -> frozenset[str]:
@@ -325,6 +436,17 @@ def _report_mcp_diagnostics(diagnostics: tuple[MCPDiagnostic, ...]) -> None:
             f"myCode MCP 警告：{server}，category={diagnostic.category}，"
             f"transport={transport}，{diagnostic.message}",
             file=sys.stderr,
+        )
+
+
+def _report_subagent_diagnostics(diagnostics) -> None:
+    for diagnostic in diagnostics:
+        logger.warning(
+            "子 Agent 角色诊断：role=%s，code=%s，path=%s，reason=%s",
+            diagnostic.role_name or "unknown",
+            diagnostic.code,
+            diagnostic.path,
+            diagnostic.message,
         )
 
 

@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from mycode.permission.pathing import PathGuard, ToolPathError
-from mycode.tool.base import ToolArguments, ToolDefinition, ToolKind, ToolResult
+from mycode.tool.base import (
+    ToolArguments,
+    ToolDefinition,
+    ToolKind,
+    ToolResult,
+    ToolRuntimeScope,
+)
 from mycode.tool.cache import FileTextCache
 
 
@@ -32,6 +38,7 @@ class ReadFileTool:
             },
             kind=ToolKind.READ,
             grant_arguments=("path",),
+            runtime_scope=ToolRuntimeScope.TASK_LOCAL,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -75,6 +82,7 @@ class WriteFileTool:
             },
             kind=ToolKind.WRITE,
             grant_arguments=("path",),
+            runtime_scope=ToolRuntimeScope.TASK_LOCAL,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -126,6 +134,7 @@ class EditFileTool:
             },
             kind=ToolKind.WRITE,
             grant_arguments=("path",),
+            runtime_scope=ToolRuntimeScope.TASK_LOCAL,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -177,6 +186,7 @@ class FindFilesTool:
             },
             kind=ToolKind.READ,
             grant_arguments=("root",),
+            runtime_scope=ToolRuntimeScope.TASK_LOCAL,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
@@ -222,6 +232,7 @@ class SearchCodeTool:
             },
             kind=ToolKind.READ,
             grant_arguments=("root",),
+            runtime_scope=ToolRuntimeScope.TASK_LOCAL,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:

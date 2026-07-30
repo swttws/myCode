@@ -255,6 +255,12 @@ def test_slash_command_controller_is_runtime_checkable_protocol():
                 mcp=slash.StatusSection(value=None, error="mcp_unavailable"),
             )
 
+        def list_subagent_tasks(self):
+            return ()
+
+        def get_subagent_task(self, task_id: str):
+            raise KeyError(task_id)
+
     controller = FakeController()
 
     assert isinstance(controller, slash.SlashCommandController)

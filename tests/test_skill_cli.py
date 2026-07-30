@@ -19,6 +19,13 @@ base_url: https://api.anthropic.test
 api_key: sk-test
 compact:
   context_window_tokens: 128000
+sub_agent:
+  models:
+    haiku: claude-test
+    sonnet: claude-test
+    opus: claude-test
+  background_allowed_tools:
+    - read_file
 """,
         encoding="utf-8",
     )
@@ -173,6 +180,9 @@ def test_cli_wires_skill_stack_after_tool_registration_and_before_agent(tmp_path
     class FakeChatSession:
         def __init__(self, **kwargs):
             created["session_kwargs"] = kwargs
+
+        async def close(self):
+            created["session_closed"] = True
 
     class FakeTUI:
         def __init__(self, **kwargs):

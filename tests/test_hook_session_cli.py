@@ -69,6 +69,7 @@ from mycode.permission.pathing import PathGuard
 from mycode.session import ChatSession
 from mycode.slash import SlashDispatchKind, SlashDispatchResult
 from mycode.skill.models import SkillMode
+from mycode.subagent.models import AgentModelTier, SubAgentConfig
 from mycode.tool import ToolKind
 
 
@@ -332,6 +333,9 @@ def test_run_application_shares_hook_runtime_and_triggers_app_events(
         def __init__(self, **kwargs):
             created["session_hook_runtime"] = kwargs["hook_runtime"]
 
+        async def close(self):
+            created["session_closed"] = True
+
     class FakeTUI:
         def __init__(self, **kwargs):
             created["tui_session"] = kwargs["session"]
@@ -522,8 +526,17 @@ def _install_import_stubs(monkeypatch) -> None:
 
 def _fake_config():
     return SimpleNamespace(
+        model="test-model",
         compact=SimpleNamespace(context_window_tokens=128000),
         thinking=SimpleNamespace(show=False),
+        sub_agent=SubAgentConfig(
+            model_map={
+                AgentModelTier.HAIKU: "test-model",
+                AgentModelTier.SONNET: "test-model",
+                AgentModelTier.OPUS: "test-model",
+            },
+            background_allowed_tools=("artifact", "memory_note", "load_skill"),
+        ),
     )
 
 

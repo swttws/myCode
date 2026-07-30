@@ -16,6 +16,14 @@ from mycode.slash import (
     SlashHandlerSignal,
     SlashMode,
 )
+from mycode.subagent.models import (
+    SubAgentKind,
+    SubAgentResult,
+    SubAgentTaskSnapshot,
+    SubAgentTaskState,
+    SubAgentTaskSummary,
+    SubAgentUsage,
+)
 import mycode.slash.builtins as builtins
 
 
@@ -102,6 +110,8 @@ class FakeController:
             git=SimpleNamespace(value=self.git_snapshot, error=None),
             mcp=SimpleNamespace(value=self.mcp_snapshot, error=None),
         )
+        self.subagent_summaries = ()
+        self.subagent_details = {}
 
     def show_message(self, text: str, *, error: bool = False) -> None:
         self.messages.append((text, error))
@@ -150,6 +160,14 @@ class FakeController:
     async def application_status(self):
         return self.application_snapshot
 
+    def list_subagent_tasks(self):
+        return self.subagent_summaries
+
+    def get_subagent_task(self, task_id):
+        if task_id not in self.subagent_details:
+            raise KeyError(f"task_not_found: {task_id}")
+        return self.subagent_details[task_id]
+
 
 def _context(controller: FakeController, registry=None) -> SlashCommandContext:
     if registry is None:
@@ -175,6 +193,8 @@ def test_create_default_slash_registry_registers_expected_commands_and_aliases()
         "do",
         "session",
         "memory",
+        "tasks",
+        "task",
         "permission",
         "status",
     ]
@@ -186,6 +206,8 @@ def test_create_default_slash_registry_registers_expected_commands_and_aliases()
         ("d",),
         ("sess",),
         ("mem",),
+        (),
+        (),
         ("perm",),
         ("stat",),
     ]
@@ -197,10 +219,12 @@ def test_create_default_slash_registry_registers_expected_commands_and_aliases()
         SlashCommandType.UI_STATE,
         SlashCommandType.LOCAL,
         SlashCommandType.LOCAL,
+        SlashCommandType.LOCAL,
+        SlashCommandType.LOCAL,
         SlashCommandType.UI_STATE,
         SlashCommandType.LOCAL,
     ]
-    assert [command.hidden for command in registry.public_commands()] == [False] * 9
+    assert [command.hidden for command in registry.public_commands()] == [False] * 11
     assert registry.resolve("help") is registry.resolve("h")
     assert registry.resolve("help") is registry.resolve("?")
     assert registry.resolve("compact") is registry.resolve("comp")
@@ -209,6 +233,8 @@ def test_create_default_slash_registry_registers_expected_commands_and_aliases()
     assert registry.resolve("do") is registry.resolve("d")
     assert registry.resolve("session") is registry.resolve("sess")
     assert registry.resolve("memory") is registry.resolve("mem")
+    assert registry.resolve("tasks") is not None
+    assert registry.resolve("task") is not None
     assert registry.resolve("permission") is registry.resolve("perm")
     assert registry.resolve("status") is registry.resolve("stat")
     assert registry.resolve("review") is None
@@ -242,6 +268,8 @@ def test_help_lists_public_commands_in_registration_order_and_hides_exit():
             "/do",
             "/session",
             "/memory",
+            "/tasks",
+            "/task",
             "/permission",
             "/status",
         ],
@@ -427,6 +455,114 @@ def test_memory_command_formats_paths_counts_and_diagnostics_without_body():
     assert "memory_index_truncated" in text
     assert "project_index_truncated" in text
     assert "body" not in text.lower()
+
+
+def _subagent_summary(task_id, sequence, *, state=SubAgentTaskState.RUNNING, detached=False):
+    return SubAgentTaskSummary(
+        id=task_id,
+        sequence=sequence,
+        kind=SubAgentKind.DEFINED,
+        role_name="general",
+        state=state,
+        detached=detached,
+        rounds=sequence,
+        error_code=("llm_error" if state is SubAgentTaskState.FAILED else None),
+        usage=SubAgentUsage(input_tokens=sequence, output_tokens=None),
+    )
+
+
+def _subagent_snapshot(task_id="task-000001", *, state=SubAgentTaskState.COMPLETED):
+    return SubAgentTaskSnapshot(
+        id=task_id,
+        sequence=int(task_id.rsplit("-", 1)[-1]),
+        kind=SubAgentKind.DEFINED,
+        role_name="general",
+        state=state,
+        detached=True,
+        rounds=2,
+        result=(
+            SubAgentResult(detail="完整结果", summary="结果摘要")
+            if state is SubAgentTaskState.COMPLETED
+            else None
+        ),
+        error_code=("llm_error" if state is SubAgentTaskState.FAILED else None),
+        error_message=("模型失败" if state is SubAgentTaskState.FAILED else None),
+        usage=SubAgentUsage(input_tokens=3, output_tokens=None, total_tokens=5),
+    )
+
+
+def test_tasks_command_lists_realtime_summaries_without_detail_and_rejects_arguments():
+    controller = FakeController()
+    controller.subagent_summaries = (
+        _subagent_summary("task-000002", 2, state=SubAgentTaskState.FAILED, detached=True),
+        _subagent_summary("task-000001", 1, state=SubAgentTaskState.RUNNING),
+    )
+
+    result = _run_command("tasks", controller)
+
+    assert result is SlashHandlerSignal.CONTINUE
+    text, is_error = controller.messages[-1]
+    assert is_error is False
+    _assert_in_order(text, ["task-000001", "running", "task-000002", "failed"])
+    assert "完整结果" not in text
+    assert "未知" in text
+
+    controller = FakeController()
+    result = _run_command("tasks", controller, "extra")
+
+    assert result is SlashHandlerSignal.CONTINUE
+    assert controller.messages[-1][1] is True
+    assert "/tasks" in controller.messages[-1][0]
+
+
+def test_tasks_command_reports_empty_session_in_chinese():
+    controller = FakeController()
+
+    result = _run_command("tasks", controller)
+
+    assert result is SlashHandlerSignal.CONTINUE
+    text, is_error = controller.messages[-1]
+    assert is_error is False
+    assert "没有子 Agent 任务" in text
+
+
+def test_task_command_formats_detail_and_unknown_task_stably():
+    controller = FakeController()
+    controller.subagent_details = {
+        "task-000001": _subagent_snapshot("task-000001"),
+        "task-000002": _subagent_snapshot("task-000002", state=SubAgentTaskState.FAILED),
+    }
+
+    result = _run_command("task", controller, "task-000001")
+
+    assert result is SlashHandlerSignal.CONTINUE
+    text, is_error = controller.messages[-1]
+    assert is_error is False
+    assert "task-000001" in text
+    assert "完整结果" in text
+    assert "未知" in text
+    assert "None" not in text
+
+    result = _run_command("task", controller, "task-000002")
+
+    assert result is SlashHandlerSignal.CONTINUE
+    text, is_error = controller.messages[-1]
+    assert is_error is False
+    assert "llm_error" in text
+    assert "模型失败" in text
+
+    result = _run_command("task", controller, "missing")
+
+    assert result is SlashHandlerSignal.CONTINUE
+    assert controller.messages[-1][1] is True
+    assert "task_not_found" in controller.messages[-1][0]
+
+    controller = FakeController()
+    result = _run_command("task", controller, "")
+
+    assert result is SlashHandlerSignal.CONTINUE
+    assert controller.messages[-1][1] is True
+    assert "/task <id>" in controller.messages[-1][0]
 
 
 def test_status_command_formats_application_status_without_forwarding_user_message():
