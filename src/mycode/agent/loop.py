@@ -42,6 +42,7 @@ from mycode.permission.models import (
     ApprovalOutcome,
     ApprovalProvider,
     PermissionEffect,
+    PermissionMode,
 )
 from mycode.permission.service import PermissionInterceptor
 from mycode.tool import ToolCall, ToolExecutor, ToolKind, ToolRegistry, ToolResult
@@ -119,6 +120,10 @@ class AgentLoop:
         project_memory: Any | None = None,
         skill_runtime: Any | None = None,
         hook_runtime: Any | None = None,
+        parent_snapshot_store: Any | None = None,
+        notification_inbox: Any | None = None,
+        main_model_id: str | None = None,
+        permission_mode_provider: Any | None = None,
     ) -> None:
         self._llm = llm
         self._memory = memory
@@ -131,6 +136,10 @@ class AgentLoop:
         self._project_memory = project_memory
         self._skill_runtime = skill_runtime
         self._hook_runtime = hook_runtime or NullHookRuntime()
+        self._parent_snapshot_store = parent_snapshot_store
+        self._notification_inbox = notification_inbox
+        self._main_model_id = main_model_id
+        self._permission_mode_provider = permission_mode_provider
         self._next_turn_id = 0
         self._latest_framework_context = _empty_framework_context()
 
@@ -544,6 +553,11 @@ class AgentLoop:
         state: _RunState,
         round_index: int,
     ) -> _PreparedRound:
+        notification_reservation = (
+            self._notification_inbox.reserve()
+            if self._notification_inbox is not None
+            else None
+        )
         await self._trigger_hook(
             build_event_hook_context(
                 event=HookEvent.MODEL_ROUND_START,
@@ -559,6 +573,12 @@ class AgentLoop:
             deferred_reminder = _make_deferred_tool_reminder(
                 self._deferred_summaries()
             )
+            # 每轮通知预留只存在于本轮局部变量里；构建失败释放，构建成功提交，避免重复注入或污染基础 framework blocks。
+            round_framework_blocks = state.base_framework_blocks + (
+                (notification_reservation.block,)
+                if notification_reservation is not None
+                else ()
+            )
             round_turn_context = (
                 _replace_turn_context(
                     state.turn_context,
@@ -569,7 +589,7 @@ class AgentLoop:
             )
             round_turn_context = _replace_turn_context(
                 round_turn_context,
-                framework_blocks=self._framework_blocks(state.base_framework_blocks),
+                framework_blocks=self._framework_blocks(round_framework_blocks),
             )
             return self._prompt_builder.build(
                 history=history,
@@ -584,6 +604,7 @@ class AgentLoop:
                 run_deadline=state.run_deadline,
             )
         except CompactError as exc:
+            self._release_notification_reservation(notification_reservation)
             return _PreparedRound(
                 events=(
                     AgentEvent(
@@ -596,6 +617,16 @@ class AgentLoop:
                 ),
                 should_stop=True,
             )
+        except Exception:
+            self._release_notification_reservation(notification_reservation)
+            raise
+
+        try:
+            self._update_parent_snapshot(prepared_context.request)
+            self._commit_notification_reservation(notification_reservation)
+        except Exception:
+            self._release_notification_reservation(notification_reservation)
+            raise
 
         events: list[AgentEvent] = []
         if _has_compaction_action(prepared_context.report):
@@ -608,6 +639,39 @@ class AgentLoop:
                 )
             )
         return _PreparedRound(prepared_context=prepared_context, events=tuple(events))
+
+    def _update_parent_snapshot(self, request) -> None:
+        if self._parent_snapshot_store is None:
+            return
+        self._parent_snapshot_store.update(
+            request,
+            model_id=self._main_model_id or "",
+            max_rounds=self.config.max_rounds,
+            permission_mode=self._current_permission_mode(),
+        )
+
+    def _current_permission_mode(self) -> PermissionMode:
+        if self._permission_mode_provider is None:
+            return PermissionMode.DEFAULT
+        value = self._permission_mode_provider()
+        if isinstance(value, tuple):
+            value = value[0]
+        if isinstance(value, PermissionMode):
+            return value
+        return PermissionMode.DEFAULT
+
+    def _commit_notification_reservation(self, reservation) -> None:
+        if self._notification_inbox is None or reservation is None:
+            return
+        self._notification_inbox.commit(reservation.id)
+
+    def _release_notification_reservation(self, reservation) -> None:
+        if self._notification_inbox is None or reservation is None:
+            return
+        try:
+            self._notification_inbox.release(reservation.id)
+        except KeyError:
+            return
 
     async def _stream_model_response(
         self,

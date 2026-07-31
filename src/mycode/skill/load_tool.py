@@ -4,7 +4,13 @@ from typing import Any
 
 from mycode.skill.models import SkillMode, SkillResourceError
 from mycode.skill.runtime import SkillRuntime
-from mycode.tool import ToolArguments, ToolDefinition, ToolKind, ToolResult
+from mycode.tool import (
+    ToolArguments,
+    ToolDefinition,
+    ToolKind,
+    ToolResult,
+    ToolRuntimeScope,
+)
 
 
 class SkillLoadTool:
@@ -28,6 +34,7 @@ class SkillLoadTool:
             },
             kind=ToolKind.READ,
             parallel_safe=False,
+            runtime_scope=ToolRuntimeScope.TASK_LOCAL,
         )
 
     async def execute_async(self, arguments: ToolArguments) -> ToolResult:

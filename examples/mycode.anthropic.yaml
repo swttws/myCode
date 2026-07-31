@@ -4,6 +4,11 @@ base_url: https://api.anthropic.com
 api_key: ${ANTHROPIC_API_KEY}
 compact:
   context_window_tokens: 200000
+sub_agent:
+  models:
+    haiku: your-claude-model
+    sonnet: your-claude-model
+    opus: your-claude-model
 thinking:
   enabled: true
   budget_tokens: 2048

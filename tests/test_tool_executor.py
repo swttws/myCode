@@ -1,8 +1,15 @@
-import time
 import asyncio
 import threading
+import time
 
-from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
+from mycode.tool import (
+    ToolCall,
+    ToolDefinition,
+    ToolExecutor,
+    ToolKind,
+    ToolRegistry,
+    ToolResult,
+)
 
 
 class EchoTool:
@@ -34,6 +41,9 @@ class ExplodingTool(EchoTool):
 
 
 class SlowTool(EchoTool):
+    def __init__(self, *, timeout_override=None):
+        self._timeout_override = timeout_override
+
     @property
     def definition(self):
         return ToolDefinition(
@@ -41,6 +51,7 @@ class SlowTool(EchoTool):
             description="Sleep too long.",
             parameters={"type": "object", "properties": {}, "required": []},
             kind=ToolKind.READ,
+            execution_timeout_seconds=self._timeout_override,
         )
 
     def execute(self, arguments):
@@ -192,3 +203,23 @@ def test_tool_executor_times_out_async_tool_with_existing_result_contract():
     assert result.ok is False
     assert result.tool_name == "async_slow"
     assert result.content["timed_out"] is True
+
+
+def test_tool_executor_uses_definition_level_timeout_override():
+    executor = ToolExecutor(ToolRegistry([SlowTool(timeout_override=0.01)]), timeout_seconds=10)
+
+    result = asyncio.run(executor.execute(ToolCall(id="call-override", name="slow", arguments={})))
+
+    assert result.ok is False
+    assert result.content["timed_out"] is True
+    assert "0.01" in result.error
+
+
+def test_tool_executor_uses_default_timeout_when_definition_has_no_override():
+    executor = ToolExecutor(ToolRegistry([SlowTool()]), timeout_seconds=0.01)
+
+    result = asyncio.run(executor.execute(ToolCall(id="call-default", name="slow", arguments={})))
+
+    assert result.ok is False
+    assert result.content["timed_out"] is True
+    assert "0.01" in result.error

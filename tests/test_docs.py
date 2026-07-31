@@ -5,6 +5,7 @@ import yaml
 
 from mycode.config import load_config
 from mycode.mcp import MCPTransportKind, load_mcp_config
+from mycode.subagent.models import AgentModelTier
 
 
 def test_readme_documents_supported_protocols_and_agent_scope():
@@ -56,10 +57,6 @@ def test_primary_example_configs_load_with_compact_settings(tmp_path):
         },
         "examples/mycode.openai-chat.yaml": {
             "environment": {"OPENAI_API_KEY": "sk-openai-test"},
-            "overrides": {
-                "model": "gpt-test",
-                "base_url": "https://api.openai.com/v1",
-            },
         },
     }
 
@@ -85,6 +82,13 @@ def test_primary_example_configs_load_with_compact_settings(tmp_path):
     assert configs["examples/mycode.openai-responses.yaml"].compact.context_window_tokens == 128_000
     assert configs["examples/mycode.openai-chat.yaml"].compact.context_window_tokens == 128_000
     assert configs["examples/mycode.openai-chat.yaml"].usage.request_stream_usage is True
+    expected_tiers = {AgentModelTier.HAIKU, AgentModelTier.SONNET, AgentModelTier.OPUS}
+    for config in configs.values():
+        assert config.model
+        assert config.base_url
+        assert config.sub_agent is not None
+        assert set(config.sub_agent.model_map) == expected_tiers
+        assert set(config.sub_agent.model_map.values()) == {config.model}
 
 
 def test_readme_primary_config_examples_load(tmp_path):
@@ -116,6 +120,15 @@ def test_readme_primary_config_examples_load(tmp_path):
         "openai_chat",
         "anthropic",
     ]
+    assert all(config.sub_agent is not None for config in configs)
+    assert all(
+        set(config.sub_agent.model_map) == {
+            AgentModelTier.HAIKU,
+            AgentModelTier.SONNET,
+            AgentModelTier.OPUS,
+        }
+        for config in configs
+    )
 
 
 def test_readme_and_repository_example_document_stage_05_permission_boundaries():
@@ -273,9 +286,10 @@ def test_readme_documents_stage_09_slash_commands():
         "/do",
         "/session",
         "/memory",
+        "/tasks",
+        "/task",
         "/permission",
         "/status",
-        "/review",
     ]
 
     assert all(command in command_section for command in public_commands)
@@ -285,3 +299,33 @@ def test_readme_documents_stage_09_slash_commands():
     assert "隐藏" in command_section
     assert "[DEFAULT]" in readme
     assert "[PLAN]" in readme
+
+
+def test_readme_documents_stage_12_subagent_behavior():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    required = [
+        "Stage 12",
+        "Agent(action=run)",
+        "action=list",
+        "action=get",
+        "defined",
+        "fork",
+        "sub_agent.models",
+        "haiku",
+        "sonnet",
+        "opus",
+        "foreground_timeout_seconds",
+        "max_concurrency",
+        "general",
+        "explore",
+        "review",
+        "Ctrl+B",
+        "/tasks",
+        "/task <id>",
+        "notification safe point",
+        "session cleanup",
+        "Anthropic tool_use",
+        "tool_result",
+    ]
+
+    assert all(value in readme for value in required)

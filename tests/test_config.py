@@ -6,7 +6,18 @@ from mycode.compact.models import CompactConfig
 from mycode.config import ConfigError, load_config
 
 
-def write_config(path, text):
+VALID_SUB_AGENT_CONFIG = """
+sub_agent:
+  models:
+    haiku: test-haiku
+    sonnet: test-sonnet
+    opus: test-opus
+"""
+
+
+def write_config(path, text, *, include_sub_agent=True):
+    if include_sub_agent and "\nsub_agent:" not in text:
+        text = text.rstrip() + "\n" + VALID_SUB_AGENT_CONFIG
     path.write_text(text, encoding="utf-8")
 
 
@@ -276,6 +287,48 @@ compact:
     assert config.compact.context_window_tokens == 128000
     assert config.compact.tool_result_threshold_tokens == 8_000
     assert config.compact.tool_batch_threshold_tokens == 12_000
+
+
+def test_load_config_requires_sub_agent_model_mapping(tmp_path):
+    config_path = tmp_path / "mycode.yaml"
+    write_config(
+        config_path,
+        """
+protocol: anthropic
+model: claude-test
+base_url: https://api.anthropic.com
+api_key: sk-test
+compact:
+  context_window_tokens: 128000
+""",
+        include_sub_agent=False,
+    )
+
+    with pytest.raises(ConfigError, match="sub_agent.models"):
+        load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})
+
+
+def test_load_config_rejects_incomplete_sub_agent_model_mapping(tmp_path):
+    config_path = tmp_path / "mycode.yaml"
+    write_config(
+        config_path,
+        """
+protocol: anthropic
+model: claude-test
+base_url: https://api.anthropic.com
+api_key: sk-test
+compact:
+  context_window_tokens: 128000
+sub_agent:
+  models:
+    haiku: test-haiku
+    sonnet: test-sonnet
+""",
+        include_sub_agent=False,
+    )
+
+    with pytest.raises(ConfigError, match="opus"):
+        load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})
 
 
 def test_loads_compact_config_with_explicit_threshold_overrides(tmp_path):

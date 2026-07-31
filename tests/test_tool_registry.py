@@ -11,6 +11,7 @@ from mycode.tool import (
     create_default_tool_registry,
     ToolDefinition,
     ToolKind,
+    ToolRuntimeScope,
 )
 
 
@@ -58,6 +59,25 @@ def test_tool_definition_defaults_to_no_persistable_grant_arguments():
 
 def test_tool_definition_defaults_to_parallel_safe():
     assert FakeTool().definition.parallel_safe is True
+
+
+def test_tool_definition_defaults_to_shared_runtime_scope_and_no_timeout():
+    definition = FakeTool().definition
+
+    assert definition.runtime_scope is ToolRuntimeScope.SHARED
+    assert definition.execution_timeout_seconds is None
+
+
+def test_tool_definition_rejects_invalid_execution_timeout():
+    for value in (True, 0, -1, float("inf")):
+        with pytest.raises(ValueError, match="execution_timeout_seconds"):
+            ToolDefinition(
+                name="bad_timeout",
+                description="Invalid timeout.",
+                parameters={"type": "object", "properties": {}, "required": []},
+                kind=ToolKind.READ,
+                execution_timeout_seconds=value,
+            )
 
 
 def test_tool_registry_rejects_duplicate_tool_names():
@@ -155,7 +175,22 @@ def test_tool_registry_unregisters_tool_and_clears_discovery_state():
 
 
 def test_tool_registry_converts_definitions_to_openai_chat_tool_specs():
-    registry = ToolRegistry([FakeTool()])
+    class LocalOnlyMetadataTool(FakeTool):
+        def __init__(self) -> None:
+            self._definition = ToolDefinition(
+                name="fake",
+                description="Fake test tool.",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+                kind=ToolKind.READ,
+                runtime_scope=ToolRuntimeScope.TASK_LOCAL,
+                execution_timeout_seconds=1.5,
+            )
+
+    registry = ToolRegistry([LocalOnlyMetadataTool()])
 
     expected = [
         {
@@ -226,6 +261,15 @@ def test_default_tool_registry_declares_tool_kinds(tmp_path):
     assert definitions["write_file"].kind == ToolKind.WRITE
     assert definitions["edit_file"].kind == ToolKind.WRITE
     assert definitions["run_command"].kind == ToolKind.WRITE
+
+
+def test_default_tool_registry_marks_file_tools_as_task_local(tmp_path):
+    registry = create_default_tool_registry(tmp_path)
+    definitions = {definition.name: definition for definition in registry.definitions()}
+
+    for name in ("read_file", "write_file", "edit_file", "find_files", "search_code"):
+        assert definitions[name].runtime_scope is ToolRuntimeScope.TASK_LOCAL
+    assert definitions["run_command"].runtime_scope is ToolRuntimeScope.SHARED
 
 
 def test_default_tool_registry_declares_exact_grant_arguments(tmp_path):

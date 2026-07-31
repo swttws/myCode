@@ -54,3 +54,9 @@ class SlashCommandController(Protocol):
 
     def application_status(self) -> Awaitable[ApplicationStatusSnapshot]:
         ...
+
+    def list_subagent_tasks(self):
+        ...
+
+    def get_subagent_task(self, task_id: str):
+        ...

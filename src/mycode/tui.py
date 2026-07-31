@@ -133,6 +133,33 @@ class ChatTUI:
     async def memory_status(self):
         return await self._session.memory_status()
 
+    async def detach_active_subagent(self):
+        detach = getattr(self._session, "detach_active_subagent", None)
+        if not callable(detach):
+            return None
+        result = detach()
+        if inspect.isawaitable(result):
+            result = await result
+        if result is None:
+            return None
+        self._console.print(
+            f"\n子 Agent 已转入后台：{result.id}",
+            markup=False,
+        )
+        return result
+
+    def list_subagent_tasks(self):
+        getter = getattr(self._session, "list_subagent_tasks", None)
+        if not callable(getter):
+            return ()
+        return getter()
+
+    def get_subagent_task(self, task_id: str):
+        getter = getattr(self._session, "get_subagent_task", None)
+        if not callable(getter):
+            raise KeyError(f"subagent_service_unavailable: {task_id}")
+        return getter(task_id)
+
     async def application_status(self) -> ApplicationStatusSnapshot:
         try:
             permission = self.permission_status()
