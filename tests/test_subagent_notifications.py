@@ -9,13 +9,14 @@ from mycode.subagent.models import (
 from mycode.subagent.notifications import SubAgentNotificationInbox
 
 
-def notification(task_id, state=SubAgentTaskState.COMPLETED, summary="完成"):
+def notification(task_id, state=SubAgentTaskState.COMPLETED, summary="完成", role_name=None):
     return SubAgentNotification(
         task_id=task_id,
         state=state,
         summary=summary,
         summary_truncated=False,
         usage=SubAgentUsage(input_tokens=1, output_tokens=2),
+        role_name=role_name,
     )
 
 
@@ -117,3 +118,16 @@ def test_notification_inbox_clear_discards_pending_reserved_and_dropped_count():
 
     assert inbox.pending_count == 0
     assert inbox.reserve() is None
+
+
+def test_notification_inbox_includes_role_name_in_rendered_prefix():
+    inbox = SubAgentNotificationInbox()
+    inbox.enqueue(
+        sequence=1,
+        notification=notification("task-000001", role_name="explore", summary="完成"),
+    )
+
+    reservation = inbox.reserve()
+
+    assert "explore#000001" in reservation.block.content
+    assert "task-000001" in reservation.block.content

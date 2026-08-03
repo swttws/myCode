@@ -123,7 +123,7 @@ class SubAgentNotificationInbox:
         for notification in notifications:
             lines.append(
                 " - "
-                f"{notification.task_id} {_state_zh(notification.state)}："
+                f"{_identity_label(notification)} ({notification.task_id}) {_state_zh(notification.state)}："
                 f"{notification.summary}；usage={_usage_text(notification)}"
             )
         content = "\n".join(lines)
@@ -160,3 +160,9 @@ def _usage_text(notification: SubAgentNotification) -> str:
 
 def _value(value: int | None) -> str:
     return "未知" if value is None else str(value)
+
+
+def _identity_label(notification: SubAgentNotification) -> str:
+    role_name = notification.role_name or "fork"
+    suffix = notification.task_id.rsplit("-", 1)[-1] if "-" in notification.task_id else notification.task_id
+    return f"{role_name}#{suffix}"

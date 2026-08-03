@@ -17,6 +17,10 @@ class ScriptedLLM(BaseLLM):
     async def stream_chat(self, messages, tools=None):
         self.requests.append(list(messages))
         self.tool_requests.append(tools)
+        if tools == []:
+            yield StreamEvent(StreamEventType.TEXT_DELTA, '{"decisions":[]}')
+            yield StreamEvent(StreamEventType.DONE)
+            return
         for event in self.scripts.pop(0):
             yield event
 
@@ -158,7 +162,7 @@ def test_e2e_tool_call_result_is_stored_for_next_request(tmp_path, monkeypatch):
     exit_code = cli.main(["--config", str(config_path)])
 
     assert exit_code == 0
-    assert "工具已执行" in output.getvalue()
+    assert "工具完成：read_file" in output.getvalue()
     requests = main_requests(llm)
     second_request = conversation_messages(requests[1])
     assert second_request[0] == ChatMessage(role="user", content="read note")

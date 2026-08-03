@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -34,6 +35,7 @@ from mycode.subagent.models import (
     SubAgentUsage,
     truncate_utf8_bytes,
 )
+from mycode.subagent.rendering import publish_current_render_event
 from mycode.subagent.tooling import SubAgentPermissionInterceptor, SubAgentToolPolicy
 from mycode.tool import ToolRegistry
 
@@ -47,6 +49,7 @@ class SubAgentRuntime:
         model_id: str,
         max_rounds: int,
         max_result_bytes: int,
+        task_id: str | None = None,
         cleanup=None,
     ) -> None:
         self._request = request
@@ -55,9 +58,16 @@ class SubAgentRuntime:
         self._cleanup = cleanup
         self.model_id = model_id
         self.max_rounds = max_rounds
+        self._task_id = task_id
 
-    async def run(self, cancel_event: asyncio.Event) -> SubAgentExecutionReport:
-        consume_task = asyncio.create_task(self._consume_events())
+    async def run(
+        self,
+        cancel_event: asyncio.Event,
+        *,
+        event_sink: Callable[[AgentEvent], object] | None = None,
+    ) -> SubAgentExecutionReport:
+        sink = event_sink or publish_current_render_event
+        consume_task = asyncio.create_task(self._consume_events_with_sink(sink))
         cancel_task = asyncio.create_task(cancel_event.wait())
         try:
             done, pending = await asyncio.wait(
@@ -153,6 +163,186 @@ class SubAgentRuntime:
         )
 
 
+    async def _consume_events_with_sink(
+        self,
+        event_sink: Callable[[AgentEvent], object] | None,
+    ) -> SubAgentExecutionReport:
+        final_text: str | None = None
+        error_event: AgentEvent | None = None
+        cancelled_event: AgentEvent | None = None
+        rounds = 0
+        usages: list[UsageObservation] = []
+
+        await _emit_event(
+            event_sink,
+            AgentEvent(
+                AgentEventType.SUBAGENT_TASK_STARTED,
+                content="任务开始",
+                agent_type="subagent",
+                role_name=_display_role_name(self._request),
+                task_id=self._task_id,
+            ),
+        )
+
+        try:
+            async for event in self._agent_loop.run(
+                "",
+                mode=AgentMode(),
+                approval_provider=None,
+                isolated_depth=1,
+            ):
+                rounds = max(rounds, event.round_index)
+                if event.type == AgentEventType.USAGE and event.usage is not None:
+                    usages.append(event.usage)
+                    continue
+                if event.type == AgentEventType.FINAL_RESPONSE:
+                    final_text = event.content
+                    continue
+                if event.type == AgentEventType.TOOL_CALL_STARTED and event.tool_call is not None:
+                    await _emit_event(event_sink, _child_event(event, self._request, self._task_id))
+                    continue
+                if event.type == AgentEventType.TOOL_RESULT and event.tool_result is not None:
+                    await _emit_event(event_sink, _child_event(event, self._request, self._task_id))
+                    continue
+                if event.type == AgentEventType.ERROR:
+                    error_event = event
+                    await _emit_event(event_sink, _child_event(event, self._request, self._task_id))
+                    break
+                if event.type == AgentEventType.CANCELLED:
+                    cancelled_event = event
+                    await _emit_event(event_sink, _child_event(event, self._request, self._task_id))
+                    break
+        except asyncio.CancelledError:
+            await _emit_event(
+                event_sink,
+                AgentEvent(
+                    AgentEventType.SUBAGENT_TASK_CANCELLED,
+                    content="cancelled",
+                    agent_type="subagent",
+                    role_name=_display_role_name(self._request),
+                    task_id=self._task_id,
+                ),
+            )
+            return _cancelled_report(rounds=rounds, usage=SubAgentUsage.aggregate(tuple(usages)))
+        except Exception as exc:
+            await _emit_event(
+                event_sink,
+                AgentEvent(
+                    AgentEventType.ERROR,
+                    content=_safe_error(exc),
+                    agent_type="subagent",
+                    role_name=_display_role_name(self._request),
+                    task_id=self._task_id,
+                ),
+            )
+            return _failed_report(
+                "runtime_error",
+                _safe_error(exc),
+                rounds=rounds,
+                usage=SubAgentUsage.aggregate(tuple(usages)),
+            )
+
+        usage = SubAgentUsage.aggregate(tuple(usages))
+        if cancelled_event is not None:
+            await _emit_event(
+                event_sink,
+                AgentEvent(
+                    AgentEventType.SUBAGENT_TASK_CANCELLED,
+                    content=cancelled_event.content or "cancelled",
+                    agent_type="subagent",
+                    role_name=_display_role_name(self._request),
+                    task_id=self._task_id,
+                ),
+            )
+            return _cancelled_report(rounds=rounds, usage=usage)
+        if error_event is not None:
+            await _emit_event(
+                event_sink,
+                AgentEvent(
+                    AgentEventType.SUBAGENT_TASK_FAILED,
+                    content=error_event.content or _error_code(error_event),
+                    agent_type="subagent",
+                    role_name=_display_role_name(self._request),
+                    task_id=self._task_id,
+                ),
+            )
+            return _failed_report(
+                _error_code(error_event),
+                error_event.content or _error_code(error_event),
+                rounds=rounds,
+                usage=usage,
+            )
+        if final_text is None or not final_text.strip():
+            report = _failed_report(
+                "empty_final_response",
+                "瀛?Agent 娌℃湁杩斿洖鏈€缁堟枃鏈€?",
+                rounds=rounds,
+                usage=usage,
+            )
+            await _emit_event(
+                event_sink,
+                AgentEvent(
+                    AgentEventType.SUBAGENT_TASK_FAILED,
+                    content="empty_final_response",
+                    agent_type="subagent",
+                    role_name=_display_role_name(self._request),
+                    task_id=self._task_id,
+                ),
+            )
+            return report
+
+        detail, detail_truncated = truncate_utf8_bytes(final_text, self._max_result_bytes)
+        summary, summary_truncated = truncate_utf8_bytes(
+            _summary_text(final_text),
+            min(4096, self._max_result_bytes),
+        )
+        report = SubAgentExecutionReport(
+            state=SubAgentTaskState.COMPLETED,
+            rounds=rounds,
+            result=SubAgentResult(
+                detail=detail,
+                summary=summary,
+                detail_truncated=detail_truncated,
+                summary_truncated=summary_truncated,
+            ),
+            error_code=None,
+            error_message=None,
+            usage=usage,
+        )
+        await _emit_event(
+            event_sink,
+            AgentEvent(
+                AgentEventType.SUBAGENT_TASK_COMPLETED,
+                content=f"rounds={rounds}",
+                agent_type="subagent",
+                role_name=_display_role_name(self._request),
+                task_id=self._task_id,
+            ),
+        )
+        return report
+
+
+async def _emit_event(event_sink: Callable[[AgentEvent], object] | None, event: AgentEvent) -> None:
+    if event_sink is None:
+        return
+    result = event_sink(event)
+    if inspect.isawaitable(result):
+        await result
+
+
+def _child_event(event: AgentEvent, request: SubAgentLaunchRequest, task_id: str | None) -> AgentEvent:
+    return replace(
+        event,
+        agent_type="subagent",
+        role_name=_display_role_name(request),
+        task_id=task_id,
+    )
+
+
+def _display_role_name(request: SubAgentLaunchRequest) -> str:
+    return request.role_name or request.kind.value
+
+
 class SubAgentRuntimeFactory:
     def __init__(
         self,
@@ -181,7 +371,13 @@ class SubAgentRuntimeFactory:
         self._project_instructions = tuple(project_instructions)
         self._hook_runtime_factory = hook_runtime_factory or NullHookRuntime
 
-    def create(self, request: SubAgentLaunchRequest, *, detached: bool) -> SubAgentRuntime:
+    def create(
+        self,
+        request: SubAgentLaunchRequest,
+        *,
+        detached: bool,
+        task_id: str | None = None,
+    ) -> SubAgentRuntime:
         role = self._role_for(request)
         model_id = self._model_id(request, role)
         max_rounds = request.parent.max_rounds if request.kind is SubAgentKind.FORK else role.metadata.max_rounds
@@ -241,6 +437,7 @@ class SubAgentRuntimeFactory:
             model_id=model_id,
             max_rounds=max_rounds,
             max_result_bytes=self._config.max_result_bytes,
+            task_id=task_id,
             cleanup=task_runtime.close,
         )
 

@@ -30,6 +30,12 @@ def test_agent_event_type_declares_public_contract():
         "approval_required",
         "usage",
         "compaction",
+        "subagent_task_queued",
+        "subagent_task_started",
+        "subagent_task_detached",
+        "subagent_task_completed",
+        "subagent_task_failed",
+        "subagent_task_cancelled",
     ]
 
 

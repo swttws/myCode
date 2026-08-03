@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
+from mycode.agent.events import AgentEvent, AgentEventType
 from mycode.subagent.models import (
     SubAgentConfig,
     SubAgentExecutionReport,
@@ -17,6 +18,7 @@ from mycode.subagent.models import (
     SubAgentUsage,
 )
 from mycode.subagent.notifications import SubAgentNotificationInbox
+from mycode.subagent.rendering import publish_current_render_event
 
 
 SubAgentRunner = Callable[[asyncio.Event], Awaitable[SubAgentExecutionReport]]
@@ -27,7 +29,7 @@ class _TaskRecord:
     id: str
     sequence: int
     request: SubAgentLaunchRequest
-    runner: SubAgentRunner
+    runner: SubAgentRunner | None
     state: SubAgentTaskState
     detached: bool
     rounds: int = 0
@@ -59,6 +61,10 @@ class SubAgentTaskManager:
         request: SubAgentLaunchRequest,
         runner: SubAgentRunner,
     ) -> SubAgentTaskSnapshot:
+        snapshot = await self.reserve(request)
+        return await self.start_reserved(snapshot.id, runner)
+
+    async def reserve(self, request: SubAgentLaunchRequest) -> SubAgentTaskSnapshot:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("subagent_task_manager_closed")
@@ -75,24 +81,84 @@ class SubAgentTaskManager:
                 id=task_id,
                 sequence=sequence,
                 request=request,
-                runner=runner,
+                runner=None,
                 state=SubAgentTaskState.QUEUED,
                 detached=request.requested_background,
             )
             self._records[task_id] = record
-            if self._running_count() < self._config.max_concurrency:
+            if self._running_count() >= self._config.max_concurrency or self._queue:
+                self._queue.append(task_id)
+            snapshot = self._snapshot(record)
+
+        await _publish_task_event(snapshot, AgentEventType.SUBAGENT_TASK_QUEUED)
+        return snapshot
+
+    async def start_reserved(self, task_id: str, runner: SubAgentRunner) -> SubAgentTaskSnapshot:
+        async with self._lock:
+            record = self._records.get(task_id)
+            if record is None:
+                raise KeyError(f"task_not_found: {task_id}")
+            record.runner = runner
+            in_queue = record.id in self._queue
+            can_start_now = self._running_count() < self._config.max_concurrency
+            if in_queue and self._queue and self._queue[0] == record.id and can_start_now:
+                self._queue.popleft()
                 self._start_record(record)
-            else:
+            elif not in_queue and self._queue:
+                self._queue.append(task_id)
+            elif not in_queue and can_start_now:
+                self._start_record(record)
+            elif not in_queue:
                 self._queue.append(task_id)
             return self._snapshot(record)
+
+    async def fail_reserved(self, task_id: str, error_code: str, error_message: str) -> SubAgentTaskSnapshot:
+        async with self._lock:
+            record = self._records.get(task_id)
+            if record is None:
+                raise KeyError(f"task_not_found: {task_id}")
+            if record.id in self._queue:
+                self._queue.remove(record.id)
+            record.state = SubAgentTaskState.FAILED
+            record.error_code = error_code
+            record.error_message = error_message
+            record.rounds = 0
+            record.result = None
+            if record.detached:
+                self._notification_inbox.enqueue(
+                    sequence=record.sequence,
+                    notification=SubAgentNotification(
+                        task_id=record.id,
+                        state=record.state,
+                        summary=error_message or error_code,
+                        summary_truncated=False,
+                        usage=record.usage,
+                        role_name=record.request.role_name or record.request.kind.value,
+                    ),
+                )
+            self._start_next_queued()
+            self._enforce_retention()
+            snapshot = self._snapshot(record)
+
+        await _publish_task_event(
+            snapshot,
+            AgentEventType.SUBAGENT_TASK_FAILED,
+            content=error_message or error_code,
+        )
+        return snapshot
 
     async def detach(self, task_id: str) -> SubAgentTaskSnapshot:
         async with self._lock:
             record = self._records.get(task_id)
             if record is None:
                 raise KeyError(f"task_not_found: {task_id}")
+            was_detached = record.detached
             record.detached = True
-            return self._snapshot(record)
+            snapshot = self._snapshot(record)
+
+        if not was_detached:
+            await _publish_task_event(snapshot, AgentEventType.SUBAGENT_TASK_DETACHED)
+        return snapshot
 
     def list(self) -> tuple[SubAgentTaskSummary, ...]:
         return tuple(
@@ -107,6 +173,7 @@ class SubAgentTaskManager:
         return self._snapshot(record)
 
     async def cancel_all_and_clear(self) -> None:
+        cancelled_snapshots: list[SubAgentTaskSnapshot] = []
         async with self._lock:
             running = [
                 record
@@ -122,6 +189,7 @@ class SubAgentTaskManager:
                     record.state = SubAgentTaskState.CANCELLED
                     record.error_code = "cancelled"
                     record.error_message = "任务已取消。"
+                    cancelled_snapshots.append(self._snapshot(record))
             self._queue.clear()
 
         tasks = [record.task for record in running if record.task is not None]
@@ -138,6 +206,13 @@ class SubAgentTaskManager:
             self._next_sequence = 1
             self._closed = False
             self._notification_inbox.clear()
+
+        for snapshot in cancelled_snapshots:
+            await _publish_task_event(
+                snapshot,
+                AgentEventType.SUBAGENT_TASK_CANCELLED,
+                content="任务已取消。",
+            )
 
     def _start_record(self, record: _TaskRecord) -> None:
         record.state = SubAgentTaskState.RUNNING
@@ -199,8 +274,11 @@ class SubAgentTaskManager:
         while self._queue and self._running_count() < self._config.max_concurrency:
             task_id = self._queue.popleft()
             record = self._records.get(task_id)
-            if record is not None and record.state is SubAgentTaskState.QUEUED:
+            if record is not None and record.state is SubAgentTaskState.QUEUED and record.runner is not None:
                 self._start_record(record)
+                break
+            if record is not None and record.state is SubAgentTaskState.QUEUED:
+                self._queue.appendleft(task_id)
                 break
 
     def _enforce_retention(self) -> None:
@@ -258,3 +336,21 @@ def _notification_summary(record: _TaskRecord) -> str:
     if record.error_message:
         return record.error_message
     return record.error_code or record.state.value
+
+
+async def _publish_task_event(
+    snapshot: SubAgentTaskSnapshot,
+    event_type: AgentEventType,
+    *,
+    content: str = "",
+) -> None:
+    await publish_current_render_event(
+        AgentEvent(
+            event_type,
+            content=content,
+            agent_type="subagent",
+            role_name=snapshot.role_name or snapshot.kind.value,
+            task_id=snapshot.id,
+            sequence=snapshot.sequence,
+        )
+    )

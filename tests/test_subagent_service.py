@@ -119,6 +119,16 @@ class FakeRuntimeFactory:
         return self.runtimes.pop(0)
 
 
+class TaskIdAwareRuntimeFactory:
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.calls = []
+
+    def create(self, launch_request, *, detached, task_id):
+        self.calls.append((launch_request, detached, task_id))
+        return self.runtime
+
+
 class ImmediateTerminalWaiter:
     async def wait(self, *, manager, task_id, timeout_seconds, detach_event):
         for _ in range(50):
@@ -175,6 +185,30 @@ def test_service_returns_inline_result_when_foreground_finishes_before_threshold
         assert response.task.state is SubAgentTaskState.COMPLETED
         assert response.task.result.detail == "inline detail"
         assert inbox.reserve() is None
+
+    asyncio.run(scenario())
+
+
+def test_service_allocates_task_id_before_runtime_creation():
+    async def scenario():
+        runtime = InstantRuntime("inline")
+        factory = TaskIdAwareRuntimeFactory(runtime)
+        cfg = config()
+        inbox = SubAgentNotificationInbox()
+        manager = SubAgentTaskManager(config=cfg, notification_inbox=inbox)
+        service = SubAgentService(
+            config=cfg,
+            runtime_factory=factory,
+            task_manager=manager,
+            foreground_waiter=ImmediateTerminalWaiter(),
+        )
+
+        launch_request = request()
+        response = await service.run(launch_request)
+
+        assert response.inline is True
+        assert response.task.id == "task-000001"
+        assert factory.calls == [(launch_request, False, "task-000001")]
 
     asyncio.run(scenario())
 

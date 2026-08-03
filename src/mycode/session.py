@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from mycode.hook.runtime import NullHookRuntime
 from mycode.permission.models import PermissionMode, RuleSource
 from mycode.permission.service import PermissionService
 from mycode.skill.models import SkillMode, SkillRunContext
+from mycode.subagent.rendering import RenderEventBus, use_render_bus
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,80 @@ class ChatSession:
         ):
             yield event
 
+    async def render(
+        self,
+        user_text: str,
+        *,
+        approval_provider: ApprovalProvider | None = None,
+        initial_skill_scope=None,
+        initial_framework_blocks=(),
+        isolated_depth: int = 0,
+    ):
+        await self.start()
+        bus = RenderEventBus()
+        task: asyncio.Task | None = None
+
+        async def produce_parent() -> None:
+            try:
+                async for event in self._agent.run(
+                    user_text,
+                    **self._agent_run_kwargs(
+                        approval_provider=approval_provider,
+                        initial_skill_scope=initial_skill_scope,
+                        initial_framework_blocks=initial_framework_blocks,
+                        isolated_depth=isolated_depth,
+                    ),
+                ):
+                    await bus.publish(event)
+            finally:
+                await bus.mark_producer_done()
+
+        try:
+            with use_render_bus(bus):
+                task = asyncio.create_task(produce_parent())
+                async for event in bus:
+                    yield event
+                if task is not None:
+                    await task
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    def _agent_run_kwargs(
+        self,
+        *,
+        approval_provider: ApprovalProvider | None,
+        initial_skill_scope,
+        initial_framework_blocks,
+        isolated_depth: int,
+    ) -> dict[str, object]:
+        kwargs: dict[str, object] = {
+            "mode": self._mode,
+            "approval_provider": approval_provider,
+        }
+        optional = {
+            "initial_skill_scope": initial_skill_scope,
+            "initial_framework_blocks": initial_framework_blocks,
+            "isolated_depth": isolated_depth,
+        }
+        try:
+            parameters = inspect.signature(self._agent.run).parameters
+        except (TypeError, ValueError):
+            kwargs.update(optional)
+            return kwargs
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if accepts_kwargs:
+            kwargs.update(optional)
+            return kwargs
+        for name, value in optional.items():
+            if name in parameters:
+                kwargs[name] = value
+        return kwargs
+
     async def send_skill(
         self,
         name: str,
@@ -83,9 +159,8 @@ class ChatSession:
         activation = self._skill_runtime.activate(name, arguments)
         if definition.metadata.mode is SkillMode.SHARED:
             scope = self._skill_runtime.set_current_scope(name)
-            async for event in self._agent.run(
+            async for event in self.render(
                 activation.rendered_instruction,
-                mode=self._mode,
                 approval_provider=approval_provider,
                 initial_skill_scope=scope,
             ):
