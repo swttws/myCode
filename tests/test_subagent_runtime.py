@@ -21,7 +21,7 @@ from mycode.subagent.models import (
     SubAgentTaskState,
 )
 from mycode.subagent.runtime import SubAgentRuntimeFactory
-from mycode.subagent.tooling import TaskToolRuntime
+from mycode.subagent.tooling import TaskToolRegistryFactory, TaskToolRuntime
 from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
 
 
@@ -434,3 +434,32 @@ def test_factory_creates_isolated_runtime_state_for_concurrent_runs(tmp_path):
     assert right_report.usage.input_tokens == 9
     assert "right task" not in "\n".join(message.content for message in left_llm.requests[0])
     assert "left task" not in "\n".join(message.content for message in right_llm.requests[0])
+
+
+def test_factory_uses_task_context_manager_and_cleans_archive_session(tmp_path):
+    llm = ScriptedLLM(
+        [[StreamEvent(StreamEventType.TEXT_DELTA, "done"), StreamEvent(StreamEventType.DONE)]]
+    )
+    runtime = SubAgentRuntimeFactory(
+        config=subagent_config(),
+        llm_config=llm_config(),
+        llm_factory=RecordingLLMFactory({"sonnet-child": [llm]}),
+        catalog=FakeCatalog(role()),
+        parent_tool_registry=ToolRegistry(),
+        task_tool_registry_factory=TaskToolRegistryFactory(
+            workspace_root=tmp_path,
+            home=tmp_path / "home",
+        ),
+        permission_factory=lambda mode: AllowPermission(),
+        hook_runtime_factory=lambda: RecordingHookRuntime(),
+        workspace_root=tmp_path,
+        workspace_environment=f"workspace={tmp_path}",
+    ).create(request(), detached=False)
+    context_manager = runtime._agent_loop._context_manager
+    session_dir = context_manager._store.session_dir
+
+    report = asyncio.run(run_report(runtime))
+
+    assert report.state is SubAgentTaskState.COMPLETED
+    assert context_manager.__class__.__name__ == "ContextManager"
+    assert not session_dir.exists()

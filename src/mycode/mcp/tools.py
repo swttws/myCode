@@ -43,6 +43,14 @@ class MCPToolWrapper:
     def remote_name(self) -> str:
         return self._remote_tool.remote_name
 
+    @property
+    def remote_tool(self) -> RemoteTool:
+        return self._remote_tool
+
+    @property
+    def pool(self) -> MCPServerPool:
+        return self._pool
+
     def should_defer(self) -> bool:
         # 远端 schema 不直接塞入每轮模型上下文，由 tool_search 按需展开以节省 token。
         return True
@@ -79,6 +87,10 @@ class ToolSearch:
     @property
     def definition(self) -> ToolDefinition:
         return self._definition
+
+    @property
+    def pool(self) -> MCPServerPool:
+        return self._pool
 
     def execute(self, arguments: ToolArguments) -> ToolResult:
         wrapper, failure = self._resolve(arguments)

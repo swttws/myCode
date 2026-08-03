@@ -1,13 +1,49 @@
 import asyncio
+import sys
+import types
 from types import MappingProxyType
 
 import pytest
 
+if "httpx" not in sys.modules:
+    fake_httpx = types.ModuleType("httpx")
+
+    class FakeHTTPError(Exception):
+        pass
+
+    class FakeHeaders(dict):
+        pass
+
+    class FakeAsyncClient:
+        is_closed = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class FakeResponse:
+        headers = {}
+
+    class FakeAsyncByteStream:
+        pass
+
+    fake_httpx.HTTPError = FakeHTTPError
+    fake_httpx.Headers = FakeHeaders
+    fake_httpx.AsyncClient = FakeAsyncClient
+    fake_httpx.Response = FakeResponse
+    fake_httpx.AsyncByteStream = FakeAsyncByteStream
+    sys.modules["httpx"] = fake_httpx
+
+from mycode.agent import AgentConfig
 from mycode.compact.archive import ReadCompactArtifactTool
+from mycode.config import LLMConfig
+from mycode.compact.models import CompactConfig
+from mycode.memory import InMemoryConversationMemory
 from mycode.memory.tools import ReadMemoryNoteTool
 from mycode.permission.models import PermissionDecision, PermissionEffect, PermissionMode
 from mycode.permission.service import PermissionService
+from mycode.skill.catalog import SkillCatalog
 from mycode.skill.load_tool import SkillLoadTool
+from mycode.skill.loader import SkillLoader
 from mycode.subagent.context import ParentAgentSnapshotStore
 from mycode.subagent.models import (
     AgentModelTier,
@@ -35,6 +71,17 @@ from mycode.tool import (
     ToolRuntimeScope,
     create_default_tool_registry,
 )
+from tests.skill_test_support import FakeLLM, write_skill
+
+
+class FakeRemoteTool:
+    def __init__(self, *, server_name, remote_name, public_name, description, parameters, kind):
+        self.server_name = server_name
+        self.remote_name = remote_name
+        self.public_name = public_name
+        self.description = description
+        self.parameters = parameters
+        self.kind = kind
 
 
 class FakeNotes:
@@ -43,6 +90,107 @@ class FakeNotes:
 
 class FakeArchiveSession:
     pass
+
+
+class FakeMCPPool:
+    def __init__(self, tools=(), *, available=()):
+        self.tools = tuple(tools)
+        self.server_names = tuple(dict.fromkeys(tool.server_name for tool in self.tools))
+        self.available = set(available)
+        self.ensure_calls = []
+
+    def is_available(self, server_name):
+        return server_name in self.available
+
+    async def ensure_available(self, server_name):
+        self.ensure_calls.append(server_name)
+        self.available.add(server_name)
+        return True
+
+    def has_tool(self, server_name, remote_name):
+        return any(
+            tool.server_name == server_name and tool.remote_name == remote_name
+            for tool in self.tools
+        )
+
+
+class FakeMCPToolWrapper:
+    def __init__(self, remote_tool, pool):
+        self.remote_tool = remote_tool
+        self.pool = pool
+        self._definition = ToolDefinition(
+            name=remote_tool.public_name,
+            description=remote_tool.description,
+            parameters=dict(remote_tool.parameters),
+            kind=remote_tool.kind,
+        )
+
+    @property
+    def definition(self):
+        return self._definition
+
+    @property
+    def server_name(self):
+        return self.remote_tool.server_name
+
+    @property
+    def remote_name(self):
+        return self.remote_tool.remote_name
+
+    def should_defer(self):
+        return True
+
+
+class FakeToolSearch:
+    def __init__(self, registry, pool):
+        self.registry = registry
+        self.pool = pool
+
+    @property
+    def definition(self):
+        return ToolDefinition(
+            name="tool_search",
+            description="Search deferred tools.",
+            parameters={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            kind=ToolKind.READ,
+        )
+
+    async def execute_async(self, arguments):
+        name = arguments.get("name")
+        tool = self.registry.get(name)
+        if tool is None or not self.registry.mark_discovered(name):
+            return ToolResult(ok=False, tool_name="tool_search", content={}, error="not_found")
+        return ToolResult(
+            ok=True,
+            tool_name="tool_search",
+            content={"definition": {"name": tool.definition.name}},
+        )
+
+
+class AllowPermission:
+    async def before_tool(self, call, definition, *, plan_only, round_index):
+        return PermissionDecision(
+            effect=PermissionEffect.ALLOW,
+            reason_code="allow",
+            message_zh="allow",
+            mode=PermissionMode.DEFAULT,
+            display_arguments=MappingProxyType({}),
+        )
+
+    def denied_result(self, call, decision):
+        return ToolResult(
+            ok=False,
+            tool_name=call.name,
+            content={"reason_code": decision.reason_code},
+            error=decision.message_zh,
+        )
+
+    async def after_tool(self, call, result):
+        return result
 
 
 class FakeTaskLocalTool:
@@ -378,3 +526,107 @@ def test_task_tool_registry_reports_missing_task_local_factory(tmp_path):
 
     with pytest.raises(RuntimeError, match="task_local_tool_factory_missing"):
         factory.create(parent_registry)
+
+
+def test_task_tool_registry_rebuilds_load_skill_with_child_skill_runtime(tmp_path):
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    builtin = tmp_path / "builtin"
+    project_skills = workspace / ".mycode" / "skills"
+    for root in (project_skills, home / ".mycode" / "skills", builtin):
+        root.mkdir(parents=True)
+    write_skill(project_skills, "review", allowed_tools=("read_file",))
+
+    parent_registry = create_default_tool_registry(workspace)
+    parent_runtime = object()
+    parent_registry.register(SkillLoadTool(runtime=parent_runtime))
+
+    def skill_catalog_factory(tool_names):
+        return SkillCatalog(
+            loader=SkillLoader(workspace_root=workspace, home=home, builtin_root=builtin),
+            tool_names=tool_names,
+            reserved_slash_names=frozenset(),
+        )
+
+    runtime = TaskToolRegistryFactory(
+        workspace_root=workspace,
+        home=home,
+        skill_catalog_factory=skill_catalog_factory,
+    ).create(
+        parent_registry,
+        llm=FakeLLM(),
+        memory=InMemoryConversationMemory(),
+        llm_config=LLMConfig(
+            protocol="openai_chat",
+            model="model",
+            base_url="https://example.invalid",
+            api_key="key",
+            compact=CompactConfig(context_window_tokens=30_000),
+        ),
+        llm_factory=lambda config: FakeLLM(),
+        permission=AllowPermission(),
+        agent_config=AgentConfig(),
+    )
+
+    child_tool = runtime.registry.get("load_skill")
+
+    assert child_tool is not parent_registry.get("load_skill")
+    result = asyncio.run(child_tool.execute_async({"name": "review"}))
+    assert result.ok is True
+    assert runtime.skill_runtime.is_active("review") is True
+
+
+def test_task_mcp_wrappers_and_tool_search_use_child_registry_discovery(tmp_path):
+    remote = FakeRemoteTool(
+        server_name="files",
+        remote_name="echo",
+        public_name="files__echo",
+        description="Echo remotely.",
+        parameters={"type": "object", "properties": {}, "required": []},
+        kind=ToolKind.READ,
+    )
+    pool = FakeMCPPool((remote,), available={"files"})
+    parent_registry = ToolRegistry([FakeMCPToolWrapper(remote, pool)])
+    parent_registry.register(FakeToolSearch(parent_registry, pool))
+
+    runtime = TaskToolRegistryFactory(workspace_root=tmp_path).create(parent_registry)
+    child_wrapper = runtime.registry.get("files__echo")
+    child_search = runtime.registry.get("tool_search")
+
+    assert child_wrapper is not parent_registry.get("files__echo")
+    assert child_search is not parent_registry.get("tool_search")
+    assert [definition.name for definition in parent_registry.model_definitions()] == ["tool_search"]
+
+    result = asyncio.run(child_search.execute_async({"name": "files__echo"}))
+
+    assert result.ok is True
+    assert [definition.name for definition in runtime.registry.model_definitions()] == [
+        "files__echo",
+        "tool_search",
+    ]
+    assert [definition.name for definition in parent_registry.model_definitions()] == ["tool_search"]
+
+
+def test_task_registry_can_replace_parent_compact_tool_with_child_archive_tool(tmp_path):
+    parent_registry = ToolRegistry([ReadCompactArtifactTool(FakeArchiveSession())])
+    runtime = TaskToolRegistryFactory(workspace_root=tmp_path, home=tmp_path / "home").create(
+        parent_registry,
+        llm=FakeLLM(),
+        memory=InMemoryConversationMemory(),
+        llm_config=LLMConfig(
+            protocol="openai_chat",
+            model="model",
+            base_url="https://example.invalid",
+            api_key="key",
+            compact=CompactConfig(context_window_tokens=30_000),
+        ),
+        llm_factory=lambda config: FakeLLM(),
+        permission=AllowPermission(),
+        agent_config=AgentConfig(),
+    )
+
+    child_tool = runtime.registry.get("read_compact_artifact")
+
+    assert not isinstance(child_tool, ParentOnlyToolAdapter)
+    assert child_tool.definition.runtime_scope is ToolRuntimeScope.TASK_LOCAL
+    assert runtime.context_manager is not None
