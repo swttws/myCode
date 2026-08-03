@@ -1,3 +1,4 @@
+from mycode.worktree.config import WorktreeConfigLoader
 from mycode.worktree.models import (
     CleanupBatchResult,
     GitStatus,
@@ -15,10 +16,12 @@ from mycode.worktree.models import (
     WorktreeProtectionStatus,
     WorktreeRuleType,
 )
+from mycode.worktree.pathing import WorktreePathPolicy
 
 
 __all__ = [
     "CleanupBatchResult",
+    "WorktreeConfigLoader",
     "GitStatus",
     "GitWorktreeEntry",
     "InitializationResult",
@@ -33,4 +36,5 @@ __all__ = [
     "WorktreePhase",
     "WorktreeProtectionStatus",
     "WorktreeRuleType",
+    "WorktreePathPolicy",
 ]

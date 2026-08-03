@@ -73,6 +73,7 @@ class WorktreeInitRule:
 
 @dataclass(frozen=True)
 class WorktreeConfig:
+    version: int = 1
     rules: tuple[WorktreeInitRule, ...] = ()
     git_timeout_seconds: float = 30.0
     cleanup_interval_seconds: float = 3600.0
@@ -81,6 +82,8 @@ class WorktreeConfig:
     digest: str = ""
 
     def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("version must be 1")
         if not isinstance(self.rules, tuple):
             object.__setattr__(self, "rules", tuple(self.rules))
         for rule in self.rules:
