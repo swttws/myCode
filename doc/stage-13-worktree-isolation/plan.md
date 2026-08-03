@@ -31,7 +31,7 @@ Worktree 使用 `.worktrees/<role>/<system-task-token>`，临时分支使用 `my
 | F15 | 生命周期管理器的删除、保留和处置结果 |
 | F16 | 后台清理器、活动任务查询和批量安全过滤 |
 | F17 | 按任务身份和真实路径建立的异步锁注册表 |
-| F18 | 子 Agent 任务快照、任务列表和详情展示 |
+| F18 | 子 Agent 任务快照、父 Agent 工具、后台通知、任务列表和详情展示 |
 
 ## 核心数据结构
 
@@ -521,7 +521,7 @@ class ToolExecutor:
 
 ### 子 Agent 现有模块
 
-`subagent.models` 增加隔离声明和任务工作区状态；`subagent.loader` 解析 frontmatter；`subagent.tasks` 负责预留、绑定、活动登记和处置结果；`subagent.service` 执行两阶段准备；`subagent.runtime` 在 `finally` 路径释放租约；`subagent.tooling` 按工作区构造任务工具；`subagent.context` 注入路径、分支和隔离约束并从目标目录重载项目指令。
+`subagent.models` 增加隔离声明和任务工作区状态；`subagent.loader` 解析 frontmatter；`subagent.tasks` 负责预留、绑定、活动登记和处置结果；`subagent.service` 执行两阶段准备；`subagent.runtime` 在 `finally` 路径释放租约；`subagent.tooling` 按工作区构造任务工具；`subagent.context` 注入路径、分支和隔离约束并从目标目录重载项目指令；`subagent.tool` 和 `subagent.notifications` 把同一组工作区与处置字段传给父 Agent 的 `Agent(action=list/get)` 结果和后台通知。公共入口只转出已定义的隔离类型，不复制领域逻辑。
 
 ### 路径消费者
 
@@ -529,7 +529,7 @@ class ToolExecutor:
 
 ### 启动与展示
 
-`cli.py` 装配仓库身份、配置、路径策略、Git 网关、管理器、协调器和清理器，并在 TUI 生命周期结束时关闭清理器。`slash.builtins` 在现有任务列表和详情中展示隔离模式、绝对路径、临时分支、创建或恢复、初始化结果、删除或保留原因，不增加新命令。`README.md` 与示例文件说明配置和安全语义。
+`cli.py` 装配仓库身份、配置、路径策略、Git 网关、管理器、协调器和清理器，并在 TUI 生命周期结束时关闭清理器。`slash.builtins`、`subagent.tool` 和 `subagent.notifications` 在现有状态出口展示隔离模式、绝对路径、临时分支、创建或恢复、初始化结果、删除或保留原因，不增加新命令或新 Agent action。`README.md` 与示例文件说明配置和安全语义。
 
 ## 模块交互
 
@@ -610,14 +610,18 @@ src/mycode/
 src/mycode/
 ├── agent/loop.py            — 注入 WorkspaceContext，消除 Path.cwd() 依赖
 ├── subagent/
+│   ├── __init__.py          — 导出新增隔离与任务状态类型
 │   ├── models.py            — 角色隔离声明和任务工作区状态
 │   ├── loader.py            — 解析 isolation frontmatter
 │   ├── tasks.py             — 预留身份、绑定租约、活动登记和处置结果
 │   ├── service.py           — 两阶段准备与调度
 │   ├── runtime.py           — 按租约构造并统一释放运行时
 │   ├── tooling.py           — 按工作区构造和过滤工具
-│   └── context.py           — 路径提示与目标项目指令
+│   ├── context.py           — 路径提示与目标项目指令
+│   ├── tool.py              — Agent list/get 工作区状态序列化
+│   └── notifications.py     — 后台通知中的处置结果
 ├── tool/
+│   ├── __init__.py          — 导出工具工作区能力和调用上下文
 │   ├── base.py              — 工具工作区能力和调用上下文
 │   ├── executor.py          — 每次调用显式传播上下文
 │   ├── defaults.py          — 按目标工作区创建默认工具
@@ -641,6 +645,7 @@ README.md                     — 配置、角色声明和生命周期说明
 
 ```text
 tests/
+├── helpers.py
 ├── worktree_helpers.py
 ├── test_workspace_models.py
 ├── test_worktree_models.py
@@ -656,21 +661,39 @@ tests/
 ├── test_subagent_isolation.py
 ├── test_subagent_models.py
 ├── test_subagent_loader.py
+├── test_subagent_notifications.py
 ├── test_subagent_tasks.py
 ├── test_subagent_service.py
 ├── test_subagent_runtime.py
 ├── test_subagent_tooling.py
 ├── test_subagent_context.py
+├── test_subagent_tool.py
+├── test_subagent_agent.py
 ├── test_subagent_e2e.py
+├── test_subagent_session_tui.py
 ├── test_agent_loop.py
+├── test_agent_plan_only.py
+├── test_context_compaction_e2e.py
 ├── test_tool_executor.py
 ├── test_tool_filesystem.py
 ├── test_tool_command.py
+├── test_tool_cache.py
+├── test_tool_registry.py
 ├── test_hook_runtime.py
 ├── test_hook_actions.py
+├── test_hook_agent.py
+├── test_hook_session_cli.py
 ├── test_skill_executor.py
+├── test_skill_agent.py
+├── test_skill_e2e.py
 ├── test_mcp_tools.py
+├── test_memory_instructions.py
+├── test_memory_paths.py
+├── test_permission_e2e.py
+├── test_project_memory_e2e.py
 ├── test_slash_builtins.py
+├── test_slash_snapshots.py
+├── test_e2e_chat.py
 └── test_docs.py
 ```
 
@@ -762,7 +785,7 @@ tests/
 
 - 主 Agent 启动两个隔离角色，验证各自目录、分支、文件、Prompt、项目指令、权限、Hook、Skill 和工具 cwd 相互独立，进程当前目录始终不变。
 - 子 Agent 修改并提交后，验证主工作区不变且任务因未推送提交保留；无变更任务无论成功、失败还是取消都删除 Worktree 和分支。
-- 验证任务列表和详情展示隔离模式、绝对路径、分支、创建或恢复、初始化和处置结果。
+- 验证 slash 任务列表与详情、父 Agent 的 `Agent(action=list/get)` 结果和后台通知都展示隔离模式、绝对路径、分支、创建或恢复、初始化和处置结果。
 - 运行聊天、共享定义式角色、Fork、权限、Hook、Skill、Memory、MCP、上下文压缩、会话恢复、工具和子 Agent 现有回归测试，确认未声明隔离时 schema 和行为不变。
 - 文档测试验证示例配置可解析、README 引用有效且不包含真实凭据。
 
