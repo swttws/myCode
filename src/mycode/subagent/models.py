@@ -230,6 +230,7 @@ class SubAgentNotification:
     summary: str
     summary_truncated: bool
     usage: SubAgentUsage
+    role_name: str | None = None
 
 
 @dataclass(frozen=True)

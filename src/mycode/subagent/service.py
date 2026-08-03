@@ -58,8 +58,17 @@ class SubAgentService:
                 raise RuntimeError("subagent_service_closed")
             if not detached and self._active_task_id is not None:
                 raise RuntimeError("foreground_task_already_active")
-            runtime = self._runtime_factory.create(request, detached=detached)
-            snapshot = await self._task_manager.submit(request, runtime.run)
+            snapshot = await self._task_manager.reserve(request)
+            try:
+                runtime = self._create_runtime(request, detached=detached, task_id=snapshot.id)
+            except Exception as exc:
+                await self._task_manager.fail_reserved(
+                    snapshot.id,
+                    "runtime_factory_error",
+                    str(exc) or exc.__class__.__name__,
+                )
+                raise
+            snapshot = await self._task_manager.start_reserved(snapshot.id, runtime.run)
             if detached:
                 if not snapshot.detached:
                     snapshot = await self._task_manager.detach(snapshot.id)
@@ -84,6 +93,21 @@ class SubAgentService:
                 if self._active_task_id == snapshot.id:
                     self._active_task_id = None
                     self._active_detach_event = None
+
+    def _create_runtime(
+        self,
+        request: SubAgentLaunchRequest,
+        *,
+        detached: bool,
+        task_id: str,
+    ):
+        try:
+            return self._runtime_factory.create(request, detached=detached, task_id=task_id)
+        except TypeError as exc:
+            message = str(exc)
+            if "task_id" not in message and "unexpected keyword" not in message:
+                raise
+            return self._runtime_factory.create(request, detached=detached)
 
     async def detach_active(self) -> SubAgentTaskSnapshot | None:
         async with self._lock:

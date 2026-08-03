@@ -30,6 +30,7 @@ from mycode.slash.models import (
     StatusSection,
 )
 from mycode.slash.status import collect_git_status, collect_mcp_status
+from mycode.subagent.rendering import render_event_message, render_multiline, render_prefix
 
 try:
     from prompt_toolkit.output.win32 import NoConsoleScreenBufferError
@@ -98,7 +99,7 @@ class ChatTUI:
         self._console.print(text, markup=False, style="red" if error else None)
 
     async def send_user_message(self, text: str) -> None:
-        await self._render_stream(self._session.send(text, approval_provider=self._approval_provider))
+        await self._render_stream(self._session_stream(text))
 
     async def execute_skill(self, name: str, arguments: str) -> None:
         await self._render_stream(
@@ -132,6 +133,15 @@ class ChatTUI:
 
     async def memory_status(self):
         return await self._session.memory_status()
+
+    def _session_stream(self, text: str):
+        render = getattr(self._session, "render", None)
+        if callable(render):
+            return render(text, approval_provider=self._approval_provider)
+        send = getattr(self._session, "send", None)
+        if callable(send):
+            return send(text, approval_provider=self._approval_provider)
+        raise RuntimeError("session_stream_unavailable")
 
     async def detach_active_subagent(self):
         detach = getattr(self._session, "detach_active_subagent", None)
@@ -241,54 +251,82 @@ class ChatTUI:
         return f"{self._mode_toolbar()} you> "
 
     async def _render_stream(self, events) -> None:
-        self._console.print("[bold green]assistant>[/bold green] ", end="")
+        assistant_open = False
         async for event in events:
+            if event.type == AgentEventType.USER_MESSAGE:
+                continue
             if event.type == AgentEventType.TEXT_DELTA:
-                self._console.print(event.content, end="")
-            elif event.type == AgentEventType.THINKING_DELTA and self._show_thinking:
-                self._console.print(event.content, style="dim italic", end="")
-            elif event.type == AgentEventType.TOOL_CALL_STARTED and event.tool_call is not None:
-                self._console.print(f"\n[dim]工具请求：{event.tool_call.name}[/dim]", end="")
-            elif event.type == AgentEventType.TOOL_RESULT and event.tool_result is not None:
-                if event.tool_result.ok:
-                    self._console.print(
-                        f"\n[dim]工具已执行：{event.tool_result.tool_name}[/dim]",
-                        end="",
-                    )
-                else:
-                    self._console.print(
-                        f"\n[red]工具失败：{event.tool_result.tool_name} - {event.tool_result.error}[/red]",
-                        end="",
-                    )
-            elif event.type == AgentEventType.ERROR:
-                self._console.print(f"\n[red]错误：{event.content}[/red]")
-            elif event.type == AgentEventType.CANCELLED:
-                self._console.print(f"\n[yellow]已取消：{event.content}[/yellow]")
-            elif event.type == AgentEventType.COMPACTION:
-                self._console.print(
-                    f"\n[dim]{_format_compaction(event.compaction, event.content)}[/dim]",
-                    end="",
+                if not assistant_open:
+                    self._console.print(f"{render_prefix(event)} assistant> ", end="", markup=False)
+                    assistant_open = True
+                self._console.print(event.content, end="", markup=False)
+                continue
+            if event.type == AgentEventType.THINKING_DELTA and self._show_thinking:
+                if not assistant_open:
+                    self._console.print(f"{render_prefix(event)} assistant> ", end="", markup=False)
+                    assistant_open = True
+                self._console.print(event.content, style="dim italic", end="", markup=False)
+                continue
+            if event.type == AgentEventType.FINAL_RESPONSE:
+                if not assistant_open:
+                    self._print_prefixed_message(event, f"assistant> {event.content}")
+                    assistant_open = True
+                continue
+
+            if event.type == AgentEventType.APPROVAL_REQUIRED and event.approval_request is not None:
+                self._print_prefixed_message(
+                    event,
+                    f"等待审批：{event.approval_request.tool_call.name}",
+                    style="yellow",
                 )
-            elif event.type == AgentEventType.APPROVAL_REQUIRED and event.approval_request is not None:
-                self._console.print(
-                    f"\n[yellow]等待审批：{event.approval_request.tool_call.name}[/yellow]",
-                    end="",
+                continue
+            if event.type == AgentEventType.COMPACTION:
+                self._print_prefixed_message(
+                    event,
+                    _format_compaction(event.compaction, event.content),
+                    style="dim",
                 )
+                continue
+
+            message = render_event_message(event)
+            if message is None:
+                continue
+
+            style = None
+            if event.type in {AgentEventType.ERROR, AgentEventType.SUBAGENT_TASK_FAILED}:
+                style = "red"
+            elif event.type in {AgentEventType.CANCELLED, AgentEventType.SUBAGENT_TASK_CANCELLED}:
+                style = "yellow"
+            elif event.type in {
+                AgentEventType.TOOL_CALL_STARTED,
+                AgentEventType.TOOL_RESULT,
+                AgentEventType.SUBAGENT_TASK_QUEUED,
+                AgentEventType.SUBAGENT_TASK_STARTED,
+                AgentEventType.SUBAGENT_TASK_DETACHED,
+                AgentEventType.SUBAGENT_TASK_COMPLETED,
+            }:
+                style = "dim"
+            self._print_prefixed_message(event, message, style=style)
         self._console.print()
 
     async def _render_compaction_stream(self) -> None:
-        self._console.print("[bold green]assistant>[/bold green] ", end="")
         async for event in self._session.compact():
             if event.type == AgentEventType.COMPACTION:
-                self._console.print(
-                    f"\n[dim]{_format_compaction(event.compaction, event.content)}[/dim]",
-                    end="",
+                self._print_prefixed_message(
+                    event,
+                    _format_compaction(event.compaction, event.content),
+                    style="dim",
                 )
             elif event.type == AgentEventType.ERROR:
-                self._console.print(f"\n[red]错误：{event.content}[/red]")
+                self._print_prefixed_message(event, event.content, style="red")
             elif event.type == AgentEventType.CANCELLED:
-                self._console.print(f"\n[yellow]已取消：{event.content}[/yellow]")
+                self._print_prefixed_message(event, event.content, style="yellow")
         self._console.print()
+
+    def _print_prefixed_message(self, event, message: str, *, style: str | None = None) -> None:
+        prefix = render_prefix(event)
+        for line in render_multiline(prefix, message):
+            self._console.print(line, markup=False, style=style)
 
     async def _close_session(self) -> None:
         close = getattr(self._session, "close", None)

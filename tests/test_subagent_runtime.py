@@ -6,6 +6,7 @@ import pytest
 from mycode.config import LLMConfig
 from mycode.compact.models import CompactConfig
 from mycode.hook.models import HookTriggerResult
+from mycode.agent.events import AgentEventType
 from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType, UsageObservation
 from mycode.permission.models import PermissionDecision, PermissionEffect, PermissionMode
 from mycode.subagent.models import (
@@ -316,6 +317,55 @@ def test_runtime_uses_real_agent_loop_for_tool_round_memory_and_hook(tmp_path):
     assert hook.before_tool_calls == ["echo"]
     assert hook.after_tool_calls == ["echo"]
     assert hook.clear_calls == 1
+
+
+def test_runtime_forwards_tool_events_and_task_lifecycle_to_event_sink(tmp_path):
+    tool_call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"}, raw_arguments='{"text":"hi"}')
+    llm = ScriptedLLM(
+        [
+            [
+                StreamEvent(StreamEventType.THINKING_DELTA, "think"),
+                StreamEvent(StreamEventType.TEXT_DELTA, "ignore"),
+                StreamEvent(StreamEventType.TOOL_CALL, tool_call=tool_call),
+                StreamEvent(StreamEventType.DONE, usage=UsageObservation(provider="fake", input_tokens=2)),
+            ],
+            [
+                StreamEvent(StreamEventType.TEXT_DELTA, "final"),
+                StreamEvent(StreamEventType.DONE, usage=UsageObservation(provider="fake", input_tokens=3)),
+            ],
+        ]
+    )
+    sink_events = []
+
+    async def sink(event):
+        sink_events.append(event)
+
+    runtime = make_factory(
+        tmp_path,
+        llm_factory=RecordingLLMFactory({"sonnet-child": [llm]}),
+        catalog=FakeCatalog(role()),
+        parent_registry=ToolRegistry([EchoTool()]),
+    ).create(request(), detached=False)
+
+    async def scenario():
+        report = await runtime.run(asyncio.Event(), event_sink=sink)
+        return report
+
+    report = asyncio.run(scenario())
+
+    assert report.state is SubAgentTaskState.COMPLETED
+    assert [event.type for event in sink_events] == [
+        AgentEventType.SUBAGENT_TASK_STARTED,
+        AgentEventType.TOOL_CALL_STARTED,
+        AgentEventType.TOOL_RESULT,
+        AgentEventType.SUBAGENT_TASK_COMPLETED,
+    ]
+    assert sink_events[1].tool_call is not None
+    assert sink_events[1].tool_call.name == "echo"
+    assert sink_events[2].tool_result is not None
+    assert sink_events[2].tool_result.ok is True
+    assert all(event.agent_type == "subagent" for event in sink_events)
+    assert all(event.type not in {AgentEventType.TEXT_DELTA, AgentEventType.THINKING_DELTA} for event in sink_events)
 
 
 def test_factory_selects_model_and_max_rounds_for_defined_inherit_and_fork(tmp_path):

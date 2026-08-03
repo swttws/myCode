@@ -13,6 +13,7 @@ from mycode.subagent.models import (
     SubAgentUsage,
 )
 from mycode.tui import ChatTUI
+from mycode.tool import ToolCall, ToolResult
 from tests.test_session import FakeAgent, FakePermissions, RecordingMode
 
 
@@ -76,6 +77,72 @@ class StreamingSession:
     async def detach_active_subagent(self):
         self.detach_count += 1
         return task_snapshot()
+
+
+class RenderSession:
+    def __init__(self):
+        self.calls = []
+
+    async def render(self, text, **kwargs):
+        self.calls.append((text, kwargs))
+        call = ToolCall(id="call-1", name="Agent", arguments={}, raw_arguments="{}")
+        child_call = ToolCall(id="call-2", name="find_files", arguments={"pattern": "README"}, raw_arguments='{"pattern":"README"}')
+        yield AgentEvent(
+            AgentEventType.TOOL_CALL_STARTED,
+            content="",
+            tool_call=call,
+            agent_type="parent",
+            sequence=1,
+        )
+        yield AgentEvent(
+            AgentEventType.SUBAGENT_TASK_STARTED,
+            content="任务开始",
+            agent_type="subagent",
+            role_name="explore",
+            task_id="task-000001",
+            sequence=2,
+        )
+        yield AgentEvent(
+            AgentEventType.TOOL_CALL_STARTED,
+            content="",
+            tool_call=child_call,
+            agent_type="subagent",
+            role_name="explore",
+            task_id="task-000001",
+            sequence=3,
+        )
+        yield AgentEvent(
+            AgentEventType.TOOL_RESULT,
+            content="",
+            tool_call=child_call,
+            tool_result=ToolResult(ok=False, tool_name="find_files", content={}, error="文件不存在"),
+            agent_type="subagent",
+            role_name="explore",
+            task_id="task-000001",
+            sequence=4,
+        )
+        yield AgentEvent(
+            AgentEventType.SUBAGENT_TASK_FAILED,
+            content="第一行\n第二行",
+            agent_type="subagent",
+            role_name="explore",
+            task_id="task-000001",
+            sequence=5,
+        )
+        yield AgentEvent(
+            AgentEventType.TOOL_RESULT,
+            content="",
+            tool_call=call,
+            tool_result=ToolResult(ok=True, tool_name="Agent", content={}),
+            agent_type="parent",
+            sequence=6,
+        )
+        yield AgentEvent(
+            AgentEventType.FINAL_RESPONSE,
+            content="已整理子 Agent 的查找结果……",
+            agent_type="parent",
+            sequence=7,
+        )
 
 
 def make_console():
@@ -169,3 +236,25 @@ def test_tui_detach_active_subagent_is_silent_when_no_active_task():
     assert result is None
     assert output == ""
     assert detach_count == 1
+
+
+def test_tui_renders_structured_prefixes_for_parent_and_subagent_events():
+    async def scenario():
+        console, output = make_console()
+        session = RenderSession()
+        tui = ChatTUI(session=session, console=console)
+
+        await tui.send_user_message("hello")
+        return output.getvalue(), session.calls
+
+    output, calls = asyncio.run(scenario())
+
+    assert calls and calls[0][0] == "hello"
+    assert "[父Agent] 工具请求：Agent" in output
+    assert "[子Agent:explore#000001] 任务开始" in output
+    assert "[子Agent:explore#000001] 工具请求：find_files" in output
+    assert "[子Agent:explore#000001] 工具失败：find_files - 文件不存在" in output
+    assert "[子Agent:explore#000001] 第一行" in output
+    assert "[子Agent:explore#000001] 第二行" in output
+    assert "[父Agent] 工具完成：Agent" in output
+    assert "[父Agent] assistant> 已整理子 Agent 的查找结果……" in output

@@ -21,6 +21,12 @@ class AgentEventType(str, Enum):
     APPROVAL_REQUIRED = "approval_required"
     USAGE = "usage"
     COMPACTION = "compaction"
+    SUBAGENT_TASK_QUEUED = "subagent_task_queued"
+    SUBAGENT_TASK_STARTED = "subagent_task_started"
+    SUBAGENT_TASK_DETACHED = "subagent_task_detached"
+    SUBAGENT_TASK_COMPLETED = "subagent_task_completed"
+    SUBAGENT_TASK_FAILED = "subagent_task_failed"
+    SUBAGENT_TASK_CANCELLED = "subagent_task_cancelled"
 
 
 class AgentErrorCode(str, Enum):
@@ -49,3 +55,7 @@ class AgentEvent:
     error_code: AgentErrorCode | None = None
     usage: UsageObservation | None = None
     compaction: CompactReport | None = None
+    agent_type: str = "parent"
+    role_name: str | None = None
+    task_id: str | None = None
+    sequence: int = 0
