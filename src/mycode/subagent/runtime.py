@@ -47,10 +47,12 @@ class SubAgentRuntime:
         model_id: str,
         max_rounds: int,
         max_result_bytes: int,
+        cleanup=None,
     ) -> None:
         self._request = request
         self._agent_loop = agent_loop
         self._max_result_bytes = max_result_bytes
+        self._cleanup = cleanup
         self.model_id = model_id
         self.max_rounds = max_rounds
 
@@ -75,6 +77,8 @@ class SubAgentRuntime:
         finally:
             cancel_task.cancel()
             await asyncio.gather(cancel_task, return_exceptions=True)
+            if self._cleanup is not None:
+                self._cleanup()
 
     async def _consume_events(self) -> SubAgentExecutionReport:
         final_text: str | None = None
@@ -181,9 +185,20 @@ class SubAgentRuntimeFactory:
         role = self._role_for(request)
         model_id = self._model_id(request, role)
         max_rounds = request.parent.max_rounds if request.kind is SubAgentKind.FORK else role.metadata.max_rounds
-        task_runtime = self._task_tool_registry_factory.create(self._parent_tool_registry)
+        memory = InMemoryConversationMemory()
+        for message in self._initial_messages(request, role):
+            memory.append(message)
+        llm = self._llm_factory(replace(self._llm_config, model=model_id))
+        agent_config = AgentConfig(max_rounds=max_rounds)
+        permission_proxy = _DeferredPermission()
+        task_runtime = self._create_task_runtime(
+            memory=memory,
+            llm=llm,
+            agent_config=agent_config,
+            permission=permission_proxy,
+        )
         tool_policy = SubAgentToolPolicy(
-            tool_definitions=tuple(self._parent_tool_registry.definitions()),
+            tool_definitions=tuple(task_runtime.registry.definitions()),
             background_allowed_tools=self._config.background_allowed_tools,
         )
         visible_names = tool_policy.visible_names(
@@ -202,21 +217,23 @@ class SubAgentRuntimeFactory:
             detached=detached,
             permission=self._permission_factory(effective_mode),
         )
-        memory = InMemoryConversationMemory()
-        for message in self._initial_messages(request, role):
-            memory.append(message)
-        llm = self._llm_factory(replace(self._llm_config, model=model_id))
+        permission_proxy.set_target(permission)
+        skill_runtime = (
+            _VisibleToolRuntime(visible_names)
+            if task_runtime.skill_runtime is None
+            else _TaskVisibleSkillRuntime(task_runtime.skill_runtime, visible_names)
+        )
         agent_loop = AgentLoop(
             llm=llm,
             memory=memory,
             tool_executor=task_runtime.executor,
             tool_registry=task_runtime.registry,
             permission=permission,
-            context_manager=_RuntimeContextManager(memory),
-            config=AgentConfig(max_rounds=max_rounds),
+            context_manager=task_runtime.context_manager or _RuntimeContextManager(memory),
+            config=agent_config,
             prompt_builder=_PassthroughPromptBuilder(),
-            skill_runtime=_VisibleToolRuntime(visible_names),
-            hook_runtime=self._hook_runtime_factory(),
+            skill_runtime=skill_runtime,
+            hook_runtime=task_runtime.hook_runtime or self._hook_runtime_factory(),
         )
         return SubAgentRuntime(
             request=request,
@@ -224,7 +241,26 @@ class SubAgentRuntimeFactory:
             model_id=model_id,
             max_rounds=max_rounds,
             max_result_bytes=self._config.max_result_bytes,
+            cleanup=task_runtime.close,
         )
+
+    def _create_task_runtime(self, *, memory, llm, agent_config, permission):
+        try:
+            return self._task_tool_registry_factory.create(
+                self._parent_tool_registry,
+                memory=memory,
+                llm=llm,
+                llm_config=self._llm_config,
+                llm_factory=self._llm_factory,
+                permission=permission,
+                agent_config=agent_config,
+                hook_runtime_factory=self._hook_runtime_factory,
+            )
+        except TypeError as exc:
+            message = str(exc)
+            if "unexpected keyword" not in message and "positional" not in message:
+                raise
+            return self._task_tool_registry_factory.create(self._parent_tool_registry)
 
     def _role_for(self, request: SubAgentLaunchRequest) -> AgentRoleDefinition | None:
         if request.kind is SubAgentKind.FORK:
@@ -366,6 +402,57 @@ class _VisibleToolRuntime:
 
     def clear_current_scope(self) -> None:
         return None
+
+
+class _TaskVisibleSkillRuntime:
+    LOAD_TOOL_NAME = "load_skill"
+
+    def __init__(self, runtime, visible_names: frozenset[str]) -> None:
+        self._runtime = runtime
+        self._visible_names = visible_names
+
+    def __getattr__(self, name):
+        return getattr(self._runtime, name)
+
+    def refresh(self):
+        return self._runtime.refresh()
+
+    def prompt_blocks(self) -> tuple[PromptContextBlock, ...]:
+        if self.LOAD_TOOL_NAME not in self._visible_names and self._runtime.visible_tool_names() is None:
+            return ()
+        return tuple(self._runtime.prompt_blocks())
+
+    def visible_tool_names(self) -> frozenset[str] | None:
+        scoped = self._runtime.visible_tool_names()
+        if scoped is None:
+            return self._visible_names
+        return frozenset(name for name in scoped if name in self._visible_names)
+
+    def allows_tool(self, name: str) -> bool:
+        visible = self.visible_tool_names()
+        return True if visible is None else name in visible
+
+
+class _DeferredPermission:
+    def __init__(self) -> None:
+        self._target = None
+
+    def set_target(self, target) -> None:
+        self._target = target
+
+    def __getattr__(self, name):
+        if self._target is None:
+            raise RuntimeError("task_permission_unbound")
+        return getattr(self._target, name)
+
+    async def before_tool(self, *args, **kwargs):
+        return await self.__getattr__("before_tool")(*args, **kwargs)
+
+    def denied_result(self, *args, **kwargs):
+        return self.__getattr__("denied_result")(*args, **kwargs)
+
+    async def after_tool(self, *args, **kwargs):
+        return await self.__getattr__("after_tool")(*args, **kwargs)
 
 
 def _render_framework_blocks(blocks: tuple[PromptContextBlock, ...]) -> str | None:

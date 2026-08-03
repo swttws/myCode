@@ -261,8 +261,14 @@ class ArchiveTransaction:
 
 
 class ReadCompactArtifactTool:
-    def __init__(self, session: ArchiveSession) -> None:
+    def __init__(
+        self,
+        session: ArchiveSession,
+        *,
+        runtime_scope: ToolRuntimeScope = ToolRuntimeScope.PARENT_ONLY,
+    ) -> None:
         self._session = session
+        self._runtime_scope = runtime_scope
 
     @property
     def definition(self) -> ToolDefinition:
@@ -293,7 +299,7 @@ class ReadCompactArtifactTool:
             },
             kind=ToolKind.READ,
             grant_arguments=(),
-            runtime_scope=ToolRuntimeScope.PARENT_ONLY,
+            runtime_scope=self._runtime_scope,
         )
 
     def execute(self, arguments: ToolArguments) -> ToolResult:

@@ -16,6 +16,7 @@ from mycode.compact.models import (
     ContextTokenStatus,
     PreparedContext,
 )
+from mycode.tool import ToolRuntimeScope
 from mycode.compact.summary import ConversationCompactor, select_recent_messages, summary_input_messages
 from mycode.llm import UsageObservation
 from mycode.memory import ConversationMemory
@@ -132,7 +133,13 @@ class ContextManager:
 
     @property
     def artifact_tool(self) -> ReadCompactArtifactTool:
-        return ReadCompactArtifactTool(self._store)
+        return self.artifact_tool_for_scope(ToolRuntimeScope.PARENT_ONLY)
+
+    def artifact_tool_for_scope(
+        self,
+        runtime_scope: ToolRuntimeScope = ToolRuntimeScope.PARENT_ONLY,
+    ) -> ReadCompactArtifactTool:
+        return ReadCompactArtifactTool(self._store, runtime_scope=runtime_scope)
 
     def estimate_current(self, *, build_request) -> ContextTokenStatus:
         history = tuple(self._memory.messages())

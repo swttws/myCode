@@ -245,6 +245,9 @@ async def _run_application(
             workspace_root=workspace_root,
             permissions=permissions,
             tool_registry=tool_registry,
+            skill_loader=skill_loader,
+            reserved_slash_names=_reserved_slash_names(registry),
+            mcp_pool=pool,
         )
         if subagent_bundle is None:
             return 1
@@ -325,6 +328,9 @@ def _create_subagent_service(
     workspace_root: Path,
     permissions,
     tool_registry,
+    skill_loader,
+    reserved_slash_names: frozenset[str],
+    mcp_pool,
 ):
     subagent_config = getattr(config, "sub_agent", None)
     if subagent_config is None:
@@ -359,7 +365,16 @@ def _create_subagent_service(
         llm_factory=create_llm,
         catalog=catalog,
         parent_tool_registry=tool_registry,
-        task_tool_registry_factory=TaskToolRegistryFactory(workspace_root=workspace_root),
+        task_tool_registry_factory=TaskToolRegistryFactory(
+            workspace_root=workspace_root,
+            home=Path.home(),
+            mcp_pool=mcp_pool,
+            skill_catalog_factory=lambda tool_names: SkillCatalog(
+                loader=skill_loader,
+                tool_names=tool_names,
+                reserved_slash_names=reserved_slash_names,
+            ),
+        ),
         permission_factory=lambda mode: _create_task_permission_interceptor(
             workspace_root,
             mode,
