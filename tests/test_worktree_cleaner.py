@@ -42,7 +42,7 @@ def test_run_batch_filters_invalid_candidates_before_disposal(tmp_path: Path):
         assert result.retained == 0
         assert result.failed == 0
         assert result.has_more is False
-        assert harness.manager.calls == [valid]
+        assert harness.worktree_service.calls == [valid]
         assert tuple(diagnostic.branch_name for diagnostic in result.diagnostics) == (
             None,
             None,
@@ -67,7 +67,7 @@ def test_run_batch_skips_not_expired_and_active_candidates_without_disposal(tmp_
         assert result.deleted == 1
         assert result.skipped == 2
         assert result.failed == 0
-        assert harness.manager.calls == [expired]
+        assert harness.worktree_service.calls == [expired]
         assert harness.active_registry.calls == ["task-000002", "task-000003"]
         assert tuple(diagnostic.code for diagnostic in result.diagnostics) == (
             "worktree_not_expired",
@@ -83,7 +83,7 @@ def test_run_batch_counts_manager_dispositions_and_continues_after_failure(tmp_p
         retained = harness.write_metadata("task-000001")
         failed = harness.write_metadata("task-000002")
         not_scanned = harness.write_metadata("task-000003")
-        harness.manager.results = {
+        harness.worktree_service.results = {
             retained.identity.task_token: WorktreeDispositionResult(
                 disposition=WorktreeDisposition.RETAINED,
                 workspace_root=retained.workspace_root,
@@ -113,7 +113,7 @@ def test_run_batch_counts_manager_dispositions_and_continues_after_failure(tmp_p
         assert result.failed == 1
         assert result.skipped == 0
         assert result.has_more is True
-        assert harness.manager.calls == [retained, failed]
+        assert harness.worktree_service.calls == [retained, failed]
         assert tuple(diagnostic.code for diagnostic in result.diagnostics) == (
             "worktree_retained",
             "git_failed",
@@ -170,7 +170,12 @@ class CleanerHarness:
             scan_batch_size=batch_size,
         )
         self.store = WorktreeMetadataStore(self.path_policy)
-        self.manager = FakeManager()
+        self.worktree_service = FakeWorktreeService(
+            repository_identity=self.repository,
+            path_policy=self.path_policy,
+            config_loader=FixedConfigLoader(self.config),
+            metadata_store=self.store,
+        )
         self.active_registry = FakeActiveRegistry()
         self.cleaner = self.build_cleaner()
 
@@ -180,13 +185,11 @@ class CleanerHarness:
         metadata_store=None,
         sleep=None,
     ) -> WorktreeCleaner:
+        if metadata_store is not None:
+            self.worktree_service.metadata_store = metadata_store
         return WorktreeCleaner(
-            repository_identity=self.repository,
-            path_policy=self.path_policy,
-            config_loader=FixedConfigLoader(self.config),
-            metadata_store=metadata_store or self.store,
-            manager=self.manager,
-            active_registry=self.active_registry,
+            worktree_service=self.worktree_service,
+            is_workspace_active=self.active_registry.is_workspace_active,
             clock=lambda: self.now,
             sleep=sleep,
         )
@@ -271,12 +274,23 @@ class FakeActiveRegistry:
         return identity.task_token in self.active_tokens
 
 
-class FakeManager:
-    def __init__(self) -> None:
+class FakeWorktreeService:
+    def __init__(
+        self,
+        *,
+        repository_identity: RepositoryIdentity,
+        path_policy: WorktreePathPolicy,
+        config_loader: FixedConfigLoader,
+        metadata_store,
+    ) -> None:
+        self.repository_identity = repository_identity
+        self.path_policy = path_policy
+        self.config_loader = config_loader
+        self.metadata_store = metadata_store
         self.calls: list[WorktreeMetadata] = []
         self.results: dict[str, WorktreeDispositionResult | Exception] = {}
 
-    async def inspect_and_dispose(
+    async def release_candidate(
         self,
         metadata: WorktreeMetadata,
         *,

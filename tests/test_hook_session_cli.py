@@ -71,7 +71,7 @@ from mycode.slash import SlashDispatchKind, SlashDispatchResult
 from mycode.skill.models import SkillMode
 from mycode.subagent.models import AgentModelTier, SubAgentConfig
 from mycode.tool import ToolKind
-from mycode.worktree import RepositoryIdentity
+from mycode.workspace import WorkspaceContext, WorkspaceKind
 
 
 async def collect_async(async_iterable):
@@ -345,42 +345,24 @@ def test_run_application_shares_hook_runtime_and_triggers_app_events(
         async def run(self):
             return 0
 
-    class FakeWorktreeConfigLoader:
-        def load(self, repository_root):
-            created["worktree_config_root"] = repository_root
-            return SimpleNamespace(
-                digest="digest",
-                cleanup_interval_seconds=3600.0,
-                expire_after_seconds=604800.0,
-                scan_batch_size=64,
-                git_timeout_seconds=30.0,
-                rules=(),
-            )
-
-    class FakeGitWorktreeGateway:
-        def __init__(self, *, config):
-            created["git_config"] = config
-
-        def identify_repository(self, repository_root):
-            created["identified_repository_root"] = repository_root
-            return RepositoryIdentity(
-                root=repository_root,
-                common_dir=repository_root / ".git",
+    class FakeWorktreeService:
+        def __init__(self, workspace_root):
+            self.shared_workspace = WorkspaceContext(
+                kind=WorkspaceKind.SHARED,
+                root=workspace_root,
+                repository_root=workspace_root,
                 repository_id="repo-123",
+                task_identity=None,
+                branch_name=None,
+                hooks_path=None,
             )
 
-        def validate_ignored_root(self, worktrees_root):
-            created["ignored_worktrees_root"] = worktrees_root
-
-        def capture_head(self, repository_root):
-            return "a" * 40
-
-    class FakeWorktreePathPolicy:
-        def __init__(self, *, repository_root):
-            self.repository_root = repository_root
-
-        def validate_root(self, repository_root):
-            return repository_root / ".worktrees"
+        @classmethod
+        def create(cls, workspace_root):
+            created["worktree_service_root"] = workspace_root
+            service = cls(workspace_root)
+            created["worktree_service"] = service
+            return service
 
     class FakeWorktreeCleaner:
         def __init__(self, **kwargs):
@@ -391,11 +373,6 @@ def test_run_application_shares_hook_runtime_and_triggers_app_events(
 
         async def close(self):
             created.setdefault("cleanup_order", []).append("cleaner")
-
-    class FakeIsolationCoordinator:
-        def __init__(self, **kwargs):
-            created["isolation_coordinator"] = self
-            created["isolation_kwargs"] = kwargs
 
     class FakeSubAgentService:
         def __init__(self, **kwargs):
@@ -420,15 +397,8 @@ def test_run_application_shares_hook_runtime_and_triggers_app_events(
     monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
     monkeypatch.setattr(cli, "ChatSession", FakeChatSession)
     monkeypatch.setattr(cli, "ChatTUI", FakeTUI)
-    monkeypatch.setattr(cli, "WorktreeConfigLoader", FakeWorktreeConfigLoader, raising=False)
-    monkeypatch.setattr(cli, "GitWorktreeGateway", FakeGitWorktreeGateway, raising=False)
-    monkeypatch.setattr(cli, "WorktreePathPolicy", FakeWorktreePathPolicy, raising=False)
-    monkeypatch.setattr(cli, "WorktreeMetadataStore", lambda path_policy: object(), raising=False)
-    monkeypatch.setattr(cli, "WorktreeInitializer", lambda **kwargs: object(), raising=False)
-    monkeypatch.setattr(cli, "WorktreeProtectionInspector", lambda **kwargs: object(), raising=False)
-    monkeypatch.setattr(cli, "WorktreeManager", lambda **kwargs: object(), raising=False)
+    monkeypatch.setattr(cli, "WorktreeService", FakeWorktreeService, raising=False)
     monkeypatch.setattr(cli, "WorktreeCleaner", FakeWorktreeCleaner, raising=False)
-    monkeypatch.setattr(cli, "SubAgentIsolationCoordinator", FakeIsolationCoordinator, raising=False)
     monkeypatch.setattr(cli, "SubAgentService", FakeSubAgentService)
     monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
 
@@ -456,9 +426,10 @@ def test_run_application_shares_hook_runtime_and_triggers_app_events(
     assert created["hook_runtime"].config is hook_config
     assert created["hook_runtime"].path_guard is permissions.path_guard
     assert created["agent_kwargs"]["workspace"].root == tmp_path
-    assert created["isolation_kwargs"]["shared_workspace"].root == tmp_path
-    assert created["subagent_service_kwargs"]["isolation_coordinator"] is created["isolation_coordinator"]
-    assert created["cleaner_kwargs"]["active_registry"] is created["subagent_service_kwargs"]["task_manager"]
+    assert created["agent_kwargs"]["workspace"] is created["worktree_service"].shared_workspace
+    assert created["subagent_service_kwargs"]["worktree_service"] is created["worktree_service"]
+    assert created["cleaner_kwargs"]["worktree_service"] is created["worktree_service"]
+    assert created["cleaner_kwargs"]["is_workspace_active"].__self__ is created["subagent_service_kwargs"]["task_manager"]
     assert created["cleaner_started"] is True
     assert created["cleanup_order"][0] == "cleaner"
     assert [context.event for context in created["hook_runtime"].contexts] == [

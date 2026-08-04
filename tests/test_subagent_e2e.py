@@ -168,8 +168,8 @@ class FakeRuntimeFactory:
         self.runtimes = list(runtimes)
         self.calls = []
 
-    def create(self, launch_request, *, detached):
-        self.calls.append((launch_request, detached))
+    def create(self, launch_request, *, detached, task_id, workspace_lease):
+        self.calls.append((launch_request, detached, task_id, workspace_lease))
         return self.runtimes.pop(0)
 
 

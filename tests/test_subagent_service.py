@@ -5,7 +5,12 @@ import pytest
 
 from mycode.permission.models import PermissionMode
 from mycode.subagent.models import (
+    AgentIsolationMode,
     AgentModelTier,
+    AgentPermissionMode,
+    AgentRoleDefinition,
+    AgentRoleMetadata,
+    AgentRoleSource,
     ParentAgentSnapshot,
     SubAgentConfig,
     SubAgentExecutionReport,
@@ -122,8 +127,13 @@ class FakeRuntimeFactory:
         self.runtimes = list(runtimes)
         self.calls = []
 
-    def create(self, launch_request, *, detached):
-        self.calls.append((launch_request, detached))
+    def role_for(self, launch_request):
+        if launch_request.kind is SubAgentKind.FORK:
+            return None
+        return role(name=launch_request.role_name or "general")
+
+    def create(self, launch_request, *, detached, task_id, workspace_lease):
+        self.calls.append((launch_request, detached, task_id, workspace_lease))
         return self.runtimes.pop(0)
 
 
@@ -132,8 +142,13 @@ class TaskIdAwareRuntimeFactory:
         self.runtime = runtime
         self.calls = []
 
-    def create(self, launch_request, *, detached, task_id):
-        self.calls.append((launch_request, detached, task_id))
+    def role_for(self, launch_request):
+        if launch_request.kind is SubAgentKind.FORK:
+            return None
+        return role(name=launch_request.role_name or "general")
+
+    def create(self, launch_request, *, detached, task_id, workspace_lease):
+        self.calls.append((launch_request, detached, task_id, workspace_lease))
         return self.runtime
 
 
@@ -143,25 +158,30 @@ class WorkspaceAwareRuntimeFactory:
         self.calls = []
 
     def role_for(self, launch_request):
-        return None
+        if launch_request.kind is SubAgentKind.FORK:
+            return None
+        return role(name=launch_request.role_name or "general")
 
     def create(self, launch_request, *, detached, task_id, workspace_lease):
         self.calls.append((launch_request, detached, task_id, workspace_lease))
         return self.runtime
 
 
-class RecordingIsolationCoordinator:
+class RecordingWorktreeService:
     def __init__(self, *, lease=None, error=None):
         self.lease = lease
         self.error = error
         self.prepare_calls = []
         self.release_calls = []
 
-    async def prepare(self, *, request, role, task_id, task_token):
-        self.prepare_calls.append((request, role, task_id, task_token))
+    async def prepare(self, *, role_name, task_id, task_token):
+        self.prepare_calls.append((role_name, task_id, task_token))
         if self.error is not None:
             raise self.error
         return self.lease or shared_lease()
+
+    def shared_lease(self):
+        return shared_lease()
 
     async def release(self, lease):
         self.release_calls.append(lease)
@@ -231,6 +251,29 @@ def shared_lease() -> WorkspaceLease:
     )
 
 
+def role(
+    *,
+    name: str = "general",
+    isolation: AgentIsolationMode = AgentIsolationMode.WORKTREE,
+) -> AgentRoleDefinition:
+    return AgentRoleDefinition(
+        metadata=AgentRoleMetadata(
+            name=name,
+            description="test role",
+            allowed_tools=("*",),
+            denied_tools=("Agent",),
+            model=AgentModelTier.INHERIT,
+            max_rounds=4,
+            permission_mode=AgentPermissionMode.INHERIT,
+            isolation=isolation,
+        ),
+        instruction="test instruction",
+        source=AgentRoleSource.BUILTIN,
+        entry_path=Path("general.md"),
+        revision="rev",
+    )
+
+
 def worktree_lease(task_id: str, task_token: str) -> WorkspaceLease:
     identity = WorkspaceTaskIdentity(
         repository_id="repo-123",
@@ -290,7 +333,7 @@ def test_service_allocates_task_id_before_runtime_creation():
 
         assert response.inline is True
         assert response.task.id == "task-000001"
-        assert factory.calls == [(launch_request, False, "task-000001")]
+        assert factory.calls == [(launch_request, False, "task-000001", None)]
 
     asyncio.run(scenario())
 
@@ -305,20 +348,20 @@ def test_service_prepares_binds_workspace_before_runtime_creation():
             notification_inbox=SubAgentNotificationInbox(),
         )
         lease = worktree_lease("task-000001", "task-000001")
-        coordinator = RecordingIsolationCoordinator(lease=lease)
+        worktree_service = RecordingWorktreeService(lease=lease)
         service = SubAgentService(
             config=cfg,
             runtime_factory=factory,
             task_manager=manager,
             foreground_waiter=ImmediateTerminalWaiter(),
-            isolation_coordinator=coordinator,
+            worktree_service=worktree_service,
         )
 
         launch_request = request()
         response = await service.run(launch_request)
 
         assert response.inline is True
-        assert coordinator.prepare_calls == [(launch_request, None, "task-000001", "task-000001")]
+        assert worktree_service.prepare_calls == [("general", "task-000001", "task-000001")]
         assert factory.calls == [(launch_request, False, "task-000001", lease)]
         snapshot = manager.get("task-000001")
         assert snapshot.workspace_root == lease.context.root
@@ -336,13 +379,13 @@ def test_service_marks_reserved_task_failed_when_workspace_prepare_fails():
             config=cfg,
             notification_inbox=SubAgentNotificationInbox(),
         )
-        coordinator = RecordingIsolationCoordinator(error=RuntimeError("worktree boom"))
+        worktree_service = RecordingWorktreeService(error=RuntimeError("worktree boom"))
         service = SubAgentService(
             config=cfg,
             runtime_factory=factory,
             task_manager=manager,
             foreground_waiter=ImmediateTerminalWaiter(),
-            isolation_coordinator=coordinator,
+            worktree_service=worktree_service,
         )
 
         with pytest.raises(RuntimeError, match="worktree boom"):

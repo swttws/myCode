@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Protocol
 
 from mycode.workspace import WorkspaceTaskIdentity
+from mycode.worktree.git import GitWorktreeGateway
 from mycode.worktree.models import (
     InitializationResult,
     WorktreeConfig,
@@ -15,12 +15,8 @@ from mycode.worktree.models import (
 from mycode.worktree.pathing import WorktreePathPolicy
 
 
-class IgnoreValidator(Protocol):
-    def validate_ignored_root(self, path: Path) -> None: ...
-
-
 class WorktreeInitializer:
-    def __init__(self, *, path_policy: WorktreePathPolicy, git: IgnoreValidator) -> None:
+    def __init__(self, *, path_policy: WorktreePathPolicy, git: GitWorktreeGateway) -> None:
         if not isinstance(path_policy, WorktreePathPolicy):
             raise ValueError("path_policy must be a WorktreePathPolicy")
         self._path_policy = path_policy

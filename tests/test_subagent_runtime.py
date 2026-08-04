@@ -194,7 +194,7 @@ class FinalEventAgentLoop:
         yield AgentEvent(AgentEventType.FINAL_RESPONSE, content="done", round_index=1)
 
 
-class RecordingIsolationCoordinator:
+class RecordingWorktreeService:
     def __init__(self, result):
         self.result = result
         self.released = []
@@ -346,7 +346,7 @@ def test_runtime_releases_worktree_lease_and_returns_disposition(tmp_path):
         branch_name=lease.context.branch_name,
         reasons=("未推送提交",),
     )
-    coordinator = RecordingIsolationCoordinator(disposition)
+    worktree_service = RecordingWorktreeService(disposition)
     runtime = SubAgentRuntime(
         request=request(),
         agent_loop=FinalEventAgentLoop(),
@@ -355,14 +355,14 @@ def test_runtime_releases_worktree_lease_and_returns_disposition(tmp_path):
         max_result_bytes=1024,
         task_id="task-000001",
         workspace_lease=lease,
-        isolation_coordinator=coordinator,
+        worktree_service=worktree_service,
     )
 
     report = asyncio.run(run_report(runtime))
 
     assert report.state is SubAgentTaskState.COMPLETED
     assert report.disposition == disposition
-    assert coordinator.released == [lease]
+    assert worktree_service.released == [lease]
 
 
 def test_runtime_uses_real_agent_loop_for_tool_round_memory_and_hook(tmp_path):

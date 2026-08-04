@@ -39,6 +39,7 @@ from mycode.subagent.rendering import publish_current_render_event
 from mycode.subagent.tooling import SubAgentPermissionInterceptor, SubAgentToolPolicy
 from mycode.tool import ToolRegistry
 from mycode.workspace import WorkspaceContext, WorkspaceKind, WorkspaceLease
+from mycode.worktree.service import WorktreeService
 
 
 class SubAgentRuntime:
@@ -52,7 +53,7 @@ class SubAgentRuntime:
         max_result_bytes: int,
         task_id: str | None = None,
         workspace_lease: WorkspaceLease | None = None,
-        isolation_coordinator=None,
+        worktree_service: WorktreeService | None = None,
         cleanup=None,
     ) -> None:
         self._request = request
@@ -60,7 +61,7 @@ class SubAgentRuntime:
         self._max_result_bytes = max_result_bytes
         self._cleanup = cleanup
         self._workspace_lease = workspace_lease
-        self._isolation_coordinator = isolation_coordinator
+        self._worktree_service = worktree_service
         self.model_id = model_id
         self.max_rounds = max_rounds
         self._task_id = task_id
@@ -102,10 +103,10 @@ class SubAgentRuntime:
         self,
         report: SubAgentExecutionReport,
     ) -> SubAgentExecutionReport:
-        if self._workspace_lease is None or self._isolation_coordinator is None:
+        if self._workspace_lease is None or self._worktree_service is None:
             return report
         try:
-            disposition = await self._isolation_coordinator.release(self._workspace_lease)
+            disposition = await self._worktree_service.release(self._workspace_lease)
         except Exception as exc:
             return _failed_report(
                 "workspace_release_error",
@@ -385,7 +386,7 @@ class SubAgentRuntimeFactory:
         workspace_environment: str,
         project_instructions: Sequence[str] = (),
         hook_runtime_factory: Callable[[], object] | None = None,
-        isolation_coordinator=None,
+        worktree_service: WorktreeService | None = None,
     ) -> None:
         self._config = config
         self._llm_config = llm_config
@@ -398,7 +399,7 @@ class SubAgentRuntimeFactory:
         self._workspace_environment = workspace_environment
         self._project_instructions = tuple(project_instructions)
         self._hook_runtime_factory = hook_runtime_factory or NullHookRuntime
-        self._isolation_coordinator = isolation_coordinator
+        self._worktree_service = worktree_service
 
     def create(
         self,
@@ -476,7 +477,7 @@ class SubAgentRuntimeFactory:
             max_result_bytes=self._config.max_result_bytes,
             task_id=task_id,
             workspace_lease=workspace_lease,
-            isolation_coordinator=self._isolation_coordinator,
+            worktree_service=self._worktree_service,
             cleanup=task_runtime.close,
         )
 
