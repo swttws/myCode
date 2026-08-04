@@ -1,6 +1,8 @@
 import sys
 
+from mycode.tool import ToolInvocationContext
 from mycode.tool.command import RunCommandTool
+from tests.helpers import shared_workspace, worktree_workspace
 
 
 def _python_command(code: str) -> str:
@@ -50,6 +52,48 @@ def test_run_command_tool_runs_in_workspace_root(tmp_path):
 
     assert result.ok is True
     assert result.content["stdout"].strip() == str(tmp_path)
+
+
+def test_run_command_tool_rejects_mismatched_invocation_workspace(tmp_path):
+    workspace_a = tmp_path / "a"
+    workspace_b = tmp_path / "b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    tool = RunCommandTool(workspace_a)
+    context = ToolInvocationContext(workspace=shared_workspace(workspace_b))
+
+    result = tool.execute({"command": _python_command("print('nope')")}, context)
+
+    assert result.ok is False
+    assert "调用工作区" in result.error
+
+
+def test_run_command_tool_applies_worktree_hooks_path_env(tmp_path):
+    hooks_path = tmp_path / ".git-hooks"
+    hooks_path.mkdir()
+    tool = RunCommandTool(tmp_path)
+    context = ToolInvocationContext(
+        workspace=worktree_workspace(tmp_path, hooks_path=hooks_path)
+    )
+
+    result = tool.execute(
+        {
+            "command": _python_command(
+                "import os; "
+                "print(os.environ.get('GIT_CONFIG_COUNT')); "
+                "print(os.environ.get('GIT_CONFIG_KEY_0')); "
+                "print(os.environ.get('GIT_CONFIG_VALUE_0'))"
+            )
+        },
+        context,
+    )
+
+    assert result.ok is True
+    assert result.content["stdout"].splitlines() == [
+        "1",
+        "core.hooksPath",
+        str(hooks_path),
+    ]
 
 
 def test_run_command_tool_defines_required_schema_fields(tmp_path):

@@ -126,6 +126,9 @@ class SubAgentNotificationInbox:
                 f"{_identity_label(notification)} ({notification.task_id}) {_state_zh(notification.state)}："
                 f"{notification.summary}；usage={_usage_text(notification)}"
             )
+        first_notification_line = len(lines) - len(notifications)
+        for index, notification in enumerate(notifications, start=first_notification_line):
+            lines[index] += _workspace_text(notification)
         content = "\n".join(lines)
         if len(content.encode("utf-8")) > self._max_block_bytes:
             content, _truncated = truncate_utf8_bytes(content, self._max_block_bytes)
@@ -166,3 +169,44 @@ def _identity_label(notification: SubAgentNotification) -> str:
     role_name = notification.role_name or "fork"
     suffix = notification.task_id.rsplit("-", 1)[-1] if "-" in notification.task_id else notification.task_id
     return f"{role_name}#{suffix}"
+
+
+def _workspace_text(notification: SubAgentNotification) -> str:
+    if (
+        notification.isolation.value == "shared"
+        and notification.workspace_root is None
+        and notification.branch_name is None
+        and notification.workspace_preparation is None
+        and not notification.initialized_rules
+        and notification.disposition is None
+    ):
+        return ""
+
+    parts = [
+        f"isolation={notification.isolation.value}",
+        f"workspace={_optional_path(notification.workspace_root)}",
+        f"branch={_optional_text(notification.branch_name)}",
+        "preparation="
+        + (
+            notification.workspace_preparation.value
+            if notification.workspace_preparation is not None
+            else "未知"
+        ),
+        "rules=" + _list_text(notification.initialized_rules),
+    ]
+    if notification.disposition is not None:
+        parts.append(f"disposition={notification.disposition.disposition.value}")
+        parts.append("reasons=" + _list_text(notification.disposition.reasons))
+    return "；" + ", ".join(parts)
+
+
+def _optional_path(value) -> str:
+    return "未知" if value is None else str(value)
+
+
+def _optional_text(value: str | None) -> str:
+    return "未知" if value is None else value
+
+
+def _list_text(values: tuple[str, ...]) -> str:
+    return ", ".join(values) if values else "无"

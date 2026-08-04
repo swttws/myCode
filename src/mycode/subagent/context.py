@@ -9,6 +9,7 @@ from mycode.permission.models import PermissionMode
 from mycode.prompt.models import PromptBuildResult
 from mycode.subagent.models import AgentRoleDefinition, ParentAgentSnapshot
 from mycode.tool import ToolDefinition
+from mycode.workspace import WorkspaceContext, WorkspaceKind
 
 
 @dataclass(frozen=True)
@@ -52,10 +53,16 @@ def build_defined_agent_messages(
     *,
     role: AgentRoleDefinition,
     task: str,
-    workspace_environment: str,
+    workspace_environment: str | None = None,
+    workspace_context: WorkspaceContext | None = None,
     project_instructions: tuple[str, ...] = (),
 ) -> tuple[ChatMessage, ...]:
     instructions = "\n\n".join(project_instructions) if project_instructions else "无项目指令。"
+    workspace_text = (
+        _render_workspace_context(workspace_context)
+        if workspace_context is not None
+        else (workspace_environment or "未知工作区。")
+    )
     return (
         ChatMessage(
             role="system",
@@ -66,7 +73,7 @@ def build_defined_agent_messages(
         ),
         ChatMessage(
             role="system",
-            content=f"工作区环境：\n{workspace_environment}",
+            content=f"工作区环境：\n{workspace_text}",
         ),
         ChatMessage(
             role="system",
@@ -80,6 +87,38 @@ def build_defined_agent_messages(
             role="user",
             content=f"本次子 Agent 任务：\n{task}",
         ),
+    )
+
+
+def _render_workspace_context(workspace: WorkspaceContext) -> str:
+    if workspace.kind is WorkspaceKind.WORKTREE:
+        identity = workspace.task_identity
+        lines = [
+            "模式：隔离 Worktree",
+            f"工作区根目录：{workspace.root}",
+            f"仓库根目录：{workspace.repository_root}",
+            f"仓库身份：{workspace.repository_id}",
+            f"临时分支：{workspace.branch_name or '未知'}",
+        ]
+        if identity is not None:
+            lines.extend(
+                [
+                    f"任务 ID：{identity.task_id}",
+                    f"任务路径：{identity.relative_name}",
+                    f"基线提交：{identity.base_commit}",
+                ]
+            )
+        if workspace.hooks_path is not None:
+            lines.append(f"Hooks 路径：{workspace.hooks_path}")
+        return "\n".join(lines)
+
+    return "\n".join(
+        [
+            "模式：共享工作区",
+            f"工作区根目录：{workspace.root}",
+            f"仓库根目录：{workspace.repository_root}",
+            f"仓库身份：{workspace.repository_id}",
+        ]
     )
 
 
@@ -113,5 +152,6 @@ def _freeze_tool_definition(definition: ToolDefinition) -> ToolDefinition:
         grant_arguments=tuple(definition.grant_arguments),
         parallel_safe=definition.parallel_safe,
         runtime_scope=definition.runtime_scope,
+        workspace_scope=definition.workspace_scope,
         execution_timeout_seconds=definition.execution_timeout_seconds,
     )

@@ -6,6 +6,7 @@ from mycode import cli
 from mycode.llm import BaseLLM, ChatMessage, MessageOrigin, StreamEvent, StreamEventType
 from mycode.tui import ChatTUI
 from mycode.tool import ToolCall
+from tests.worktree_helpers import create_cli_git_repository
 
 
 class ScriptedLLM(BaseLLM):
@@ -68,6 +69,13 @@ def patch_tui(monkeypatch, inputs, output, home):
     monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
 
 
+def prepare_cli_workspace(tmp_path, monkeypatch):
+    repository = create_cli_git_repository(tmp_path)
+    monkeypatch.chdir(repository.root)
+    monkeypatch.setattr(cli.Path, "cwd", staticmethod(lambda: repository.root))
+    return repository.root
+
+
 def conversation_messages(request):
     return [message for message in request if message.origin is MessageOrigin.CONVERSATION]
 
@@ -81,7 +89,8 @@ def main_requests(llm):
 
 
 def test_e2e_cli_tui_session_memory_streams_and_sends_previous_context(tmp_path, monkeypatch):
-    config_path = tmp_path / "mycode.yaml"
+    workspace_root = prepare_cli_workspace(tmp_path, monkeypatch)
+    config_path = workspace_root / "mycode.yaml"
     write_config(config_path)
     output = StringIO()
     inputs = iter(["hello", "second", "/exit"])
@@ -110,7 +119,8 @@ def test_e2e_cli_tui_session_memory_streams_and_sends_previous_context(tmp_path,
 
 
 def test_e2e_clear_removes_previous_context_before_next_request(tmp_path, monkeypatch):
-    config_path = tmp_path / "mycode.yaml"
+    workspace_root = prepare_cli_workspace(tmp_path, monkeypatch)
+    config_path = workspace_root / "mycode.yaml"
     write_config(config_path)
     output = StringIO()
     inputs = iter(["hello", "/clear", "after clear", "/exit"])
@@ -133,10 +143,10 @@ def test_e2e_clear_removes_previous_context_before_next_request(tmp_path, monkey
 
 
 def test_e2e_tool_call_result_is_stored_for_next_request(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    config_path = tmp_path / "mycode.yaml"
+    workspace_root = prepare_cli_workspace(tmp_path, monkeypatch)
+    config_path = workspace_root / "mycode.yaml"
     write_config(config_path)
-    (tmp_path / "note.txt").write_text("tool text", encoding="utf-8")
+    (workspace_root / "note.txt").write_text("tool text", encoding="utf-8")
     output = StringIO()
     inputs = iter(["read note", "/exit"])
     llm = ScriptedLLM(
@@ -179,10 +189,10 @@ def test_e2e_tool_call_result_is_stored_for_next_request(tmp_path, monkeypatch):
 
 
 def test_e2e_failed_edit_tool_call_returns_structured_error_and_continues(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    config_path = tmp_path / "mycode.yaml"
+    workspace_root = prepare_cli_workspace(tmp_path, monkeypatch)
+    config_path = workspace_root / "mycode.yaml"
     write_config(config_path)
-    (tmp_path / "note.txt").write_text("same\nsame\n", encoding="utf-8")
+    (workspace_root / "note.txt").write_text("same\nsame\n", encoding="utf-8")
     output = StringIO()
     inputs = iter(["edit note", "o", "/exit"])
     llm = ScriptedLLM(
@@ -216,15 +226,15 @@ def test_e2e_failed_edit_tool_call_returns_structured_error_and_continues(tmp_pa
     assert "工具失败" in text
     assert "expected exactly one match, found 2" in text
     assert "still here" in text
-    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "same\nsame\n"
+    assert (workspace_root / "note.txt").read_text(encoding="utf-8") == "same\nsame\n"
     assert len(main_requests(llm)) == 2
 
 
 def test_e2e_next_turn_sends_previous_tool_history_to_llm(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    config_path = tmp_path / "mycode.yaml"
+    workspace_root = prepare_cli_workspace(tmp_path, monkeypatch)
+    config_path = workspace_root / "mycode.yaml"
     write_config(config_path)
-    (tmp_path / "note.txt").write_text("tool text", encoding="utf-8")
+    (workspace_root / "note.txt").write_text("tool text", encoding="utf-8")
     output = StringIO()
     inputs = iter(["read note", "summarize result", "/exit"])
     llm = ScriptedLLM(
@@ -271,10 +281,10 @@ def test_e2e_next_turn_sends_previous_tool_history_to_llm(tmp_path, monkeypatch)
 
 
 def test_e2e_clear_removes_tool_history_before_next_request(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    config_path = tmp_path / "mycode.yaml"
+    workspace_root = prepare_cli_workspace(tmp_path, monkeypatch)
+    config_path = workspace_root / "mycode.yaml"
     write_config(config_path)
-    (tmp_path / "note.txt").write_text("tool text", encoding="utf-8")
+    (workspace_root / "note.txt").write_text("tool text", encoding="utf-8")
     output = StringIO()
     inputs = iter(["read note", "/clear", "after clear", "/exit"])
     llm = ScriptedLLM(

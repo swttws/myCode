@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,12 +51,39 @@ from mycode.subagent.runtime import SubAgentRuntimeFactory
 from mycode.subagent.service import SubAgentService
 from mycode.subagent.tasks import SubAgentTaskManager
 from mycode.subagent.tool import AgentTool
+from mycode.subagent.isolation import SubAgentIsolationCoordinator
 from mycode.subagent.tooling import TaskToolRegistryFactory, create_task_permission_service
 from mycode.tool import ToolExecutor, create_default_tool_registry
 from mycode.tui import ChatTUI
+from mycode.workspace import WorkspaceContext, WorkspaceKind
+from mycode.worktree import (
+    GitWorktreeGateway,
+    RepositoryIdentity,
+    WorktreeCleaner,
+    WorktreeConfig,
+    WorktreeConfigLoader,
+    WorktreeError,
+    WorktreeInitializer,
+    WorktreeManager,
+    WorktreeMetadataStore,
+    WorktreePathPolicy,
+    WorktreeProtectionInspector,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _WorktreeComponents:
+    shared_workspace: WorkspaceContext
+    repository_identity: RepositoryIdentity
+    config_loader: WorktreeConfigLoader
+    path_policy: WorktreePathPolicy
+    git: GitWorktreeGateway
+    metadata_store: WorktreeMetadataStore
+    manager: WorktreeManager
+    isolation_coordinator: SubAgentIsolationCoordinator
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -155,8 +183,16 @@ async def _run_application(
     context_manager = None
     project_memory = None
     session = None
+    worktree_cleaner = None
     try:
         memory = InMemoryConversationMemory()
+        try:
+            worktree_components = _create_worktree_components(workspace_root)
+        except (OSError, RuntimeError, ValueError, WorktreeError) as exc:
+            logger.error("myCode Worktree 配置错误：%s", exc)
+            print(f"myCode Worktree 配置错误：{exc}", file=sys.stderr)
+            return 1
+        shared_workspace = worktree_components.shared_workspace
         hook_runtime = HookRuntime(
             config=hook_config,
             workspace_root=workspace_root,
@@ -223,7 +259,7 @@ async def _run_application(
             tool_executor=tool_executor,
             permission=permission_interceptor,
             agent_config=agent_config,
-            workspace_root=workspace_root,
+            workspace=shared_workspace,
         )
         tool_registry.register(SkillLoadTool(runtime=skill_runtime, executor=skill_executor))
         try:
@@ -248,10 +284,12 @@ async def _run_application(
             skill_loader=skill_loader,
             reserved_slash_names=_reserved_slash_names(registry),
             mcp_pool=pool,
+            worktree_components=worktree_components,
         )
         if subagent_bundle is None:
             return 1
-        snapshot_store, notification_inbox, subagent_service = subagent_bundle
+        snapshot_store, notification_inbox, subagent_service, worktree_cleaner = subagent_bundle
+        await worktree_cleaner.start()
         tool_registry.register(
             AgentTool(
                 service=subagent_service,
@@ -273,6 +311,7 @@ async def _run_application(
             parent_snapshot_store=snapshot_store,
             notification_inbox=notification_inbox,
             main_model_id=config.model,
+            workspace=shared_workspace,
             permission_mode_provider=getattr(
                 permissions,
                 "effective_mode",
@@ -300,18 +339,22 @@ async def _run_application(
         return await tui.run()
     finally:
         try:
-            if session is not None:
-                await session.close()
+            if worktree_cleaner is not None:
+                await worktree_cleaner.close()
         finally:
             try:
-                if project_memory is not None:
-                    await project_memory.close()
+                if session is not None:
+                    await session.close()
             finally:
                 try:
-                    if context_manager is not None:
-                        context_manager.close()
+                    if project_memory is not None:
+                        await project_memory.close()
                 finally:
-                    await pool.close()
+                    try:
+                        if context_manager is not None:
+                            context_manager.close()
+                    finally:
+                        await pool.close()
 
 
 def _builtin_skill_root() -> Path:
@@ -320,6 +363,54 @@ def _builtin_skill_root() -> Path:
 
 def _builtin_subagent_root() -> Path:
     return Path(__file__).resolve().parent / "subagent" / "builtins"
+
+
+def _create_worktree_components(workspace_root: Path) -> _WorktreeComponents:
+    workspace_root = Path(workspace_root).resolve()
+    bootstrap_git = GitWorktreeGateway(config=WorktreeConfig(digest="bootstrap"))
+    repository_identity = bootstrap_git.identify_repository(workspace_root)
+    config_loader = WorktreeConfigLoader()
+    worktree_config = config_loader.load(repository_identity.root)
+    git = GitWorktreeGateway(config=worktree_config)
+    path_policy = WorktreePathPolicy(repository_root=repository_identity.root)
+    worktrees_root = path_policy.validate_root(repository_identity.root)
+    git.validate_ignored_root(worktrees_root)
+    metadata_store = WorktreeMetadataStore(path_policy)
+    initializer = WorktreeInitializer(path_policy=path_policy, git=git)
+    protection_inspector = WorktreeProtectionInspector(git=git)
+    manager = WorktreeManager(
+        path_policy=path_policy,
+        config_loader=config_loader,
+        git=git,
+        metadata_store=metadata_store,
+        initializer=initializer,
+        protection_inspector=protection_inspector,
+    )
+    shared_workspace = WorkspaceContext(
+        kind=WorkspaceKind.SHARED,
+        root=workspace_root,
+        repository_root=repository_identity.root,
+        repository_id=repository_identity.repository_id,
+        task_identity=None,
+        branch_name=None,
+        hooks_path=None,
+    )
+    isolation_coordinator = SubAgentIsolationCoordinator(
+        shared_workspace=shared_workspace,
+        worktree_manager=manager,
+        git=git,
+        path_policy=path_policy,
+    )
+    return _WorktreeComponents(
+        shared_workspace=shared_workspace,
+        repository_identity=repository_identity,
+        config_loader=config_loader,
+        path_policy=path_policy,
+        git=git,
+        metadata_store=metadata_store,
+        manager=manager,
+        isolation_coordinator=isolation_coordinator,
+    )
 
 
 def _create_subagent_service(
@@ -331,6 +422,7 @@ def _create_subagent_service(
     skill_loader,
     reserved_slash_names: frozenset[str],
     mcp_pool,
+    worktree_components: _WorktreeComponents,
 ):
     subagent_config = getattr(config, "sub_agent", None)
     if subagent_config is None:
@@ -369,8 +461,12 @@ def _create_subagent_service(
             workspace_root=workspace_root,
             home=Path.home(),
             mcp_pool=mcp_pool,
-            skill_catalog_factory=lambda tool_names: SkillCatalog(
-                loader=skill_loader,
+            skill_catalog_factory=lambda tool_names, workspace_root: SkillCatalog(
+                loader=SkillLoader(
+                    workspace_root=workspace_root,
+                    home=Path.home(),
+                    builtin_root=_builtin_skill_root(),
+                ),
                 tool_names=tool_names,
                 reserved_slash_names=reserved_slash_names,
             ),
@@ -382,6 +478,7 @@ def _create_subagent_service(
         workspace_root=workspace_root,
         workspace_environment=f"workspace={workspace_root}",
         project_instructions=(),
+        isolation_coordinator=worktree_components.isolation_coordinator,
     )
     task_manager = SubAgentTaskManager(
         config=subagent_config,
@@ -391,8 +488,17 @@ def _create_subagent_service(
         config=subagent_config,
         runtime_factory=runtime_factory,
         task_manager=task_manager,
+        isolation_coordinator=worktree_components.isolation_coordinator,
     )
-    return snapshot_store, notification_inbox, service
+    cleaner = WorktreeCleaner(
+        repository_identity=worktree_components.repository_identity,
+        path_policy=worktree_components.path_policy,
+        config_loader=worktree_components.config_loader,
+        metadata_store=worktree_components.metadata_store,
+        manager=worktree_components.manager,
+        active_registry=task_manager,
+    )
+    return snapshot_store, notification_inbox, service, cleaner
 
 
 def _create_task_permission_interceptor(workspace_root: Path, mode: PermissionMode):

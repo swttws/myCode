@@ -192,7 +192,7 @@ def _agent_parameters() -> dict[str, Any]:
 
 
 def _snapshot_to_dict(snapshot: SubAgentTaskSnapshot) -> dict[str, Any]:
-    return {
+    payload = {
         "id": snapshot.id,
         "sequence": snapshot.sequence,
         "kind": snapshot.kind.value,
@@ -214,10 +214,12 @@ def _snapshot_to_dict(snapshot: SubAgentTaskSnapshot) -> dict[str, Any]:
         "error_message": snapshot.error_message,
         "usage": _usage_to_dict(snapshot.usage),
     }
+    payload.update(_workspace_to_dict(snapshot))
+    return payload
 
 
 def _summary_to_dict(summary: SubAgentTaskSummary) -> dict[str, Any]:
-    return {
+    payload = {
         "id": summary.id,
         "sequence": summary.sequence,
         "kind": summary.kind.value,
@@ -227,6 +229,35 @@ def _summary_to_dict(summary: SubAgentTaskSummary) -> dict[str, Any]:
         "rounds": summary.rounds,
         "error_code": summary.error_code,
         "usage": _usage_to_dict(summary.usage),
+    }
+    payload.update(_workspace_to_dict(summary))
+    return payload
+
+
+def _workspace_to_dict(value: SubAgentTaskSnapshot | SubAgentTaskSummary) -> dict[str, Any]:
+    workspace_root = value.workspace_root
+    return {
+        "isolation": value.isolation.value,
+        "workspace_root": str(workspace_root) if workspace_root is not None else None,
+        "branch_name": value.branch_name,
+        "workspace_preparation": (
+            value.workspace_preparation.value
+            if value.workspace_preparation is not None
+            else None
+        ),
+        "initialized_rules": tuple(value.initialized_rules),
+        "disposition": _disposition_to_dict(value.disposition),
+    }
+
+
+def _disposition_to_dict(disposition) -> dict[str, Any] | None:
+    if disposition is None:
+        return None
+    return {
+        "disposition": disposition.disposition.value,
+        "workspace_root": str(disposition.workspace_root),
+        "branch_name": disposition.branch_name,
+        "reasons": tuple(disposition.reasons),
     }
 
 

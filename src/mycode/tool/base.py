@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
 
+from mycode.workspace import WorkspaceContext
+
 
 JSONSchema = dict[str, Any]
 ToolArguments = dict[str, Any]
@@ -23,6 +25,17 @@ class ToolRuntimeScope(str, Enum):
     PARENT_ONLY = "parent_only"
 
 
+class ToolWorkspaceScope(str, Enum):
+    # 本地工作区能力元信息，不会进入供应商 tool payload。
+    WORKSPACE_AWARE = "workspace_aware"
+    SHARED_ONLY = "shared_only"
+
+
+@dataclass(frozen=True)
+class ToolInvocationContext:
+    workspace: WorkspaceContext
+
+
 @dataclass(frozen=True)
 class ToolDefinition:
     name: str
@@ -32,6 +45,7 @@ class ToolDefinition:
     grant_arguments: tuple[str, ...] = ()
     parallel_safe: bool = True
     runtime_scope: ToolRuntimeScope = ToolRuntimeScope.SHARED
+    workspace_scope: ToolWorkspaceScope = ToolWorkspaceScope.SHARED_ONLY
     execution_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
@@ -43,6 +57,11 @@ class ToolDefinition:
             ToolRuntimeScope.PARENT_ONLY,
         ):
             raise ValueError(f"invalid tool runtime scope: {self.runtime_scope}")
+        if self.workspace_scope not in (
+            ToolWorkspaceScope.WORKSPACE_AWARE,
+            ToolWorkspaceScope.SHARED_ONLY,
+        ):
+            raise ValueError(f"invalid tool workspace scope: {self.workspace_scope}")
         timeout = self.execution_timeout_seconds
         if timeout is None:
             return
@@ -79,12 +98,20 @@ class Tool(Protocol):
     def definition(self) -> ToolDefinition:
         raise NotImplementedError
 
-    def execute(self, arguments: ToolArguments) -> ToolResult:
+    def execute(
+        self,
+        arguments: ToolArguments,
+        context: ToolInvocationContext | None = None,
+    ) -> ToolResult:
         raise NotImplementedError
 
 
 class AsyncTool(Protocol):
-    async def execute_async(self, arguments: ToolArguments) -> ToolResult:
+    async def execute_async(
+        self,
+        arguments: ToolArguments,
+        context: ToolInvocationContext | None = None,
+    ) -> ToolResult:
         raise NotImplementedError
 
 

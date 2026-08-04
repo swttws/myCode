@@ -10,6 +10,8 @@ from mycode.llm import ChatMessage, UsageObservation
 from mycode.permission.models import PermissionMode
 from mycode.prompt.models import PromptContextBlock
 from mycode.tool import ToolDefinition
+from mycode.workspace import WorkspacePreparation
+from mycode.worktree.models import WorktreeDispositionResult
 
 
 RESULT_TRUNCATED_MARKER = "...[结果已截断]"
@@ -26,6 +28,11 @@ DEFAULT_MAX_RETAINED_TASKS = 256
 class SubAgentKind(str, Enum):
     DEFINED = "defined"
     FORK = "fork"
+
+
+class AgentIsolationMode(str, Enum):
+    SHARED = "shared"
+    WORKTREE = "worktree"
 
 
 class AgentRoleSource(str, Enum):
@@ -66,6 +73,7 @@ class AgentRoleMetadata:
     model: AgentModelTier  # inherit 表示复用父模型，否则映射到配置中的具体模型。
     max_rounds: int  # 子 Agent 最大模型轮次。
     permission_mode: AgentPermissionMode  # 子 Agent 权限只能继承或收紧父权限。
+    isolation: AgentIsolationMode = AgentIsolationMode.SHARED  # 未声明时继续使用共享工作区。
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -74,6 +82,8 @@ class AgentRoleMetadata:
             raise ValueError("role description must not be empty.")
         if type(self.max_rounds) is not int or self.max_rounds <= 0:
             raise ValueError("max_rounds must be a positive integer.")
+        if not isinstance(self.isolation, AgentIsolationMode):
+            raise ValueError("isolation must be an AgentIsolationMode.")
         _ensure_tuple_of_strings(self.allowed_tools, "allowed_tools")
         _ensure_tuple_of_strings(self.denied_tools, "denied_tools")
 
@@ -184,16 +194,24 @@ class SubAgentResult:
 class SubAgentTaskSummary:
     id: str
     sequence: int
-    kind: SubAgentKind
-    role_name: str | None
-    state: SubAgentTaskState
-    detached: bool
-    rounds: int
-    error_code: str | None
-    usage: SubAgentUsage
+    task_token: str | None = None
+    kind: SubAgentKind = SubAgentKind.DEFINED
+    role_name: str | None = None
+    state: SubAgentTaskState = SubAgentTaskState.QUEUED
+    detached: bool = False
+    rounds: int = 0
+    error_code: str | None = None
+    usage: SubAgentUsage = SubAgentUsage()
+    isolation: AgentIsolationMode = AgentIsolationMode.SHARED
+    workspace_root: Path | None = None
+    branch_name: str | None = None
+    workspace_preparation: WorkspacePreparation | None = None
+    initialized_rules: tuple[str, ...] = ()
+    disposition: WorktreeDispositionResult | None = None
 
     def __post_init__(self) -> None:
         _validate_task_identity(self.id, self.sequence, self.rounds)
+        _validate_workspace_payload(self)
         if self.state is SubAgentTaskState.FAILED and not self.error_code:
             raise ValueError("error_code must be present for failed tasks.")
 
@@ -202,18 +220,26 @@ class SubAgentTaskSummary:
 class SubAgentTaskSnapshot:
     id: str
     sequence: int
-    kind: SubAgentKind
-    role_name: str | None
-    state: SubAgentTaskState
-    detached: bool
-    rounds: int
-    result: SubAgentResult | None
-    error_code: str | None
-    error_message: str | None
-    usage: SubAgentUsage
+    task_token: str | None = None
+    kind: SubAgentKind = SubAgentKind.DEFINED
+    role_name: str | None = None
+    state: SubAgentTaskState = SubAgentTaskState.QUEUED
+    detached: bool = False
+    rounds: int = 0
+    result: SubAgentResult | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    usage: SubAgentUsage = SubAgentUsage()
+    isolation: AgentIsolationMode = AgentIsolationMode.SHARED
+    workspace_root: Path | None = None
+    branch_name: str | None = None
+    workspace_preparation: WorkspacePreparation | None = None
+    initialized_rules: tuple[str, ...] = ()
+    disposition: WorktreeDispositionResult | None = None
 
     def __post_init__(self) -> None:
         _validate_task_identity(self.id, self.sequence, self.rounds)
+        _validate_workspace_payload(self)
         _validate_state_payload(
             self.state,
             self.result,
@@ -231,6 +257,12 @@ class SubAgentNotification:
     summary_truncated: bool
     usage: SubAgentUsage
     role_name: str | None = None
+    isolation: AgentIsolationMode = AgentIsolationMode.SHARED
+    workspace_root: Path | None = None
+    branch_name: str | None = None
+    workspace_preparation: WorkspacePreparation | None = None
+    initialized_rules: tuple[str, ...] = ()
+    disposition: WorktreeDispositionResult | None = None
 
 
 @dataclass(frozen=True)
@@ -241,6 +273,7 @@ class SubAgentExecutionReport:
     error_code: str | None
     error_message: str | None
     usage: SubAgentUsage
+    disposition: WorktreeDispositionResult | None = None
 
     def __post_init__(self) -> None:
         if self.rounds < 0:
@@ -314,6 +347,32 @@ def _validate_task_identity(task_id: str, sequence: int, rounds: int) -> None:
         raise ValueError("sequence must be a positive integer.")
     if type(rounds) is not int or rounds < 0:
         raise ValueError("rounds must not be negative.")
+
+
+def _validate_workspace_payload(value: object) -> None:
+    task_token = getattr(value, "task_token", None)
+    if task_token is not None and (type(task_token) is not str or not task_token):
+        raise ValueError("task_token must be a non-empty string.")
+    isolation = getattr(value, "isolation", None)
+    if not isinstance(isolation, AgentIsolationMode):
+        raise ValueError("isolation must be an AgentIsolationMode.")
+    workspace_root = getattr(value, "workspace_root", None)
+    if workspace_root is not None:
+        if not isinstance(workspace_root, Path) or not workspace_root.is_absolute():
+            raise ValueError("workspace_root must be an absolute Path.")
+    branch_name = getattr(value, "branch_name", None)
+    if branch_name is not None and (type(branch_name) is not str or not branch_name):
+        raise ValueError("branch_name must be a non-empty string.")
+    preparation = getattr(value, "workspace_preparation", None)
+    if preparation is not None and not isinstance(preparation, WorkspacePreparation):
+        raise ValueError("workspace_preparation must be a WorkspacePreparation.")
+    initialized_rules = getattr(value, "initialized_rules", ())
+    if not isinstance(initialized_rules, tuple):
+        object.__setattr__(value, "initialized_rules", tuple(initialized_rules))
+    _ensure_tuple_of_strings(getattr(value, "initialized_rules"), "initialized_rules")
+    disposition = getattr(value, "disposition", None)
+    if disposition is not None and not isinstance(disposition, WorktreeDispositionResult):
+        raise ValueError("disposition must be a WorktreeDispositionResult.")
 
 
 def _validate_state_payload(

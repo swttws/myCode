@@ -9,6 +9,7 @@ from mycode.hook.actions import HookActionRunner
 from mycode.hook.models import (
     HookAction,
     HookActionType,
+    HookContext,
     HookEvent,
     HookRule,
 )
@@ -82,6 +83,39 @@ def test_command_action_returns_stdout_from_workspace(tmp_path: Path) -> None:
     assert result.ok is True
     assert result.output.strip() == str(tmp_path)
     assert result.error is None
+
+
+def test_command_action_uses_context_workspace_for_cwd(tmp_path: Path) -> None:
+    configured_root = tmp_path / "configured"
+    context_root = tmp_path / "context"
+    configured_root.mkdir()
+    context_root.mkdir()
+    runner = HookActionRunner(workspace_root=configured_root)
+    action = HookAction(
+        type=HookActionType.COMMAND,
+        command=python_command("from pathlib import Path; print(Path.cwd())"),
+    )
+    hook_context = HookContext(event=HookEvent.MODEL_ROUND_START, workspace_root=context_root)
+
+    result = asyncio.run(runner.run(rule(action), hook_context))
+
+    assert result.ok is True
+    assert result.output.strip() == str(context_root)
+
+
+def test_command_action_rejects_context_cwd_outside_workspace(tmp_path: Path) -> None:
+    runner = HookActionRunner(workspace_root=tmp_path)
+    action = HookAction(
+        type=HookActionType.COMMAND,
+        command=python_command("print('nope')"),
+        cwd="../outside",
+    )
+    hook_context = HookContext(event=HookEvent.MODEL_ROUND_START, workspace_root=tmp_path)
+
+    result = asyncio.run(runner.run(rule(action), hook_context))
+
+    assert result.ok is False
+    assert "工作区" in (result.error or "")
 
 
 def test_command_action_reports_nonzero_exit_without_throwing(tmp_path: Path) -> None:

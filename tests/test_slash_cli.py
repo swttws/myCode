@@ -8,6 +8,7 @@ from mycode.mcp import MCPConfig
 from mycode.permission.pathing import PathGuard
 from mycode.slash import SlashCommandRegistrationError
 from mycode.tool import ToolKind
+from tests.worktree_helpers import create_cli_git_repository
 
 
 def _write_config(path: Path) -> None:
@@ -32,13 +33,15 @@ thinking:
 
 
 def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    repository = create_cli_git_repository(tmp_path)
+    workspace_root = repository.root
+    monkeypatch.chdir(workspace_root)
     home = tmp_path / "home"
-    home.mkdir()
+    home.mkdir(exist_ok=True)
     monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
-    monkeypatch.setattr(cli.Path, "cwd", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(cli.Path, "cwd", staticmethod(lambda: workspace_root))
 
-    config_path = tmp_path / "mycode.yaml"
+    config_path = workspace_root / "mycode.yaml"
     _write_config(config_path)
 
     created = {}
@@ -104,7 +107,7 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
 
     class FakePermissionService:
         def __init__(self):
-            self.path_guard = PathGuard(tmp_path)
+            self.path_guard = PathGuard(workspace_root)
 
     class FakePermissionFactory:
         @classmethod
@@ -221,11 +224,11 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
     assert created["completer_registry"] is fake_registry
     assert created["before_dispatch"] is not None
     assert created["before_complete"] is not None
-    assert created["permission_workspace"] == tmp_path
-    assert created["tool_workspace"] == tmp_path
-    assert created["tool_path_guard"].workspace_root == tmp_path
-    assert created["context_kwargs"]["workspace_root"] == tmp_path
-    assert created["project_kwargs"]["workspace_root"] == tmp_path
+    assert created["permission_workspace"] == workspace_root
+    assert created["tool_workspace"] == workspace_root
+    assert created["tool_path_guard"].workspace_root == workspace_root
+    assert created["context_kwargs"]["workspace_root"] == workspace_root
+    assert created["project_kwargs"]["workspace_root"] == workspace_root
     assert created["agent_kwargs"]["tool_registry"].__class__ is FakeToolRegistry
     assert "skill_runtime" in created["agent_kwargs"]
     assert "parent_snapshot_store" in created["agent_kwargs"]
@@ -237,10 +240,10 @@ def test_cli_builds_slash_stack_and_injects_it_into_tui(tmp_path, monkeypatch):
     assert created["tui_kwargs"]["registry"] is fake_registry
     assert created["tui_kwargs"]["completer"].__class__ is FakeCompleter
     assert isinstance(created["tui_kwargs"]["mcp_pool"], FakePool)
-    assert created["tui_kwargs"]["workspace_root"] == tmp_path
+    assert created["tui_kwargs"]["workspace_root"] == workspace_root
     assert created["tui_kwargs"]["show_thinking"] is True
     assert created["session_agent"].__class__ is FakeAgentLoop
-    assert created["session_permissions"].path_guard.workspace_root == tmp_path
+    assert created["session_permissions"].path_guard.workspace_root == workspace_root
     assert created["session_kwargs"]["skill_runtime"] is created["agent_kwargs"]["skill_runtime"]
     assert "skill_executor" in created["session_kwargs"]
     assert created["session_kwargs"]["subagent_service"] is not None

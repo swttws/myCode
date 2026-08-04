@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass
 from enum import Enum
 
@@ -41,11 +42,13 @@ class SubAgentService:
         runtime_factory,
         task_manager: SubAgentTaskManager,
         foreground_waiter=None,
+        isolation_coordinator=None,
     ) -> None:
         self._config = config
         self._runtime_factory = runtime_factory
         self._task_manager = task_manager
         self._foreground_waiter = foreground_waiter or _PollingForegroundWaiter()
+        self._isolation_coordinator = isolation_coordinator
         self._lock = asyncio.Lock()
         self._active_task_id: str | None = None
         self._active_detach_event: asyncio.Event | None = None
@@ -59,8 +62,30 @@ class SubAgentService:
             if not detached and self._active_task_id is not None:
                 raise RuntimeError("foreground_task_already_active")
             snapshot = await self._task_manager.reserve(request)
+            workspace_lease = None
+            if self._isolation_coordinator is not None:
+                try:
+                    workspace_lease = await self._isolation_coordinator.prepare(
+                        request=request,
+                        role=self._role_for(request),
+                        task_id=snapshot.id,
+                        task_token=snapshot.task_token or snapshot.id,
+                    )
+                    snapshot = await self._task_manager.bind_workspace(snapshot.id, workspace_lease)
+                except Exception as exc:
+                    await self._task_manager.fail_reserved(
+                        snapshot.id,
+                        "workspace_prepare_error",
+                        str(exc) or exc.__class__.__name__,
+                    )
+                    raise
             try:
-                runtime = self._create_runtime(request, detached=detached, task_id=snapshot.id)
+                runtime = self._create_runtime(
+                    request,
+                    detached=detached,
+                    task_id=snapshot.id,
+                    workspace_lease=workspace_lease,
+                )
             except Exception as exc:
                 await self._task_manager.fail_reserved(
                     snapshot.id,
@@ -100,14 +125,39 @@ class SubAgentService:
         *,
         detached: bool,
         task_id: str,
+        workspace_lease=None,
     ):
+        create = self._runtime_factory.create
+        kwargs = {"detached": detached}
         try:
-            return self._runtime_factory.create(request, detached=detached, task_id=task_id)
-        except TypeError as exc:
-            message = str(exc)
-            if "task_id" not in message and "unexpected keyword" not in message:
-                raise
-            return self._runtime_factory.create(request, detached=detached)
+            signature = inspect.signature(create)
+        except (TypeError, ValueError):
+            try:
+                return create(
+                    request,
+                    detached=detached,
+                    task_id=task_id,
+                    workspace_lease=workspace_lease,
+                )
+            except TypeError:
+                return create(request, detached=detached, task_id=task_id)
+
+        parameters = signature.parameters
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if accepts_kwargs or "task_id" in parameters:
+            kwargs["task_id"] = task_id
+        if workspace_lease is not None and (accepts_kwargs or "workspace_lease" in parameters):
+            kwargs["workspace_lease"] = workspace_lease
+        return create(request, **kwargs)
+
+    def _role_for(self, request: SubAgentLaunchRequest):
+        resolver = getattr(self._runtime_factory, "role_for", None)
+        if callable(resolver):
+            return resolver(request)
+        return None
 
     async def detach_active(self) -> SubAgentTaskSnapshot | None:
         async with self._lock:

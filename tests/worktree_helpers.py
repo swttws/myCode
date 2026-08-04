@@ -118,6 +118,15 @@ def create_git_repository_with_bare_remote(tmp_path: Path) -> GitTestRepository:
     return GitTestRepository(root=repository_root, bare_remote=bare_remote, env=test_env.env)
 
 
+def create_cli_git_repository(tmp_path: Path) -> GitTestRepository:
+    repository = create_git_repository_with_bare_remote(tmp_path)
+    (repository.root / ".worktrees").mkdir()
+    (repository.root / ".gitignore").write_text(".worktrees/\n", encoding="utf-8")
+    run_git(("add", ".gitignore"), cwd=repository.root, env=repository.env)
+    run_git(("commit", "-m", "ignore worktrees"), cwd=repository.root, env=repository.env)
+    return repository
+
+
 def run_git(
     args: Sequence[str],
     *,

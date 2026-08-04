@@ -25,6 +25,7 @@ from mycode.skill.models import (
 )
 from mycode.skill.runtime import SkillRuntime
 from mycode.tool import ToolExecutor, ToolRegistry
+from mycode.workspace import WorkspaceContext, WorkspaceKind
 
 
 class SkillExecutor:
@@ -39,7 +40,8 @@ class SkillExecutor:
         tool_executor: ToolExecutor,
         permission: PermissionInterceptor,
         agent_config: AgentConfig,
-        workspace_root: Path,
+        workspace_root: Path | None = None,
+        workspace: WorkspaceContext | None = None,
     ) -> None:
         self._runtime = runtime
         self._main_llm = main_llm
@@ -49,7 +51,9 @@ class SkillExecutor:
         self._tool_executor = tool_executor
         self._permission = permission
         self._agent_config = agent_config
-        self._workspace_root = workspace_root
+        self._workspace = workspace or _shared_workspace_from_root(workspace_root)
+        if workspace_root is not None and Path(workspace_root).resolve() != self._workspace.root:
+            raise ValueError("workspace_root must match workspace.root")
 
     async def execute_isolated(
         self,
@@ -75,6 +79,7 @@ class SkillExecutor:
                 context_manager=context_manager,
                 config=self._agent_config,
                 skill_runtime=self._runtime,
+                workspace=self._workspace,
             )
             summary = ""
             scope = SkillExecutionScope(
@@ -160,3 +165,18 @@ async def _summarize(llm: BaseLLM, history: tuple[ChatMessage, ...]) -> str:
         elif event.type is StreamEventType.ERROR:
             break
     return "".join(parts)
+
+
+def _shared_workspace_from_root(workspace_root: Path | None) -> WorkspaceContext:
+    if workspace_root is None:
+        raise ValueError("workspace or workspace_root is required")
+    root = Path(workspace_root).resolve()
+    return WorkspaceContext(
+        kind=WorkspaceKind.SHARED,
+        root=root,
+        repository_root=root,
+        repository_id="skill-workspace",
+        task_identity=None,
+        branch_name=None,
+        hooks_path=None,
+    )

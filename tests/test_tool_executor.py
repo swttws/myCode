@@ -7,9 +7,12 @@ from mycode.tool import (
     ToolDefinition,
     ToolExecutor,
     ToolKind,
+    ToolInvocationContext,
     ToolRegistry,
     ToolResult,
+    ToolWorkspaceScope,
 )
+from tests.helpers import shared_workspace, worktree_workspace
 
 
 class EchoTool:
@@ -104,12 +107,69 @@ class ThreadRecordingTool(EchoTool):
         return super().execute(arguments)
 
 
+class ContextRecordingTool(EchoTool):
+    def __init__(self):
+        self.contexts = []
+
+    @property
+    def definition(self):
+        return ToolDefinition(
+            name="context_recording",
+            description="Record invocation context.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            kind=ToolKind.READ,
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
+        )
+
+    def execute(self, arguments, context):
+        self.contexts.append(context)
+        return ToolResult(
+            ok=True,
+            tool_name="context_recording",
+            content={"workspace": str(context.workspace.root)},
+        )
+
+
 def test_tool_executor_executes_registered_tool():
     executor = ToolExecutor(ToolRegistry([EchoTool()]))
 
     result = asyncio.run(executor.execute(ToolCall(id="call-1", name="echo", arguments={"x": 1})))
 
     assert result == ToolResult(ok=True, tool_name="echo", content={"arguments": {"x": 1}})
+
+
+def test_tool_executor_passes_invocation_context_to_workspace_aware_tool(tmp_path):
+    tool = ContextRecordingTool()
+    executor = ToolExecutor(ToolRegistry([tool]))
+    context = ToolInvocationContext(workspace=shared_workspace(tmp_path))
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(id="call-context", name="context_recording", arguments={}),
+            context=context,
+        )
+    )
+
+    assert result.ok is True
+    assert result.content == {"workspace": str(tmp_path)}
+    assert tool.contexts == [context]
+
+
+def test_tool_executor_rejects_shared_only_tool_in_worktree_context(tmp_path):
+    executor = ToolExecutor(ToolRegistry([EchoTool()]))
+    context = ToolInvocationContext(workspace=worktree_workspace(tmp_path))
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(id="call-shared", name="echo", arguments={"x": 1}),
+            context=context,
+        )
+    )
+
+    assert result.ok is False
+    assert result.tool_name == "echo"
+    assert result.content["reason_code"] == "workspace_scope_forbidden"
+    assert "隔离工作区" in result.error
 
 
 def test_tool_executor_returns_structured_error_for_unknown_tool():

@@ -7,6 +7,7 @@ from mycode.prompt.models import PromptBuildMetadata, PromptBuildResult
 from mycode.llm import ChatMessage
 from mycode.subagent.context import ParentAgentSnapshotStore
 from mycode.subagent.models import (
+    AgentIsolationMode,
     AgentModelTier,
     ParentAgentSnapshot,
     SubAgentConfig,
@@ -20,6 +21,8 @@ from mycode.subagent.models import (
 from mycode.subagent.service import SubAgentRunResponse
 from mycode.subagent.tool import AgentTool
 from mycode.tool import ToolDefinition, ToolKind, ToolRuntimeScope
+from mycode.workspace import WorkspacePreparation
+from mycode.worktree.models import WorktreeDisposition, WorktreeDispositionResult
 
 
 def config():
@@ -215,6 +218,74 @@ def test_agent_tool_run_requires_parent_snapshot_but_list_and_get_do_not():
     assert run_result.content["reason_code"] == "parent_snapshot_unavailable"
     assert list_result.ok is True
     assert get_result.ok is True
+
+
+def test_agent_tool_list_and_get_include_worktree_workspace_fields(tmp_path):
+    workspace_root = tmp_path / ".worktrees" / "general" / "task-000001"
+    branch_name = "mycode/worktree/general/task-000001"
+    disposition = WorktreeDispositionResult(
+        disposition=WorktreeDisposition.RETAINED,
+        workspace_root=workspace_root,
+        branch_name=branch_name,
+        reasons=("未推送提交",),
+    )
+    service = FakeService()
+    service.summaries = (
+        SubAgentTaskSummary(
+            id="task-000001",
+            sequence=1,
+            task_token="task-000001",
+            kind=SubAgentKind.DEFINED,
+            role_name="general",
+            state=SubAgentTaskState.COMPLETED,
+            detached=True,
+            rounds=1,
+            usage=SubAgentUsage(input_tokens=1),
+            isolation=AgentIsolationMode.WORKTREE,
+            workspace_root=workspace_root,
+            branch_name=branch_name,
+            workspace_preparation=WorkspacePreparation.CREATED,
+            initialized_rules=("copy:.mycode", "hooks:.githooks"),
+            disposition=disposition,
+        ),
+    )
+    service.details = {
+        "task-000001": SubAgentTaskSnapshot(
+            id="task-000001",
+            sequence=1,
+            task_token="task-000001",
+            kind=SubAgentKind.DEFINED,
+            role_name="general",
+            state=SubAgentTaskState.COMPLETED,
+            detached=True,
+            rounds=1,
+            result=SubAgentResult(detail="detail", summary="summary"),
+            usage=SubAgentUsage(input_tokens=1),
+            isolation=AgentIsolationMode.WORKTREE,
+            workspace_root=workspace_root,
+            branch_name=branch_name,
+            workspace_preparation=WorkspacePreparation.CREATED,
+            initialized_rules=("copy:.mycode", "hooks:.githooks"),
+            disposition=disposition,
+        ),
+    }
+    tool = make_tool(service=service)
+
+    list_result = run_tool(tool, {"action": "list"})
+    get_result = run_tool(tool, {"action": "get", "task_id": "task-000001"})
+
+    listed = list_result.content["tasks"][0]
+    detailed = get_result.content["task"]
+    assert listed["isolation"] == "worktree"
+    assert listed["workspace_root"] == str(workspace_root)
+    assert listed["branch_name"] == branch_name
+    assert listed["workspace_preparation"] == "created"
+    assert listed["initialized_rules"] == ("copy:.mycode", "hooks:.githooks")
+    assert listed["disposition"]["disposition"] == "retained"
+    assert listed["disposition"]["reasons"] == ("未推送提交",)
+    assert detailed["isolation"] == listed["isolation"]
+    assert detailed["workspace_root"] == listed["workspace_root"]
+    assert detailed["disposition"] == listed["disposition"]
 
 
 def test_agent_tool_list_get_and_service_errors_are_stable_chinese_results():

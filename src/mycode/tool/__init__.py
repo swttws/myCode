@@ -6,8 +6,10 @@ from mycode.tool.base import (
     ToolArguments,
     ToolCall,
     ToolDefinition,
+    ToolInvocationContext,
     ToolKind,
     ToolRuntimeScope,
+    ToolWorkspaceScope,
     ToolResult,
 )
 from mycode.tool.cache import FileTextCache
@@ -38,8 +40,10 @@ __all__ = [
     "ToolCall",
     "ToolDefinition",
     "ToolExecutor",
+    "ToolInvocationContext",
     "ToolKind",
     "ToolRuntimeScope",
+    "ToolWorkspaceScope",
     "ToolRegistry",
     "ToolResult",
     "WriteFileTool",

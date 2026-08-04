@@ -1,12 +1,15 @@
 import pytest
 
 from mycode.subagent.models import (
+    AgentIsolationMode,
     RESULT_TRUNCATED_MARKER,
     SubAgentNotification,
     SubAgentTaskState,
     SubAgentUsage,
 )
 from mycode.subagent.notifications import SubAgentNotificationInbox
+from mycode.workspace import WorkspacePreparation
+from mycode.worktree.models import WorktreeDisposition, WorktreeDispositionResult
 
 
 def notification(task_id, state=SubAgentTaskState.COMPLETED, summary="完成", role_name=None):
@@ -131,3 +134,43 @@ def test_notification_inbox_includes_role_name_in_rendered_prefix():
 
     assert "explore#000001" in reservation.block.content
     assert "task-000001" in reservation.block.content
+
+
+def test_notification_inbox_includes_worktree_workspace_and_disposition(tmp_path):
+    workspace_root = tmp_path / ".worktrees" / "general" / "task-000001"
+    branch_name = "mycode/worktree/general/task-000001"
+    disposition = WorktreeDispositionResult(
+        disposition=WorktreeDisposition.RETAINED,
+        workspace_root=workspace_root,
+        branch_name=branch_name,
+        reasons=("未推送提交",),
+    )
+    inbox = SubAgentNotificationInbox()
+    inbox.enqueue(
+        sequence=1,
+        notification=SubAgentNotification(
+            task_id="task-000001",
+            state=SubAgentTaskState.COMPLETED,
+            summary="done",
+            summary_truncated=False,
+            usage=SubAgentUsage(input_tokens=1, output_tokens=2),
+            role_name="general",
+            isolation=AgentIsolationMode.WORKTREE,
+            workspace_root=workspace_root,
+            branch_name=branch_name,
+            workspace_preparation=WorkspacePreparation.CREATED,
+            initialized_rules=("copy:.mycode",),
+            disposition=disposition,
+        ),
+    )
+
+    reservation = inbox.reserve()
+
+    text = reservation.block.content
+    assert "isolation=worktree" in text
+    assert f"workspace={workspace_root}" in text
+    assert f"branch={branch_name}" in text
+    assert "preparation=created" in text
+    assert "rules=copy:.mycode" in text
+    assert "disposition=retained" in text
+    assert "未推送提交" in text

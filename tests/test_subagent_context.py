@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,7 @@ from mycode.subagent.models import (
     AgentRoleSource,
 )
 from mycode.tool import ToolDefinition, ToolKind
+from mycode.workspace import WorkspaceContext, WorkspaceKind, WorkspaceTaskIdentity
 
 
 def make_request(messages=None, tools=None):
@@ -133,6 +135,41 @@ def test_defined_agent_messages_include_role_environment_project_and_task_only()
     assert "父记忆" not in rendered
     assert "父 Skill" not in rendered
     assert "临时提醒" not in rendered
+
+
+def test_defined_agent_messages_render_worktree_workspace_context():
+    role = make_role()
+    identity = WorkspaceTaskIdentity(
+        repository_id="repo-123",
+        task_id="task-000001",
+        role_name="explore",
+        task_token="task-000001",
+        relative_name="explore/task-000001",
+        branch_name="mycode/worktree/explore/task-000001",
+        base_commit="a" * 40,
+    )
+    workspace = WorkspaceContext(
+        kind=WorkspaceKind.WORKTREE,
+        root=Path("C:/repo/.worktrees/explore/task-000001"),
+        repository_root=Path("C:/repo"),
+        repository_id="repo-123",
+        task_identity=identity,
+        branch_name=identity.branch_name,
+        hooks_path=Path("C:/repo/.worktrees/explore/task-000001/.mycode/hooks"),
+    )
+
+    messages = build_defined_agent_messages(
+        role=role,
+        task="请阅读 README。",
+        workspace_context=workspace,
+        project_instructions=("子工作区规则",),
+    )
+    rendered = "\n".join(message.content for message in messages)
+
+    assert "隔离 Worktree" in rendered
+    assert "C:\\repo\\.worktrees\\explore\\task-000001" in rendered
+    assert "mycode/worktree/explore/task-000001" in rendered
+    assert "子工作区规则" in rendered
 
 
 def test_fork_prompt_keeps_parent_messages_and_tools_prefix_unchanged():

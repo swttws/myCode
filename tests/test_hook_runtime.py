@@ -24,9 +24,11 @@ class RecordingRunner:
     def __init__(self, results: dict[str, HookActionResult | Exception] | None = None) -> None:
         self.results = results or {}
         self.calls: list[tuple[str, HookEvent]] = []
+        self.contexts: list[HookContext] = []
 
     async def run(self, rule: HookRule, context: HookContext) -> HookActionResult:
         self.calls.append((rule.id, context.event))
+        self.contexts.append(context)
         result = self.results.get(rule.id)
         if isinstance(result, Exception):
             raise result
@@ -351,6 +353,33 @@ def test_before_tool_non_blocking_rule_does_not_block_tool(tmp_path: Path) -> No
 
     assert [call[0] for call in runner.calls] == ["observe"]
     assert result.blocked_tool_result is None
+
+
+def test_before_tool_uses_call_workspace_root(tmp_path: Path) -> None:
+    configured_root = tmp_path / "configured"
+    call_root = tmp_path / "call"
+    configured_root.mkdir()
+    call_root.mkdir()
+    runner = RecordingRunner()
+    hook_runtime = runtime(
+        configured_root,
+        (tool_before_rule("observe", block=False),),
+        runner,
+    )
+
+    result = asyncio.run(
+        hook_runtime.before_tool(
+            call=command_call(),
+            definition=command_definition(),
+            round_index=1,
+            turn_id=2,
+            plan_only=False,
+            workspace_root=call_root,
+        )
+    )
+
+    assert result.blocked_tool_result is None
+    assert runner.contexts[0].workspace_root == call_root
 
 
 def test_after_tool_never_returns_blocked_tool_result(tmp_path: Path) -> None:

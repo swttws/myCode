@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import subprocess
+import os
 from pathlib import Path
 
-from mycode.tool.base import ToolArguments, ToolDefinition, ToolKind, ToolResult
+from mycode.tool.base import (
+    ToolArguments,
+    ToolDefinition,
+    ToolInvocationContext,
+    ToolKind,
+    ToolResult,
+    ToolWorkspaceScope,
+)
 
 
 class RunCommandTool:
@@ -33,10 +41,16 @@ class RunCommandTool:
             },
             kind=ToolKind.WRITE,
             grant_arguments=("command",),
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
         )
 
-    def execute(self, arguments: ToolArguments) -> ToolResult:
+    def execute(
+        self,
+        arguments: ToolArguments,
+        context: ToolInvocationContext | None = None,
+    ) -> ToolResult:
         try:
+            _ensure_invocation_workspace(self._workspace_root, context)
             command = arguments.get("command")
             if not isinstance(command, str):
                 raise ValueError("command must be a string")
@@ -48,6 +62,7 @@ class RunCommandTool:
                 text=True,
                 capture_output=True,
                 timeout=timeout_seconds,
+                env=_command_environment(context),
             )
             content = {
                 "exit_code": completed.returncode,
@@ -88,3 +103,23 @@ def _timeout_seconds(value: object, default: float) -> float:
     if isinstance(value, bool):
         raise ValueError("timeout_seconds must be a number")
     return float(value)
+
+
+def _ensure_invocation_workspace(
+    bound_root: Path,
+    context: ToolInvocationContext | None,
+) -> None:
+    if context is None:
+        return
+    if bound_root.resolve() != context.workspace.root.resolve():
+        raise ValueError("工具绑定工作区与调用工作区不一致。")
+
+
+def _command_environment(context: ToolInvocationContext | None) -> dict[str, str] | None:
+    if context is None or context.workspace.hooks_path is None:
+        return None
+    env = os.environ.copy()
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+    env["GIT_CONFIG_VALUE_0"] = str(context.workspace.hooks_path)
+    return env

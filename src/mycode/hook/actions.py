@@ -53,7 +53,7 @@ class HookActionRunner:
         try:
             action_type = rule.action.type
             if action_type is HookActionType.COMMAND:
-                return await self._run_command(rule)
+                return await self._run_command(rule, context)
             if action_type is HookActionType.PROMPT:
                 return HookActionResult(ok=True, output=rule.action.content or "")
             if action_type is HookActionType.HTTP:
@@ -75,9 +75,13 @@ class HookActionRunner:
             )
             return HookActionResult(ok=False, error=_safe_error(exc))
 
-    async def _run_command(self, rule: HookRule) -> HookActionResult:
+    async def _run_command(
+        self,
+        rule: HookRule,
+        context: HookContext | None,
+    ) -> HookActionResult:
         command = rule.action.command or ""
-        cwd = self._resolve_cwd(rule.action.cwd)
+        cwd = self._resolve_cwd(rule.action.cwd, context)
         env = os.environ.copy()
         env.update(rule.action.env)
         timeout = rule.timeout_seconds or _DEFAULT_COMMAND_TIMEOUT
@@ -187,13 +191,21 @@ class HookActionRunner:
                 result.error or "unknown",
             )
 
-    def _resolve_cwd(self, cwd: str | None) -> Path:
+    def _resolve_cwd(self, cwd: str | None, context: HookContext | None) -> Path:
+        workspace_root = (
+            Path(context.workspace_root).resolve()
+            if context is not None
+            else self._workspace_root.resolve()
+        )
         if cwd is None:
-            return self._workspace_root
+            return workspace_root
         path = Path(cwd)
-        if path.is_absolute():
-            return path
-        return self._workspace_root / path
+        resolved = path.resolve() if path.is_absolute() else (workspace_root / path).resolve()
+        try:
+            resolved.relative_to(workspace_root)
+        except ValueError as exc:
+            raise ValueError("Hook 命令 cwd 必须位于调用工作区内。") from exc
+        return resolved
 
 
 def _default_http_client_factory():

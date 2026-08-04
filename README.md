@@ -301,6 +301,22 @@ Foreground tasks return inline when they finish before the threshold. Otherwise 
 
 Use `/tasks` to list current-session sub-agent tasks and `/task <id>` to inspect a retained task result, error, rounds, detached state, and usage fields. Background completion is injected only at the next model notification safe point or the next user request, at most once per task. `/clear` and normal exit perform session cleanup: queued/running tasks are cancelled, retained results and notifications are cleared, and the next session starts from a fresh task id sequence.
 
+## Stage 13 Worktree isolation
+
+Stage 13 lets a defined sub-agent role opt into file-level isolation with `isolation: worktree` in the role frontmatter. Roles without that declaration, plus fork sub-agents, keep using the shared parent workspace. An isolated task receives a Git worktree rooted at `.worktrees/<role>/<task-token>` and a temporary branch named `mycode/worktree/<role>/<task-token>`, both derived from a controlled task identity rather than model-provided text.
+
+Project setup is declared in `.mycode/worktree.yaml`; `examples/mycode.worktree.yaml` shows the supported `copy`, `ignored_copy`, `symlink`, and `hooks` initialization rules together with Git timeout and cleanup settings. The loader validates the file at startup, so invalid paths, duplicate targets, unknown rule types, or unsafe boundaries stop before a sub-agent starts.
+
+Runtime code passes an explicit cwd through `WorkspaceContext`. AgentLoop, tools, hooks, skills, permissions, prompts, project instructions, memory, and caches consume the workspace root from that context instead of changing the process cwd. A worktree task starts from the parent repository's committed `HEAD`, so uncommitted parent files are not copied into the child workspace.
+
+The creation path writes sidecar metadata, creates the Git worktree and branch, runs initialization, then marks the workspace ready. Recovery is read-only: an existing READY workspace is reused only when its repository identity, task identity, branch, path, and config digest still match. Failed or incomplete recovery keeps the existing directory untouched.
+
+On task exit, protection checks retain worktrees with staged, unstaged, untracked, or unpushed work. Clean worktrees are eligible for deletion, including branch and sidecar cleanup. Retention reports the absolute workspace path, branch, and reasons through `Agent(action=list|get)`, `/tasks`, `/task <id>`, and background notifications.
+
+The background cleanup runs once at startup and then on the configured interval. It scans only controlled sidecar metadata, skips active or unexpired tasks, and applies the same protection, retention, and deletion rules as normal task exit.
+
+Stage 13 does not automatically merge worktree branches, does not automatically push, does not force delete protected worktrees, and does not add manual worktree commands. The system only creates, recovers, protects, retains, deletes clean task worktrees, and reports what happened.
+
 ## 核心工具
 
 Stage 03 内置六个工具，工具相关代码集中在 `src/mycode/tool` 包下：

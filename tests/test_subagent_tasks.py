@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,14 @@ from mycode.subagent.models import (
 )
 from mycode.subagent.notifications import SubAgentNotificationInbox
 from mycode.subagent.tasks import SubAgentTaskManager
+from mycode.workspace import (
+    WorkspaceContext,
+    WorkspaceKind,
+    WorkspaceLease,
+    WorkspacePreparation,
+    WorkspaceTaskIdentity,
+)
+from mycode.worktree.models import WorktreeDisposition, WorktreeDispositionResult
 
 
 def config(*, max_concurrency=4, max_queued_tasks=64, max_retained_tasks=256):
@@ -86,9 +95,10 @@ class ControlledRunner:
 
 
 class InstantRunner:
-    def __init__(self, name):
+    def __init__(self, name, *, disposition=None):
         self.name = name
         self.calls = 0
+        self.disposition = disposition
 
     async def __call__(self, cancel_event):
         self.calls += 1
@@ -99,6 +109,7 @@ class InstantRunner:
             error_code=None,
             error_message=None,
             usage=SubAgentUsage(input_tokens=1),
+            disposition=self.disposition,
         )
 
 
@@ -233,9 +244,80 @@ def test_task_manager_ids_are_monotonic_and_list_returns_lightweight_summary():
         summaries = manager.list()
 
         assert [summary.id for summary in summaries] == ["task-000001", "task-000002"]
+        assert [summary.task_token for summary in summaries] == ["task-000001", "task-000002"]
         assert [summary.sequence for summary in summaries] == [1, 2]
         assert not hasattr(summaries[0], "result")
         await manager.cancel_all_and_clear()
+
+    asyncio.run(scenario())
+
+
+def test_task_manager_binds_workspace_lease_to_snapshot_and_summary():
+    async def scenario():
+        manager = SubAgentTaskManager(
+            config=config(max_concurrency=1),
+            notification_inbox=SubAgentNotificationInbox(),
+        )
+        reserved = await manager.reserve(request())
+        lease = _worktree_lease(reserved.id, reserved.task_token)
+
+        snapshot = await manager.bind_workspace(reserved.id, lease)
+        summary = manager.list()[0]
+
+        assert snapshot.workspace_root == lease.context.root
+        assert snapshot.branch_name == lease.context.branch_name
+        assert snapshot.workspace_preparation is WorkspacePreparation.CREATED
+        assert snapshot.initialized_rules == ("hooks:.mycode/hooks",)
+        assert snapshot.isolation.value == "worktree"
+        assert summary.workspace_root == snapshot.workspace_root
+        assert summary.branch_name == snapshot.branch_name
+
+    asyncio.run(scenario())
+
+
+def test_task_manager_active_query_tracks_bound_worktree_until_terminal():
+    async def scenario():
+        manager = SubAgentTaskManager(
+            config=config(max_concurrency=1),
+            notification_inbox=SubAgentNotificationInbox(),
+        )
+        reserved = await manager.reserve(request())
+        lease = _worktree_lease(reserved.id, reserved.task_token)
+        await manager.bind_workspace(reserved.id, lease)
+        assert manager.is_workspace_active(lease.context.task_identity) is True
+
+        await manager.start_reserved(reserved.id, InstantRunner("done"))
+        await wait_state(manager, reserved.id, SubAgentTaskState.COMPLETED)
+
+        assert manager.is_workspace_active(lease.context.task_identity) is False
+
+    asyncio.run(scenario())
+
+
+def test_task_manager_records_disposition_in_snapshot_summary_and_notification():
+    async def scenario():
+        inbox = SubAgentNotificationInbox()
+        manager = SubAgentTaskManager(config=config(), notification_inbox=inbox)
+        reserved = await manager.reserve(request(background=True))
+        lease = _worktree_lease(reserved.id, reserved.task_token)
+        disposition = WorktreeDispositionResult(
+            disposition=WorktreeDisposition.RETAINED,
+            workspace_root=lease.context.root,
+            branch_name=lease.context.branch_name,
+            reasons=("未推送提交",),
+        )
+        await manager.bind_workspace(reserved.id, lease)
+        await manager.start_reserved(reserved.id, InstantRunner("done", disposition=disposition))
+        await wait_state(manager, reserved.id, SubAgentTaskState.COMPLETED)
+
+        snapshot = manager.get(reserved.id)
+        summary = manager.list()[0]
+        notification = inbox.reserve().notifications[0]
+
+        assert snapshot.disposition == disposition
+        assert summary.disposition == disposition
+        assert notification.disposition == disposition
+        assert notification.workspace_root == lease.context.root
 
     asyncio.run(scenario())
 
@@ -317,3 +399,30 @@ def test_task_manager_cancel_all_and_clear_cancels_running_and_resets_session_id
         assert snapshot.id == "task-000001"
 
     asyncio.run(scenario())
+
+
+def _worktree_lease(task_id: str, task_token: str | None) -> WorkspaceLease:
+    assert task_token is not None
+    identity = WorkspaceTaskIdentity(
+        repository_id="repo-123",
+        task_id=task_id,
+        role_name="general",
+        task_token=task_token,
+        relative_name=f"general/{task_token}",
+        branch_name=f"mycode/worktree/general/{task_token}",
+        base_commit="a" * 40,
+    )
+    return WorkspaceLease(
+        context=WorkspaceContext(
+            kind=WorkspaceKind.WORKTREE,
+            root=Path(f"C:/repo/.worktrees/general/{task_token}"),
+            repository_root=Path("C:/repo"),
+            repository_id=identity.repository_id,
+            task_identity=identity,
+            branch_name=identity.branch_name,
+            hooks_path=None,
+        ),
+        preparation=WorkspacePreparation.CREATED,
+        metadata_path=Path(f"C:/repo/.worktrees/.metadata/general/{task_token}.json"),
+        initialized_rules=("hooks:.mycode/hooks",),
+    )

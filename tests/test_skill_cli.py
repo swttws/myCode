@@ -8,6 +8,7 @@ from mycode.mcp import MCPConfig
 from mycode.permission.pathing import PathGuard
 from mycode.skill.models import SkillStartupError
 from mycode.tool import ToolKind
+from tests.worktree_helpers import create_cli_git_repository
 
 
 def _write_config(path: Path) -> None:
@@ -56,13 +57,15 @@ class _FakeToolRegistry:
 
 
 def test_cli_wires_skill_stack_after_tool_registration_and_before_agent(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    repository = create_cli_git_repository(tmp_path)
+    workspace_root = repository.root
+    monkeypatch.chdir(workspace_root)
     home = tmp_path / "home"
-    home.mkdir()
+    home.mkdir(exist_ok=True)
     monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
-    monkeypatch.setattr(cli.Path, "cwd", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(cli.Path, "cwd", staticmethod(lambda: workspace_root))
 
-    config_path = tmp_path / "mycode.yaml"
+    config_path = workspace_root / "mycode.yaml"
     _write_config(config_path)
 
     events: list[tuple[str, object]] = []
@@ -94,7 +97,7 @@ def test_cli_wires_skill_stack_after_tool_registration_and_before_agent(tmp_path
 
     class FakePermissionService:
         def __init__(self):
-            self.path_guard = PathGuard(tmp_path)
+            self.path_guard = PathGuard(workspace_root)
 
     class FakePermissionFactory:
         @classmethod
@@ -232,7 +235,7 @@ def test_cli_wires_skill_stack_after_tool_registration_and_before_agent(tmp_path
     assert events.index(("register_tool", "load_skill")) < events.index(("catalog_initialize", initialize_event[1]))
     assert events.index(("catalog_initialize", initialize_event[1])) < events.index(("agent_created", None))
     assert created["reserved_slash_names"] == frozenset({"help", "h", "clear", "cls", "exit", "quit"})
-    assert created["loader_kwargs"]["workspace_root"] == tmp_path
+    assert created["loader_kwargs"]["workspace_root"] == workspace_root
     assert created["loader_kwargs"]["home"] == home
     assert created["skill_executor_kwargs"]["llm_factory"] is cli.create_llm
     assert created["agent_kwargs"]["skill_runtime"] is created["load_tool_runtime"]
@@ -246,17 +249,19 @@ def test_cli_wires_skill_stack_after_tool_registration_and_before_agent(tmp_path
 
 
 def test_cli_returns_error_when_skill_startup_validation_fails(tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)
+    repository = create_cli_git_repository(tmp_path)
+    workspace_root = repository.root
+    monkeypatch.chdir(workspace_root)
     home = tmp_path / "home"
-    home.mkdir()
+    home.mkdir(exist_ok=True)
     monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
-    monkeypatch.setattr(cli.Path, "cwd", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(cli.Path, "cwd", staticmethod(lambda: workspace_root))
 
-    config_path = tmp_path / "mycode.yaml"
+    config_path = workspace_root / "mycode.yaml"
     _write_config(config_path)
 
     class FakePermissionService:
-        path_guard = PathGuard(tmp_path)
+        path_guard = PathGuard(workspace_root)
 
     class FakeContextManager:
         artifact_tool = _FakeTool("artifact")
