@@ -152,6 +152,7 @@ class ParentAgentSnapshot:
     model_id: str  # 父 Agent 当前真实模型 ID。
     max_rounds: int  # 父 Agent 当前最大轮次。
     permission_mode: PermissionMode  # 父 Agent 当前有效权限档位。
+    plan_only: bool = False  # 父 Agent 当前是否处于只规划模式。
 
 
 @dataclass(frozen=True)

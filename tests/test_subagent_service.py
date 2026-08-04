@@ -55,6 +55,7 @@ def parent_snapshot():
         model_id="parent-model",
         max_rounds=8,
         permission_mode=PermissionMode.DEFAULT,
+        plan_only=False,
     )
 
 

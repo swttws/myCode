@@ -261,6 +261,7 @@ def launch_request(kind=SubAgentKind.DEFINED, *, parent_tools=None):
         model_id="model",
         max_rounds=8,
         permission_mode=PermissionMode.DEFAULT,
+        plan_only=False,
     )
     return SubAgentLaunchRequest(
         kind=kind,

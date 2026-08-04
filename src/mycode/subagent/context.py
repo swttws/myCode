@@ -32,6 +32,7 @@ class ParentAgentSnapshotStore:
         model_id: str,
         max_rounds: int,
         permission_mode: PermissionMode,
+        plan_only: bool,
     ) -> None:
         snapshot = ParentAgentSnapshot(
             messages=tuple(request.messages),
@@ -39,6 +40,7 @@ class ParentAgentSnapshotStore:
             model_id=model_id,
             max_rounds=max_rounds,
             permission_mode=permission_mode,
+            plan_only=plan_only,
         )
         self._current.set(snapshot)
 
@@ -151,6 +153,7 @@ def _freeze_tool_definition(definition: ToolDefinition) -> ToolDefinition:
         kind=definition.kind,
         grant_arguments=tuple(definition.grant_arguments),
         parallel_safe=definition.parallel_safe,
+        requires_approval=definition.requires_approval,
         runtime_scope=definition.runtime_scope,
         workspace_scope=definition.workspace_scope,
         execution_timeout_seconds=definition.execution_timeout_seconds,

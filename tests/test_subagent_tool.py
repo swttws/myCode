@@ -54,6 +54,7 @@ def parent_snapshot_store():
         model_id="parent-model",
         max_rounds=8,
         permission_mode=PermissionMode.DEFAULT,
+        plan_only=False,
     )
     return store
 
@@ -143,6 +144,8 @@ def test_agent_tool_schema_is_single_stable_parent_only_entry():
 
     assert definition.name == "Agent"
     assert definition.kind is ToolKind.WRITE
+    assert definition.parallel_safe is False
+    assert definition.requires_approval is False
     assert definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY
     assert definition.execution_timeout_seconds == 125
     assert before == after

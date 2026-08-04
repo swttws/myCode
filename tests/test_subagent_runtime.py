@@ -194,6 +194,15 @@ class FinalEventAgentLoop:
         yield AgentEvent(AgentEventType.FINAL_RESPONSE, content="done", round_index=1)
 
 
+class RecordingModeAgentLoop:
+    def __init__(self):
+        self.modes = []
+
+    async def run(self, *args, **kwargs):
+        self.modes.append(kwargs["mode"])
+        yield AgentEvent(AgentEventType.FINAL_RESPONSE, content="done", round_index=1)
+
+
 class RecordingWorktreeService:
     def __init__(self, result):
         self.result = result
@@ -258,7 +267,7 @@ def role(
     )
 
 
-def parent_snapshot(*, model_id="parent-model", max_rounds=7, tools=()):
+def parent_snapshot(*, model_id="parent-model", max_rounds=7, tools=(), plan_only=False):
     return ParentAgentSnapshot(
         messages=(
             ChatMessage(role="system", content="父系统前缀"),
@@ -268,6 +277,7 @@ def parent_snapshot(*, model_id="parent-model", max_rounds=7, tools=()):
         model_id=model_id,
         max_rounds=max_rounds,
         permission_mode=PermissionMode.DEFAULT,
+        plan_only=plan_only,
     )
 
 
@@ -363,6 +373,22 @@ def test_runtime_releases_worktree_lease_and_returns_disposition(tmp_path):
     assert report.state is SubAgentTaskState.COMPLETED
     assert report.disposition == disposition
     assert worktree_service.released == [lease]
+
+
+def test_runtime_passes_parent_plan_only_to_child_agent_loop(tmp_path):
+    agent_loop = RecordingModeAgentLoop()
+    runtime = SubAgentRuntime(
+        request=request(parent=parent_snapshot(plan_only=True)),
+        agent_loop=agent_loop,
+        model_id="model",
+        max_rounds=1,
+        max_result_bytes=1024,
+    )
+
+    report = asyncio.run(run_report(runtime))
+
+    assert report.state is SubAgentTaskState.COMPLETED
+    assert [mode.plan_only for mode in agent_loop.modes] == [True]
 
 
 def test_runtime_uses_real_agent_loop_for_tool_round_memory_and_hook(tmp_path):

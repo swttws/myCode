@@ -218,10 +218,12 @@ class PermissionPolicy:
                 decision = _decision_from_assessment(subject, assessment, mode)
         elif selected is not None:
             decision = _decision_from_rule(subject, selected.rule, mode, assessment.category)
+        elif definition.requires_approval is False:
+            decision = _decision_without_local_approval(subject, mode)
         else:
             decision = _fallback_decision(subject, mode)
 
-        if plan_only and definition.kind is ToolKind.WRITE:
+        if plan_only and definition.kind is ToolKind.WRITE and definition.requires_approval:
             decision = _apply_plan_only(decision)
         return subject, decision
 
@@ -439,6 +441,19 @@ def _fallback_decision(subject: PermissionSubject, mode: PermissionMode) -> Perm
         effect=effect,
         reason_code=reason,
         message_zh=message,
+        mode=mode,
+        display_arguments=subject.display_arguments,
+    )
+
+
+def _decision_without_local_approval(
+    subject: PermissionSubject,
+    mode: PermissionMode,
+) -> PermissionDecision:
+    return PermissionDecision(
+        effect=PermissionEffect.ALLOW,
+        reason_code="tool_does_not_require_approval",
+        message_zh="tool does not require approval.",
         mode=mode,
         display_arguments=subject.display_arguments,
     )

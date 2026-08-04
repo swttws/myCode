@@ -636,7 +636,7 @@ class AgentLoop:
             raise
 
         try:
-            self._update_parent_snapshot(prepared_context.request)
+            self._update_parent_snapshot(prepared_context.request, plan_only=state.mode.plan_only)
             self._commit_notification_reservation(notification_reservation)
         except Exception:
             self._release_notification_reservation(notification_reservation)
@@ -654,7 +654,7 @@ class AgentLoop:
             )
         return _PreparedRound(prepared_context=prepared_context, events=tuple(events))
 
-    def _update_parent_snapshot(self, request) -> None:
+    def _update_parent_snapshot(self, request, *, plan_only: bool) -> None:
         if self._parent_snapshot_store is None:
             return
         self._parent_snapshot_store.update(
@@ -662,6 +662,7 @@ class AgentLoop:
             model_id=self._main_model_id or "",
             max_rounds=self.config.max_rounds,
             permission_mode=self._current_permission_mode(),
+            plan_only=plan_only,
         )
 
     def _current_permission_mode(self) -> PermissionMode:

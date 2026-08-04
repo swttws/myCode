@@ -48,6 +48,8 @@ class AgentTool:
             description="启动、查询和管理当前会话内的子 Agent 任务。",
             parameters=_agent_parameters(),
             kind=ToolKind.WRITE,
+            parallel_safe=False,
+            requires_approval=False,
             runtime_scope=ToolRuntimeScope.PARENT_ONLY,
             execution_timeout_seconds=self._config.foreground_timeout_seconds + 5,
         )

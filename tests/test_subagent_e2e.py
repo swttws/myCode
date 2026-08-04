@@ -228,6 +228,7 @@ def make_parent_snapshot_store(parent_registry, *, model_id="parent-model", max_
         model_id=model_id,
         max_rounds=max_rounds,
         permission_mode=PermissionMode.DEFAULT,
+        plan_only=False,
     )
     return store
 
@@ -273,6 +274,7 @@ def make_real_agent_tool(tmp_path, *, child_factory, cfg=None, inbox=None):
         model_id="parent-model",
         max_rounds=3,
         permission_mode=PermissionMode.DEFAULT,
+        plan_only=False,
     )
     return agent_tool, service, inbox
 

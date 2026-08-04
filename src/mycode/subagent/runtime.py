@@ -128,7 +128,7 @@ class SubAgentRuntime:
         try:
             async for event in self._agent_loop.run(
                 "",
-                mode=AgentMode(),
+                mode=AgentMode(plan_only=self._request.parent.plan_only),
                 approval_provider=None,
                 isolated_depth=1,
             ):
@@ -215,7 +215,7 @@ class SubAgentRuntime:
         try:
             async for event in self._agent_loop.run(
                 "",
-                mode=AgentMode(),
+                mode=AgentMode(plan_only=self._request.parent.plan_only),
                 approval_provider=None,
                 isolated_depth=1,
             ):
