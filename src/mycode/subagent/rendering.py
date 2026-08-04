@@ -87,6 +87,7 @@ class RenderEventBus:
                 return True
         return False
 
+
 @contextmanager
 def use_render_bus(bus: RenderEventBus):
     token = _current_render_bus.set(bus)
