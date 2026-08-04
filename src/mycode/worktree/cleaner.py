@@ -5,12 +5,11 @@ import os
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable
 
 from mycode.workspace import WorkspaceTaskIdentity
 from mycode.worktree.models import (
     CleanupBatchResult,
-    RepositoryIdentity,
     WorktreeConfig,
     WorktreeDiagnostic,
     WorktreeDisposition,
@@ -18,58 +17,28 @@ from mycode.worktree.models import (
     WorktreeError,
     WorktreeMetadata,
 )
-from mycode.worktree.pathing import WorktreePathPolicy
+from mycode.worktree.service import WorktreeService
 
 
 _DEFAULT_CLEANUP_INTERVAL_SECONDS = 3600.0
 _MAX_GIT_POINTER_BYTES = 4096
 
 
-class ActiveWorkspaceRegistry(Protocol):
-    def is_workspace_active(self, identity: WorkspaceTaskIdentity) -> bool: ...
-
-
-class _ConfigLoader(Protocol):
-    def load(self, repository_root: Path) -> WorktreeConfig: ...
-
-
-class _MetadataStore(Protocol):
-    def scan(self, limit: int) -> tuple[Path, ...]: ...
-    def read_candidate(self, metadata_path: Path) -> WorktreeMetadata: ...
-
-
-class _WorktreeManager(Protocol):
-    async def inspect_and_dispose(
-        self,
-        metadata: WorktreeMetadata,
-        *,
-        require_expired: bool,
-    ) -> WorktreeDispositionResult: ...
-
-
 class WorktreeCleaner:
     def __init__(
         self,
         *,
-        repository_identity: RepositoryIdentity,
-        path_policy: WorktreePathPolicy,
-        config_loader: _ConfigLoader,
-        metadata_store: _MetadataStore,
-        manager: _WorktreeManager,
-        active_registry: ActiveWorkspaceRegistry,
+        worktree_service: WorktreeService,
+        is_workspace_active: Callable[[WorkspaceTaskIdentity], bool],
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
-        if not isinstance(repository_identity, RepositoryIdentity):
-            raise ValueError("repository_identity must be a RepositoryIdentity")
-        if not isinstance(path_policy, WorktreePathPolicy):
-            raise ValueError("path_policy must be a WorktreePathPolicy")
-        self._repository_identity = repository_identity
-        self._path_policy = path_policy
-        self._config_loader = config_loader
-        self._metadata_store = metadata_store
-        self._manager = manager
-        self._active_registry = active_registry
+        self._worktree_service = worktree_service
+        self._repository_identity = worktree_service.repository_identity
+        self._path_policy = worktree_service.path_policy
+        self._config_loader = worktree_service.config_loader
+        self._metadata_store = worktree_service.metadata_store
+        self._is_workspace_active = is_workspace_active
         self._clock = clock or _utc_now
         self._sleep = sleep or asyncio.sleep
         self._task: asyncio.Task[None] | None = None
@@ -151,7 +120,7 @@ class WorktreeCleaner:
                 continue
 
             try:
-                if self._active_registry.is_workspace_active(metadata.identity):
+                if self._is_workspace_active(metadata.identity):
                     counts.skipped += 1
                     diagnostics.append(
                         self._diagnostic(
@@ -174,7 +143,7 @@ class WorktreeCleaner:
                 continue
 
             try:
-                result = await self._manager.inspect_and_dispose(
+                result = await self._worktree_service.release_candidate(
                     metadata,
                     require_expired=True,
                 )

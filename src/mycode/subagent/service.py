@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from dataclasses import dataclass
 from enum import Enum
 
 from mycode.subagent.models import (
+    AgentIsolationMode,
+    AgentRoleDefinition,
     SubAgentConfig,
     SubAgentKind,
     SubAgentLaunchRequest,
@@ -14,6 +15,7 @@ from mycode.subagent.models import (
     SubAgentTaskSummary,
 )
 from mycode.subagent.tasks import SubAgentTaskManager
+from mycode.worktree.service import WorktreeService
 
 
 class ForegroundWaitOutcome(str, Enum):
@@ -42,13 +44,13 @@ class SubAgentService:
         runtime_factory,
         task_manager: SubAgentTaskManager,
         foreground_waiter=None,
-        isolation_coordinator=None,
+        worktree_service: WorktreeService | None = None,
     ) -> None:
         self._config = config
         self._runtime_factory = runtime_factory
         self._task_manager = task_manager
         self._foreground_waiter = foreground_waiter or _PollingForegroundWaiter()
-        self._isolation_coordinator = isolation_coordinator
+        self._worktree_service = worktree_service
         self._lock = asyncio.Lock()
         self._active_task_id: str | None = None
         self._active_detach_event: asyncio.Event | None = None
@@ -63,11 +65,12 @@ class SubAgentService:
                 raise RuntimeError("foreground_task_already_active")
             snapshot = await self._task_manager.reserve(request)
             workspace_lease = None
-            if self._isolation_coordinator is not None:
+            if self._worktree_service is not None:
                 try:
-                    workspace_lease = await self._isolation_coordinator.prepare(
+                    role = self._runtime_factory.role_for(request)
+                    workspace_lease = await self._prepare_workspace(
                         request=request,
-                        role=self._role_for(request),
+                        role=role,
                         task_id=snapshot.id,
                         task_token=snapshot.task_token or snapshot.id,
                     )
@@ -127,37 +130,31 @@ class SubAgentService:
         task_id: str,
         workspace_lease=None,
     ):
-        create = self._runtime_factory.create
-        kwargs = {"detached": detached}
-        try:
-            signature = inspect.signature(create)
-        except (TypeError, ValueError):
-            try:
-                return create(
-                    request,
-                    detached=detached,
-                    task_id=task_id,
-                    workspace_lease=workspace_lease,
-                )
-            except TypeError:
-                return create(request, detached=detached, task_id=task_id)
-
-        parameters = signature.parameters
-        accepts_kwargs = any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
+        return self._runtime_factory.create(
+            request,
+            detached=detached,
+            task_id=task_id,
+            workspace_lease=workspace_lease,
         )
-        if accepts_kwargs or "task_id" in parameters:
-            kwargs["task_id"] = task_id
-        if workspace_lease is not None and (accepts_kwargs or "workspace_lease" in parameters):
-            kwargs["workspace_lease"] = workspace_lease
-        return create(request, **kwargs)
 
-    def _role_for(self, request: SubAgentLaunchRequest):
-        resolver = getattr(self._runtime_factory, "role_for", None)
-        if callable(resolver):
-            return resolver(request)
-        return None
+    async def _prepare_workspace(
+        self,
+        *,
+        request: SubAgentLaunchRequest,
+        role: AgentRoleDefinition | None,
+        task_id: str,
+        task_token: str,
+    ):
+        assert self._worktree_service is not None
+        if _uses_shared_workspace(request, role):
+            return self._worktree_service.shared_lease()
+        if role is None:
+            raise RuntimeError("worktree_role_required")
+        return await self._worktree_service.prepare(
+            role_name=role.metadata.name,
+            task_id=task_id,
+            task_token=task_token,
+        )
 
     async def detach_active(self) -> SubAgentTaskSnapshot | None:
         async with self._lock:
@@ -229,6 +226,17 @@ class _PollingForegroundWaiter:
 
 def _starts_detached(request: SubAgentLaunchRequest) -> bool:
     return request.requested_background or request.kind is SubAgentKind.FORK
+
+
+def _uses_shared_workspace(
+    request: SubAgentLaunchRequest,
+    role: AgentRoleDefinition | None,
+) -> bool:
+    if request.kind is SubAgentKind.FORK:
+        return True
+    if role is None:
+        return True
+    return role.metadata.isolation is AgentIsolationMode.SHARED
 
 
 def _is_terminal(state: SubAgentTaskState) -> bool:

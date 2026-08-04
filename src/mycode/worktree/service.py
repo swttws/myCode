@@ -5,7 +5,7 @@ import os
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable
 
 from mycode.workspace import (
     WorkspaceContext,
@@ -15,7 +15,6 @@ from mycode.workspace import (
     WorkspaceTaskIdentity,
 )
 from mycode.worktree.models import (
-    InitializationResult,
     RepositoryIdentity,
     WorktreeConfig,
     WorktreeDisposition,
@@ -23,64 +22,27 @@ from mycode.worktree.models import (
     WorktreeError,
     WorktreeMetadata,
     WorktreePhase,
-    WorktreeProtectionStatus,
 )
+from mycode.worktree.config import WorktreeConfigLoader
+from mycode.worktree.git import GitWorktreeGateway
+from mycode.worktree.initializer import WorktreeInitializer
+from mycode.worktree.metadata import WorktreeMetadataStore
 from mycode.worktree.pathing import WorktreePathPolicy
+from mycode.worktree.protection import WorktreeProtectionInspector
 
 
-class _ConfigLoader(Protocol):
-    def load(self, repository_root: Path) -> WorktreeConfig: ...
-
-
-class _GitGateway(Protocol):
-    def identify_repository(self, repository_root: Path) -> RepositoryIdentity: ...
-    def validate_ignored_root(self, worktrees_root: Path) -> None: ...
-    def add(self, identity: WorkspaceTaskIdentity, target: Path) -> None: ...
-    def remove(self, repository_root: Path, target: Path) -> None: ...
-    def delete_branch(
-        self,
-        repository_root: Path,
-        branch: str,
-        *,
-        expected_branch: str | None = None,
-    ) -> None: ...
-
-
-class _MetadataStore(Protocol):
-    def write(self, metadata: WorktreeMetadata) -> Path: ...
-    def read_ready(
-        self,
-        identity: WorkspaceTaskIdentity,
-        target: Path,
-        config_digest: str,
-    ) -> WorktreeMetadata: ...
-    def read_candidate(self, metadata_path: Path) -> WorktreeMetadata: ...
-    def remove(self, identity: WorkspaceTaskIdentity) -> None: ...
-
-
-class _Initializer(Protocol):
-    def initialize(
-        self,
-        identity: WorkspaceTaskIdentity,
-        workspace_root: Path,
-        config: WorktreeConfig,
-    ) -> InitializationResult: ...
-
-
-class _ProtectionInspector(Protocol):
-    def inspect(self, lease: WorkspaceLease) -> WorktreeProtectionStatus: ...
-
-
-class WorktreeManager:
+class WorktreeService:
     def __init__(
         self,
         *,
+        shared_workspace: WorkspaceContext | None = None,
+        repository_identity: RepositoryIdentity | None = None,
         path_policy: WorktreePathPolicy,
-        config_loader: _ConfigLoader,
-        git: _GitGateway,
-        metadata_store: _MetadataStore,
-        initializer: _Initializer,
-        protection_inspector: _ProtectionInspector,
+        config_loader: WorktreeConfigLoader,
+        git: GitWorktreeGateway,
+        metadata_store: WorktreeMetadataStore,
+        initializer: WorktreeInitializer,
+        protection_inspector: WorktreeProtectionInspector,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._path_policy = path_policy
@@ -89,11 +51,125 @@ class WorktreeManager:
         self._metadata_store = metadata_store
         self._initializer = initializer
         self._protection_inspector = protection_inspector
+        self._repository_identity = repository_identity
+        if shared_workspace is not None and shared_workspace.kind is not WorkspaceKind.SHARED:
+            raise ValueError("shared_workspace must use WorkspaceKind.SHARED")
+        self._shared_workspace = shared_workspace
         self._clock = clock or _utc_now
         self._lock_guard = asyncio.Lock()
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def prepare(self, identity: WorkspaceTaskIdentity) -> WorkspaceLease:
+    @classmethod
+    def create(cls, workspace_root: Path) -> "WorktreeService":
+        workspace_root = Path(workspace_root).resolve()
+        bootstrap_git = GitWorktreeGateway(config=WorktreeConfig(digest="bootstrap"))
+        repository_identity = bootstrap_git.identify_repository(workspace_root)
+        config_loader = WorktreeConfigLoader()
+        worktree_config = config_loader.load(repository_identity.root)
+        git = GitWorktreeGateway(config=worktree_config)
+        path_policy = WorktreePathPolicy(repository_root=repository_identity.root)
+        worktrees_root = path_policy.validate_root(repository_identity.root)
+        git.validate_ignored_root(worktrees_root)
+        metadata_store = WorktreeMetadataStore(path_policy)
+        shared_workspace = WorkspaceContext(
+            kind=WorkspaceKind.SHARED,
+            root=workspace_root,
+            repository_root=repository_identity.root,
+            repository_id=repository_identity.repository_id,
+            task_identity=None,
+            branch_name=None,
+            hooks_path=None,
+        )
+        return cls(
+            shared_workspace=shared_workspace,
+            repository_identity=repository_identity,
+            path_policy=path_policy,
+            config_loader=config_loader,
+            git=git,
+            metadata_store=metadata_store,
+            initializer=WorktreeInitializer(path_policy=path_policy, git=git),
+            protection_inspector=WorktreeProtectionInspector(git=git),
+        )
+
+    @property
+    def shared_workspace(self) -> WorkspaceContext:
+        if self._shared_workspace is None:
+            repository_identity = self.repository_identity
+            self._shared_workspace = WorkspaceContext(
+                kind=WorkspaceKind.SHARED,
+                root=repository_identity.root,
+                repository_root=repository_identity.root,
+                repository_id=repository_identity.repository_id,
+                task_identity=None,
+                branch_name=None,
+                hooks_path=None,
+            )
+        return self._shared_workspace
+
+    @property
+    def repository_identity(self) -> RepositoryIdentity:
+        if self._repository_identity is None:
+            self._repository_identity = self._git.identify_repository(self._repository_root())
+        return self._repository_identity
+
+    @property
+    def path_policy(self) -> WorktreePathPolicy:
+        return self._path_policy
+
+    @property
+    def config_loader(self) -> WorktreeConfigLoader:
+        return self._config_loader
+
+    @property
+    def metadata_store(self) -> WorktreeMetadataStore:
+        return self._metadata_store
+
+    def shared_lease(self) -> WorkspaceLease:
+        return WorkspaceLease(
+            context=self.shared_workspace,
+            preparation=WorkspacePreparation.SHARED,
+            metadata_path=None,
+            initialized_rules=(),
+        )
+
+    def identity_for(
+        self,
+        *,
+        role_name: str,
+        task_id: str,
+        task_token: str,
+    ) -> WorkspaceTaskIdentity:
+        relative_name = self._path_policy.validate_relative_name(f"{role_name}/{task_token}")
+        branch_name = self._path_policy.validate_branch_name(
+            f"{self._path_policy.branch_prefix}{relative_name}"
+        )
+        base_commit = self._git.capture_head(self.shared_workspace.repository_root)
+        return WorkspaceTaskIdentity(
+            repository_id=self.shared_workspace.repository_id,
+            task_id=task_id,
+            role_name=role_name,
+            task_token=task_token,
+            relative_name=relative_name,
+            branch_name=branch_name,
+            base_commit=base_commit,
+        )
+
+    async def prepare(
+        self,
+        identity: WorkspaceTaskIdentity | None = None,
+        *,
+        role_name: str | None = None,
+        task_id: str | None = None,
+        task_token: str | None = None,
+    ) -> WorkspaceLease:
+        if identity is None:
+            if role_name is None or task_id is None or task_token is None:
+                raise ValueError("prepare requires identity or role task fields")
+            identity = self.identity_for(
+                role_name=role_name,
+                task_id=task_id,
+                task_token=task_token,
+            )
         if not isinstance(identity, WorkspaceTaskIdentity):
             raise ValueError("identity must be a WorkspaceTaskIdentity")
 
@@ -114,7 +190,11 @@ class WorktreeManager:
                 return await self._recover_locked(identity, workspace_root, metadata_path, config)
             return await self._create_locked(identity, workspace_root, metadata_path, config)
 
-    async def release(self, lease: WorkspaceLease) -> WorktreeDispositionResult:
+    async def release(self, lease: WorkspaceLease) -> WorktreeDispositionResult | None:
+        if not isinstance(lease, WorkspaceLease):
+            raise ValueError("lease must be a WorkspaceLease")
+        if lease.context.kind is WorkspaceKind.SHARED:
+            return None
         self._require_worktree_lease(lease)
         identity = lease.context.task_identity
         assert identity is not None
@@ -131,14 +211,14 @@ class WorktreeManager:
                 config.digest,
             )
             self._validate_lease_matches_metadata(lease, metadata, config)
-            return await self._inspect_and_dispose_locked(
+            return await self._release_candidate_locked(
                 metadata,
                 config,
                 require_expired=False,
                 lease=lease,
             )
 
-    async def inspect_and_dispose(
+    async def release_candidate(
         self,
         metadata: WorktreeMetadata,
         *,
@@ -173,7 +253,7 @@ class WorktreeManager:
                     message="worktree config digest mismatch",
                     path=path,
                 )
-            return await self._inspect_and_dispose_locked(
+            return await self._release_candidate_locked(
                 current,
                 config,
                 require_expired=require_expired,
@@ -269,7 +349,7 @@ class WorktreeManager:
             )
         return expected
 
-    async def _inspect_and_dispose_locked(
+    async def _release_candidate_locked(
         self,
         metadata: WorktreeMetadata,
         config: WorktreeConfig,
@@ -381,14 +461,6 @@ class WorktreeManager:
 
     async def _load_config(self) -> WorktreeConfig:
         return await asyncio.to_thread(self._config_loader.load, self._repository_root())
-
-    async def _lock_for(self, key: str) -> asyncio.Lock:
-        async with self._lock_guard:
-            lock = self._locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._locks[key] = lock
-            return lock
 
     def _repository_root(self) -> Path:
         return self._path_policy.repository_root.resolve(strict=True)
