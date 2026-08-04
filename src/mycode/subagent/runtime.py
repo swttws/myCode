@@ -38,6 +38,7 @@ from mycode.subagent.models import (
 from mycode.subagent.rendering import publish_current_render_event
 from mycode.subagent.tooling import SubAgentPermissionInterceptor, SubAgentToolPolicy
 from mycode.tool import ToolRegistry
+from mycode.workspace import WorkspaceContext, WorkspaceKind, WorkspaceLease
 
 
 class SubAgentRuntime:
@@ -50,12 +51,16 @@ class SubAgentRuntime:
         max_rounds: int,
         max_result_bytes: int,
         task_id: str | None = None,
+        workspace_lease: WorkspaceLease | None = None,
+        isolation_coordinator=None,
         cleanup=None,
     ) -> None:
         self._request = request
         self._agent_loop = agent_loop
         self._max_result_bytes = max_result_bytes
         self._cleanup = cleanup
+        self._workspace_lease = workspace_lease
+        self._isolation_coordinator = isolation_coordinator
         self.model_id = model_id
         self.max_rounds = max_rounds
         self._task_id = task_id
@@ -69,6 +74,7 @@ class SubAgentRuntime:
         sink = event_sink or publish_current_render_event
         consume_task = asyncio.create_task(self._consume_events_with_sink(sink))
         cancel_task = asyncio.create_task(cancel_event.wait())
+        report: SubAgentExecutionReport | None = None
         try:
             done, pending = await asyncio.wait(
                 (consume_task, cancel_task),
@@ -79,16 +85,37 @@ class SubAgentRuntime:
             for task in pending:
                 if task is not consume_task:
                     task.cancel()
-            return await consume_task
+            report = await consume_task
         except asyncio.CancelledError:
             consume_task.cancel()
             await asyncio.gather(consume_task, return_exceptions=True)
-            return _cancelled_report()
+            report = _cancelled_report()
         finally:
             cancel_task.cancel()
             await asyncio.gather(cancel_task, return_exceptions=True)
             if self._cleanup is not None:
                 self._cleanup()
+        assert report is not None
+        return await self._with_workspace_disposition(report)
+
+    async def _with_workspace_disposition(
+        self,
+        report: SubAgentExecutionReport,
+    ) -> SubAgentExecutionReport:
+        if self._workspace_lease is None or self._isolation_coordinator is None:
+            return report
+        try:
+            disposition = await self._isolation_coordinator.release(self._workspace_lease)
+        except Exception as exc:
+            return _failed_report(
+                "workspace_release_error",
+                _safe_error(exc),
+                rounds=report.rounds,
+                usage=report.usage,
+            )
+        if disposition is None:
+            return report
+        return replace(report, disposition=disposition)
 
     async def _consume_events(self) -> SubAgentExecutionReport:
         final_text: str | None = None
@@ -358,6 +385,7 @@ class SubAgentRuntimeFactory:
         workspace_environment: str,
         project_instructions: Sequence[str] = (),
         hook_runtime_factory: Callable[[], object] | None = None,
+        isolation_coordinator=None,
     ) -> None:
         self._config = config
         self._llm_config = llm_config
@@ -370,6 +398,7 @@ class SubAgentRuntimeFactory:
         self._workspace_environment = workspace_environment
         self._project_instructions = tuple(project_instructions)
         self._hook_runtime_factory = hook_runtime_factory or NullHookRuntime
+        self._isolation_coordinator = isolation_coordinator
 
     def create(
         self,
@@ -377,12 +406,13 @@ class SubAgentRuntimeFactory:
         *,
         detached: bool,
         task_id: str | None = None,
+        workspace_lease: WorkspaceLease | None = None,
     ) -> SubAgentRuntime:
-        role = self._role_for(request)
+        role = self.role_for(request)
         model_id = self._model_id(request, role)
         max_rounds = request.parent.max_rounds if request.kind is SubAgentKind.FORK else role.metadata.max_rounds
         memory = InMemoryConversationMemory()
-        for message in self._initial_messages(request, role):
+        for message in self._initial_messages(request, role, workspace_lease=workspace_lease):
             memory.append(message)
         llm = self._llm_factory(replace(self._llm_config, model=model_id))
         agent_config = AgentConfig(max_rounds=max_rounds)
@@ -392,6 +422,7 @@ class SubAgentRuntimeFactory:
             llm=llm,
             agent_config=agent_config,
             permission=permission_proxy,
+            workspace_lease=workspace_lease,
         )
         tool_policy = SubAgentToolPolicy(
             tool_definitions=tuple(task_runtime.registry.definitions()),
@@ -419,6 +450,11 @@ class SubAgentRuntimeFactory:
             if task_runtime.skill_runtime is None
             else _TaskVisibleSkillRuntime(task_runtime.skill_runtime, visible_names)
         )
+        workspace_context = (
+            workspace_lease.context
+            if workspace_lease is not None
+            else self._shared_workspace_context()
+        )
         agent_loop = AgentLoop(
             llm=llm,
             memory=memory,
@@ -430,6 +466,7 @@ class SubAgentRuntimeFactory:
             prompt_builder=_PassthroughPromptBuilder(),
             skill_runtime=skill_runtime,
             hook_runtime=task_runtime.hook_runtime or self._hook_runtime_factory(),
+            workspace=workspace_context,
         )
         return SubAgentRuntime(
             request=request,
@@ -438,10 +475,24 @@ class SubAgentRuntimeFactory:
             max_rounds=max_rounds,
             max_result_bytes=self._config.max_result_bytes,
             task_id=task_id,
+            workspace_lease=workspace_lease,
+            isolation_coordinator=self._isolation_coordinator,
             cleanup=task_runtime.close,
         )
 
-    def _create_task_runtime(self, *, memory, llm, agent_config, permission):
+    def _shared_workspace_context(self) -> WorkspaceContext:
+        root = self._workspace_root.resolve()
+        return WorkspaceContext(
+            kind=WorkspaceKind.SHARED,
+            root=root,
+            repository_root=root,
+            repository_id="subagent-shared-workspace",
+            task_identity=None,
+            branch_name=None,
+            hooks_path=None,
+        )
+
+    def _create_task_runtime(self, *, memory, llm, agent_config, permission, workspace_lease):
         try:
             return self._task_tool_registry_factory.create(
                 self._parent_tool_registry,
@@ -452,6 +503,7 @@ class SubAgentRuntimeFactory:
                 permission=permission,
                 agent_config=agent_config,
                 hook_runtime_factory=self._hook_runtime_factory,
+                workspace_lease=workspace_lease,
             )
         except TypeError as exc:
             message = str(exc)
@@ -459,7 +511,7 @@ class SubAgentRuntimeFactory:
                 raise
             return self._task_tool_registry_factory.create(self._parent_tool_registry)
 
-    def _role_for(self, request: SubAgentLaunchRequest) -> AgentRoleDefinition | None:
+    def role_for(self, request: SubAgentLaunchRequest) -> AgentRoleDefinition | None:
         if request.kind is SubAgentKind.FORK:
             return None
         if not request.role_name:
@@ -482,6 +534,8 @@ class SubAgentRuntimeFactory:
         self,
         request: SubAgentLaunchRequest,
         role: AgentRoleDefinition | None,
+        *,
+        workspace_lease: WorkspaceLease | None,
     ) -> tuple[ChatMessage, ...]:
         if request.kind is SubAgentKind.FORK:
             return build_fork_prompt(request.parent, task=request.task).messages
@@ -491,6 +545,7 @@ class SubAgentRuntimeFactory:
             role=role,
             task=request.task,
             workspace_environment=self._workspace_environment,
+            workspace_context=workspace_lease.context if workspace_lease is not None else None,
             project_instructions=self._project_instructions,
         )
 

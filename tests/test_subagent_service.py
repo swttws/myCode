@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,13 @@ from mycode.subagent.service import (
     SubAgentService,
 )
 from mycode.subagent.tasks import SubAgentTaskManager
+from mycode.workspace import (
+    WorkspaceContext,
+    WorkspaceKind,
+    WorkspaceLease,
+    WorkspacePreparation,
+    WorkspaceTaskIdentity,
+)
 
 
 def config(*, max_concurrency=4):
@@ -129,6 +137,37 @@ class TaskIdAwareRuntimeFactory:
         return self.runtime
 
 
+class WorkspaceAwareRuntimeFactory:
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.calls = []
+
+    def role_for(self, launch_request):
+        return None
+
+    def create(self, launch_request, *, detached, task_id, workspace_lease):
+        self.calls.append((launch_request, detached, task_id, workspace_lease))
+        return self.runtime
+
+
+class RecordingIsolationCoordinator:
+    def __init__(self, *, lease=None, error=None):
+        self.lease = lease
+        self.error = error
+        self.prepare_calls = []
+        self.release_calls = []
+
+    async def prepare(self, *, request, role, task_id, task_token):
+        self.prepare_calls.append((request, role, task_id, task_token))
+        if self.error is not None:
+            raise self.error
+        return self.lease or shared_lease()
+
+    async def release(self, lease):
+        self.release_calls.append(lease)
+        return None
+
+
 class ImmediateTerminalWaiter:
     async def wait(self, *, manager, task_id, timeout_seconds, detach_event):
         for _ in range(50):
@@ -175,6 +214,49 @@ def make_service(*, cfg=None, inbox=None, runtimes, waiter=None):
     return service, manager, inbox
 
 
+def shared_lease() -> WorkspaceLease:
+    return WorkspaceLease(
+        context=WorkspaceContext(
+            kind=WorkspaceKind.SHARED,
+            root=Path("C:/repo"),
+            repository_root=Path("C:/repo"),
+            repository_id="repo-123",
+            task_identity=None,
+            branch_name=None,
+            hooks_path=None,
+        ),
+        preparation=WorkspacePreparation.SHARED,
+        metadata_path=None,
+        initialized_rules=(),
+    )
+
+
+def worktree_lease(task_id: str, task_token: str) -> WorkspaceLease:
+    identity = WorkspaceTaskIdentity(
+        repository_id="repo-123",
+        task_id=task_id,
+        role_name="general",
+        task_token=task_token,
+        relative_name=f"general/{task_token}",
+        branch_name=f"mycode/worktree/general/{task_token}",
+        base_commit="a" * 40,
+    )
+    return WorkspaceLease(
+        context=WorkspaceContext(
+            kind=WorkspaceKind.WORKTREE,
+            root=Path(f"C:/repo/.worktrees/general/{task_token}"),
+            repository_root=Path("C:/repo"),
+            repository_id=identity.repository_id,
+            task_identity=identity,
+            branch_name=identity.branch_name,
+            hooks_path=None,
+        ),
+        preparation=WorkspacePreparation.CREATED,
+        metadata_path=Path(f"C:/repo/.worktrees/.metadata/general/{task_token}.json"),
+        initialized_rules=(),
+    )
+
+
 def test_service_returns_inline_result_when_foreground_finishes_before_threshold():
     async def scenario():
         service, _manager, inbox = make_service(runtimes=(InstantRuntime("inline"),))
@@ -209,6 +291,67 @@ def test_service_allocates_task_id_before_runtime_creation():
         assert response.inline is True
         assert response.task.id == "task-000001"
         assert factory.calls == [(launch_request, False, "task-000001")]
+
+    asyncio.run(scenario())
+
+
+def test_service_prepares_binds_workspace_before_runtime_creation():
+    async def scenario():
+        runtime = InstantRuntime("inline")
+        factory = WorkspaceAwareRuntimeFactory(runtime)
+        cfg = config()
+        manager = SubAgentTaskManager(
+            config=cfg,
+            notification_inbox=SubAgentNotificationInbox(),
+        )
+        lease = worktree_lease("task-000001", "task-000001")
+        coordinator = RecordingIsolationCoordinator(lease=lease)
+        service = SubAgentService(
+            config=cfg,
+            runtime_factory=factory,
+            task_manager=manager,
+            foreground_waiter=ImmediateTerminalWaiter(),
+            isolation_coordinator=coordinator,
+        )
+
+        launch_request = request()
+        response = await service.run(launch_request)
+
+        assert response.inline is True
+        assert coordinator.prepare_calls == [(launch_request, None, "task-000001", "task-000001")]
+        assert factory.calls == [(launch_request, False, "task-000001", lease)]
+        snapshot = manager.get("task-000001")
+        assert snapshot.workspace_root == lease.context.root
+        assert snapshot.branch_name == lease.context.branch_name
+
+    asyncio.run(scenario())
+
+
+def test_service_marks_reserved_task_failed_when_workspace_prepare_fails():
+    async def scenario():
+        runtime = InstantRuntime("inline")
+        factory = WorkspaceAwareRuntimeFactory(runtime)
+        cfg = config()
+        manager = SubAgentTaskManager(
+            config=cfg,
+            notification_inbox=SubAgentNotificationInbox(),
+        )
+        coordinator = RecordingIsolationCoordinator(error=RuntimeError("worktree boom"))
+        service = SubAgentService(
+            config=cfg,
+            runtime_factory=factory,
+            task_manager=manager,
+            foreground_waiter=ImmediateTerminalWaiter(),
+            isolation_coordinator=coordinator,
+        )
+
+        with pytest.raises(RuntimeError, match="worktree boom"):
+            await service.run(request())
+
+        snapshot = manager.get("task-000001")
+        assert snapshot.state is SubAgentTaskState.FAILED
+        assert snapshot.error_code == "workspace_prepare_error"
+        assert factory.calls == []
 
     asyncio.run(scenario())
 

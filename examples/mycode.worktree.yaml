@@ -1,0 +1,19 @@
+version: 1
+git_timeout_seconds: 30
+cleanup:
+  interval_seconds: 3600
+  expire_after_seconds: 604800
+  scan_batch_size: 64
+rules:
+  - type: copy
+    source: config/local.toml
+    target: config/local.toml
+  - type: ignored_copy
+    source: .cache/seed.db
+    target: .cache/seed.db
+  - type: symlink
+    source: vendor
+    target: vendor
+  - type: hooks
+    source: hooks
+    target: .git-hooks

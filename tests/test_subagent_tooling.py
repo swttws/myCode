@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import types
+from pathlib import Path
 from types import MappingProxyType
 
 import pytest
@@ -69,7 +70,15 @@ from mycode.tool import (
     ToolRegistry,
     ToolResult,
     ToolRuntimeScope,
+    ToolWorkspaceScope,
     create_default_tool_registry,
+)
+from mycode.workspace import (
+    WorkspaceContext,
+    WorkspaceKind,
+    WorkspaceLease,
+    WorkspacePreparation,
+    WorkspaceTaskIdentity,
 )
 from tests.skill_test_support import FakeLLM, write_skill
 
@@ -576,6 +585,62 @@ def test_task_tool_registry_rebuilds_load_skill_with_child_skill_runtime(tmp_pat
     assert runtime.skill_runtime.is_active("review") is True
 
 
+def test_task_tool_registry_builds_project_skills_from_worktree_workspace(tmp_path):
+    shared = tmp_path / "shared"
+    worktree = tmp_path / "worktree"
+    home = tmp_path / "home"
+    builtin = tmp_path / "builtin"
+    for root in (
+        shared / ".mycode" / "skills",
+        worktree / ".mycode" / "skills",
+        home / ".mycode" / "skills",
+        builtin,
+    ):
+        root.mkdir(parents=True)
+    write_skill(shared / ".mycode" / "skills", "review", body="SHARED {{arguments}}")
+    write_skill(worktree / ".mycode" / "skills", "review", body="WORKTREE {{arguments}}")
+
+    parent_registry = create_default_tool_registry(shared)
+    parent_registry.register(SkillLoadTool(runtime=object()))
+    factory_roots = []
+
+    def skill_catalog_factory(tool_names, workspace_root):
+        factory_roots.append(workspace_root)
+        return SkillCatalog(
+            loader=SkillLoader(workspace_root=workspace_root, home=home, builtin_root=builtin),
+            tool_names=tool_names,
+            reserved_slash_names=frozenset(),
+        )
+
+    runtime = TaskToolRegistryFactory(
+        workspace_root=shared,
+        home=home,
+        skill_catalog_factory=skill_catalog_factory,
+    ).create(
+        parent_registry,
+        llm=FakeLLM(),
+        memory=InMemoryConversationMemory(),
+        llm_config=LLMConfig(
+            protocol="openai_chat",
+            model="model",
+            base_url="https://example.invalid",
+            api_key="key",
+            compact=CompactConfig(context_window_tokens=30_000),
+        ),
+        llm_factory=lambda config: FakeLLM(),
+        permission=AllowPermission(),
+        agent_config=AgentConfig(),
+        workspace_lease=worktree_lease("task-000001", "task-000001", root=worktree),
+    )
+
+    child_tool = runtime.registry.get("load_skill")
+    result = asyncio.run(child_tool.execute_async({"name": "review", "arguments": "target"}))
+
+    assert result.ok is True
+    assert factory_roots == [worktree.resolve()]
+    assert runtime.skill_runtime.definition("review").entry_path.is_relative_to(worktree)
+
+
 def test_task_mcp_wrappers_and_tool_search_use_child_registry_discovery(tmp_path):
     remote = FakeRemoteTool(
         server_name="files",
@@ -607,6 +672,53 @@ def test_task_mcp_wrappers_and_tool_search_use_child_registry_discovery(tmp_path
     assert [definition.name for definition in parent_registry.model_definitions()] == ["tool_search"]
 
 
+def test_task_registry_hides_shared_only_remote_tools_for_worktree_lease(tmp_path):
+    remote = FakeRemoteTool(
+        server_name="files",
+        remote_name="echo",
+        public_name="files__echo",
+        description="Echo remotely.",
+        parameters={"type": "object", "properties": {}, "required": []},
+        kind=ToolKind.READ,
+    )
+    pool = FakeMCPPool((remote,), available={"files"})
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir()
+    parent_registry = create_default_tool_registry(shared_root)
+    parent_registry.register(FakeMCPToolWrapper(remote, pool))
+    parent_registry.register(FakeToolSearch(parent_registry, pool))
+
+    runtime = TaskToolRegistryFactory(workspace_root=shared_root).create(
+        parent_registry,
+        workspace_lease=worktree_lease(
+            "task-000001",
+            "task-000001",
+            root=tmp_path / "worktree",
+        ),
+    )
+
+    assert runtime.registry.get("read_file") is not None
+    assert runtime.registry.get("files__echo") is None
+    assert runtime.registry.get("tool_search") is None
+    assert parent_registry.get("files__echo") is not None
+    assert parent_registry.get("tool_search") is not None
+
+
+def test_fake_mcp_helpers_default_to_shared_only_workspace_scope():
+    remote = FakeRemoteTool(
+        server_name="files",
+        remote_name="echo",
+        public_name="files__echo",
+        description="Echo remotely.",
+        parameters={"type": "object", "properties": {}, "required": []},
+        kind=ToolKind.READ,
+    )
+    pool = FakeMCPPool((remote,), available={"files"})
+
+    assert FakeMCPToolWrapper(remote, pool).definition.workspace_scope is ToolWorkspaceScope.SHARED_ONLY
+    assert FakeToolSearch(ToolRegistry(), pool).definition.workspace_scope is ToolWorkspaceScope.SHARED_ONLY
+
+
 def test_task_registry_can_replace_parent_compact_tool_with_child_archive_tool(tmp_path):
     parent_registry = ToolRegistry([ReadCompactArtifactTool(FakeArchiveSession())])
     runtime = TaskToolRegistryFactory(workspace_root=tmp_path, home=tmp_path / "home").create(
@@ -630,3 +742,31 @@ def test_task_registry_can_replace_parent_compact_tool_with_child_archive_tool(t
     assert not isinstance(child_tool, ParentOnlyToolAdapter)
     assert child_tool.definition.runtime_scope is ToolRuntimeScope.TASK_LOCAL
     assert runtime.context_manager is not None
+
+
+def worktree_lease(task_id: str, task_token: str, *, root: Path | None = None) -> WorkspaceLease:
+    root = root or Path(f"C:/repo/.worktrees/general/{task_token}")
+    root.mkdir(parents=True, exist_ok=True)
+    identity = WorkspaceTaskIdentity(
+        repository_id="repo-123",
+        task_id=task_id,
+        role_name="general",
+        task_token=task_token,
+        relative_name=f"general/{task_token}",
+        branch_name=f"mycode/worktree/general/{task_token}",
+        base_commit="a" * 40,
+    )
+    return WorkspaceLease(
+        context=WorkspaceContext(
+            kind=WorkspaceKind.WORKTREE,
+            root=root,
+            repository_root=root.parent.parent.parent,
+            repository_id=identity.repository_id,
+            task_identity=identity,
+            branch_name=identity.branch_name,
+            hooks_path=None,
+        ),
+        preparation=WorkspacePreparation.CREATED,
+        metadata_path=Path(f"C:/repo/.worktrees/.metadata/general/{task_token}.json"),
+        initialized_rules=(),
+    )

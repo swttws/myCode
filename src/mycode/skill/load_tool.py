@@ -10,6 +10,7 @@ from mycode.tool import (
     ToolKind,
     ToolResult,
     ToolRuntimeScope,
+    ToolWorkspaceScope,
 )
 
 
@@ -35,6 +36,7 @@ class SkillLoadTool:
             kind=ToolKind.READ,
             parallel_safe=False,
             runtime_scope=ToolRuntimeScope.TASK_LOCAL,
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
         )
 
     async def execute_async(self, arguments: ToolArguments) -> ToolResult:

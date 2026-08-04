@@ -8,9 +8,11 @@ from mycode.permission.pathing import PathGuard, ToolPathError
 from mycode.tool.base import (
     ToolArguments,
     ToolDefinition,
+    ToolInvocationContext,
     ToolKind,
     ToolResult,
     ToolRuntimeScope,
+    ToolWorkspaceScope,
 )
 from mycode.tool.cache import FileTextCache
 
@@ -39,10 +41,16 @@ class ReadFileTool:
             kind=ToolKind.READ,
             grant_arguments=("path",),
             runtime_scope=ToolRuntimeScope.TASK_LOCAL,
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
         )
 
-    def execute(self, arguments: ToolArguments) -> ToolResult:
+    def execute(
+        self,
+        arguments: ToolArguments,
+        context: ToolInvocationContext | None = None,
+    ) -> ToolResult:
         try:
+            _ensure_invocation_workspace(self._path_guard.workspace_root, context)
             path_value = _required_str(arguments, "path")
             path = self._path_guard.resolve(path_value)
             text = self._cache.read_text(path)
@@ -83,10 +91,16 @@ class WriteFileTool:
             kind=ToolKind.WRITE,
             grant_arguments=("path",),
             runtime_scope=ToolRuntimeScope.TASK_LOCAL,
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
         )
 
-    def execute(self, arguments: ToolArguments) -> ToolResult:
+    def execute(
+        self,
+        arguments: ToolArguments,
+        context: ToolInvocationContext | None = None,
+    ) -> ToolResult:
         try:
+            _ensure_invocation_workspace(self._path_guard.workspace_root, context)
             path_value = _required_str(arguments, "path")
             text = _required_str(arguments, "text")
             path = self._path_guard.resolve(path_value)
@@ -135,10 +149,16 @@ class EditFileTool:
             kind=ToolKind.WRITE,
             grant_arguments=("path",),
             runtime_scope=ToolRuntimeScope.TASK_LOCAL,
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
         )
 
-    def execute(self, arguments: ToolArguments) -> ToolResult:
+    def execute(
+        self,
+        arguments: ToolArguments,
+        context: ToolInvocationContext | None = None,
+    ) -> ToolResult:
         try:
+            _ensure_invocation_workspace(self._path_guard.workspace_root, context)
             path_value = _required_str(arguments, "path")
             old_text = _required_str(arguments, "old_text")
             new_text = _required_str(arguments, "new_text")
@@ -187,10 +207,16 @@ class FindFilesTool:
             kind=ToolKind.READ,
             grant_arguments=("root",),
             runtime_scope=ToolRuntimeScope.TASK_LOCAL,
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
         )
 
-    def execute(self, arguments: ToolArguments) -> ToolResult:
+    def execute(
+        self,
+        arguments: ToolArguments,
+        context: ToolInvocationContext | None = None,
+    ) -> ToolResult:
         try:
+            _ensure_invocation_workspace(self._path_guard.workspace_root, context)
             pattern = _required_str(arguments, "pattern")
             root = self._path_guard.resolve(str(arguments.get("root", ".")))
             matches = []
@@ -233,10 +259,16 @@ class SearchCodeTool:
             kind=ToolKind.READ,
             grant_arguments=("root",),
             runtime_scope=ToolRuntimeScope.TASK_LOCAL,
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
         )
 
-    def execute(self, arguments: ToolArguments) -> ToolResult:
+    def execute(
+        self,
+        arguments: ToolArguments,
+        context: ToolInvocationContext | None = None,
+    ) -> ToolResult:
         try:
+            _ensure_invocation_workspace(self._path_guard.workspace_root, context)
             query = _required_str(arguments, "query")
             root = self._path_guard.resolve(str(arguments.get("root", ".")))
             matches: list[dict[str, object]] = []
@@ -256,6 +288,16 @@ def _required_str(arguments: ToolArguments, name: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{name} must be a string")
     return value
+
+
+def _ensure_invocation_workspace(
+    bound_root: Path,
+    context: ToolInvocationContext | None,
+) -> None:
+    if context is None:
+        return
+    if bound_root.resolve() != context.workspace.root.resolve():
+        raise ToolPathError("工具绑定工作区与调用工作区不一致。")
 
 
 def _relative_path(root: Path, path: Path) -> str:

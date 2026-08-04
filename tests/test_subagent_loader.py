@@ -4,6 +4,7 @@ import pytest
 
 from mycode.subagent.loader import AgentRoleLoader
 from mycode.subagent.models import (
+    AgentIsolationMode,
     AgentModelTier,
     AgentPermissionMode,
     AgentRoleSource,
@@ -33,6 +34,7 @@ def write_role(
     model: str = "inherit",
     max_rounds: int | str = 8,
     permission_mode: str = "strict",
+    isolation: str | None = None,
     body: str = "请非交互地完成任务。",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +51,11 @@ def write_role(
                 f"model: {yaml_scalar(model)}",
                 f"max_rounds: {max_rounds}",
                 f"permission_mode: {yaml_scalar(permission_mode)}",
+                *(
+                    [f"isolation: {yaml_scalar(isolation)}"]
+                    if isolation is not None
+                    else []
+                ),
                 "---",
                 body,
                 "",
@@ -110,6 +117,7 @@ def test_loader_parses_valid_frontmatter_body_path_and_revision(tmp_path):
         model="sonnet",
         max_rounds=12,
         permission_mode="default",
+        isolation="worktree",
         body="请读取事实并给出有界结论。",
     )
 
@@ -131,6 +139,7 @@ def test_loader_parses_valid_frontmatter_body_path_and_revision(tmp_path):
     assert definition.metadata.model is AgentModelTier.SONNET
     assert definition.metadata.max_rounds == 12
     assert definition.metadata.permission_mode is AgentPermissionMode.DEFAULT
+    assert definition.metadata.isolation is AgentIsolationMode.WORKTREE
     assert definition.instruction == "请读取事实并给出有界结论。"
     assert definition.entry_path == role_path
     assert len(definition.revision) == 64
@@ -144,6 +153,7 @@ def test_loader_parses_valid_frontmatter_body_path_and_revision(tmp_path):
         ("empty_body.md", "empty_body", "", {}, "empty_body"),
         ("bad_model.md", "bad_model", "正文", {"model": "tiny"}, "invalid_model"),
         ("bad_permission.md", "bad_permission", "正文", {"permission_mode": "root"}, "invalid_permission_mode"),
+        ("bad_isolation.md", "bad_isolation", "正文", {"isolation": "container"}, "invalid_isolation"),
         ("bad_rounds.md", "bad_rounds", "正文", {"max_rounds": 0}, "invalid_max_rounds"),
     ],
 )

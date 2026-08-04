@@ -1,6 +1,7 @@
 import json
 import asyncio
 import time
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +29,7 @@ from mycode.compact.models import (
 )
 from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType, UsageObservation
 from mycode.llm import MessageOrigin
+from mycode.hook.models import HookTriggerResult
 from mycode.mcp import MCPToolWrapper, RemoteTool, ToolSearch
 from mycode.memory import InMemoryConversationMemory
 from mycode.memory.models import FrameworkContext, FrameworkContextBlock, FrameworkContextKind, MemoryDiagnostic
@@ -46,8 +48,17 @@ from mycode.permission.models import (
     PermissionMode,
 )
 from mycode.permission.service import PermissionInterceptor, PermissionService
-from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
-from tests.helpers import PassthroughContextManager
+from mycode.tool import (
+    ToolCall,
+    ToolDefinition,
+    ToolExecutor,
+    ToolInvocationContext,
+    ToolKind,
+    ToolRegistry,
+    ToolResult,
+    ToolWorkspaceScope,
+)
+from tests.helpers import PassthroughContextManager, shared_workspace
 
 
 class ScriptedLLM(BaseLLM):
@@ -205,6 +216,59 @@ class FakePermission:
 
     async def after_tool(self, call, result):
         return result
+
+
+class RecordingHookRuntime:
+    def __init__(self):
+        self.contexts = []
+        self.before_tool_calls = []
+        self.after_tool_calls = []
+        self.clear_calls = 0
+
+    async def trigger(self, context):
+        self.contexts.append(context)
+        return HookTriggerResult(actions=())
+
+    async def before_tool(self, **kwargs):
+        self.before_tool_calls.append(kwargs)
+        return HookTriggerResult(actions=())
+
+    async def after_tool(self, **kwargs):
+        self.after_tool_calls.append(kwargs)
+        return HookTriggerResult(actions=())
+
+    def prompt_blocks(self):
+        return ()
+
+    def clear_request_state(self):
+        self.clear_calls += 1
+
+
+class ContextOnlyExecutor:
+    def __init__(self):
+        self.contexts = []
+
+    def definitions(self):
+        return []
+
+    async def execute(self, call, context):
+        self.contexts.append(context)
+        return ToolResult(ok=True, tool_name=call.name, content={"workspace": str(context.workspace.root)})
+
+
+class WorkspaceAwareTool:
+    @property
+    def definition(self):
+        return ToolDefinition(
+            name="workspace_tool",
+            description="Uses explicit workspace context.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            kind=ToolKind.READ,
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
+        )
+
+    def execute(self, arguments):
+        raise AssertionError("tool should be executed by ContextOnlyExecutor in this test")
 
 
 class AgentFakeMCPPool:
@@ -946,6 +1010,54 @@ def test_agent_loop_executes_tool_and_continues_to_final_response():
             tool_call_id="call-1",
         )
     assert llm.requests[1][-1].content.startswith("<environment-context>")
+
+
+def test_agent_loop_uses_injected_workspace_for_hooks_and_tool_context(tmp_path, monkeypatch):
+    workspace = shared_workspace(tmp_path)
+    call = ToolCall(
+        id="call-workspace",
+        name="workspace_tool",
+        arguments={},
+        raw_arguments="{}",
+    )
+    llm = ScriptedLLM(
+        [
+            [StreamEvent(StreamEventType.TOOL_CALL, tool_call=call), StreamEvent(StreamEventType.DONE)],
+            [StreamEvent(StreamEventType.TEXT_DELTA, "done"), StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    memory = InMemoryConversationMemory()
+    registry = ToolRegistry([WorkspaceAwareTool()])
+    executor = ContextOnlyExecutor()
+    hook_runtime = RecordingHookRuntime()
+    monkeypatch.setattr(
+        Path,
+        "cwd",
+        lambda: (_ for _ in ()).throw(AssertionError("AgentLoop must not read process cwd")),
+    )
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=executor,
+        tool_registry=registry,
+        permission=FakePermission(),
+        prompt_builder=PromptBuilder(
+            registry=PromptRegistry([FakeModule("stable", 100, "stable instruction")]),
+            environment_collector=FakeEnvironmentCollector(),
+            reminder_policy=ReminderPolicy(4),
+            config=PromptConfig(),
+        ),
+        context_manager=PassthroughContextManager(memory),
+        hook_runtime=hook_runtime,
+        workspace=workspace,
+    )
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert events[-1].content == "done"
+    assert executor.contexts == [ToolInvocationContext(workspace=workspace)]
+    assert hook_runtime.contexts
+    assert {context.workspace_root for context in hook_runtime.contexts} == {workspace.root}
 
 
 def test_agent_loop_errors_when_max_rounds_exceeded():

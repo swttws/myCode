@@ -1,4 +1,6 @@
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -6,6 +8,8 @@ import yaml
 from mycode.config import load_config
 from mycode.mcp import MCPTransportKind, load_mcp_config
 from mycode.subagent.models import AgentModelTier
+from mycode.worktree.config import WorktreeConfigLoader
+from mycode.worktree.models import WorktreeRuleType
 
 
 def test_readme_documents_supported_protocols_and_agent_scope():
@@ -329,3 +333,94 @@ def test_readme_documents_stage_12_subagent_behavior():
     ]
 
     assert all(value in readme for value in required)
+
+
+def test_worktree_example_config_loads_with_real_loader(tmp_path: Path):
+    example_path = Path("examples/mycode.worktree.yaml")
+    text = example_path.read_text(encoding="utf-8")
+
+    assert re.search(r"sk-[A-Za-z0-9]{8,}", text) is None
+
+    repo_root = tmp_path / "repo"
+    _prepare_worktree_example_repo(repo_root)
+    shutil.copyfile(example_path, repo_root / ".mycode" / "worktree.yaml")
+
+    config = WorktreeConfigLoader().load(repo_root)
+
+    assert config.version == 1
+    assert config.git_timeout_seconds == 30.0
+    assert config.cleanup_interval_seconds == 3600.0
+    assert config.expire_after_seconds == 604800.0
+    assert config.scan_batch_size == 64
+    assert [rule.type for rule in config.rules] == [
+        WorktreeRuleType.COPY,
+        WorktreeRuleType.IGNORED_COPY,
+        WorktreeRuleType.SYMLINK,
+        WorktreeRuleType.HOOKS,
+    ]
+    assert [rule.source for rule in config.rules] == [
+        "config/local.toml",
+        ".cache/seed.db",
+        "vendor",
+        "hooks",
+    ]
+    assert [rule.target for rule in config.rules] == [
+        "config/local.toml",
+        ".cache/seed.db",
+        "vendor",
+        ".git-hooks",
+    ]
+
+
+def test_worktree_example_config_is_not_git_ignored():
+    example_path = Path("examples/mycode.worktree.yaml")
+
+    result = subprocess.run(
+        ["git", "check-ignore", "--quiet", str(example_path)],
+        shell=False,
+        check=False,
+        capture_output=True,
+        text=False,
+    )
+
+    assert result.returncode == 1
+
+
+def test_readme_documents_stage_13_worktree_isolation():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    required = [
+        "Stage 13",
+        "isolation: worktree",
+        ".worktrees/<role>/<task-token>",
+        "mycode/worktree/<role>/<task-token>",
+        ".mycode/worktree.yaml",
+        "explicit cwd",
+        "WorkspaceContext",
+        "creation",
+        "recovery",
+        "initialization",
+        "protection",
+        "retention",
+        "deletion",
+        "background cleanup",
+        "does not automatically merge",
+        "does not automatically push",
+        "does not force delete",
+        "does not add manual worktree commands",
+    ]
+
+    assert all(value in readme for value in required)
+    assert re.search(r"sk-[A-Za-z0-9]{8,}", readme) is None
+
+
+def _prepare_worktree_example_repo(repo_root: Path) -> None:
+    (repo_root / ".mycode").mkdir(parents=True)
+    (repo_root / "config").mkdir()
+    (repo_root / "config" / "local.toml").write_text(
+        "profile = \"local\"\n",
+        encoding="utf-8",
+    )
+    (repo_root / ".cache").mkdir()
+    (repo_root / ".cache" / "seed.db").write_text("seed\n", encoding="utf-8")
+    (repo_root / "vendor").mkdir()
+    (repo_root / "hooks").mkdir()

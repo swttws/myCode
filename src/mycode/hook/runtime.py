@@ -53,11 +53,13 @@ class HookRuntime:
         round_index: int,
         turn_id: int,
         plan_only: bool,
+        workspace_root: Path | None = None,
     ) -> HookTriggerResult:
+        active_root = Path(workspace_root).resolve() if workspace_root is not None else self._workspace_root
         context = build_tool_hook_context(
             event=HookEvent.TOOL_BEFORE,
-            workspace_root=self._workspace_root,
-            path_guard=self._path_guard,
+            workspace_root=active_root,
+            path_guard=self._path_guard_for(active_root),
             call=call,
             definition=definition,
             round_index=round_index,
@@ -104,11 +106,13 @@ class HookRuntime:
         round_index: int,
         turn_id: int,
         plan_only: bool,
+        workspace_root: Path | None = None,
     ) -> HookTriggerResult:
+        active_root = Path(workspace_root).resolve() if workspace_root is not None else self._workspace_root
         context = build_tool_hook_context(
             event=HookEvent.TOOL_AFTER,
-            workspace_root=self._workspace_root,
-            path_guard=self._path_guard,
+            workspace_root=active_root,
+            path_guard=self._path_guard_for(active_root),
             call=call,
             definition=definition,
             result=result,
@@ -190,6 +194,11 @@ class HookRuntime:
             and result.output
         ):
             self._add_prompt_injection(rule.id, result.output, context)
+
+    def _path_guard_for(self, workspace_root: Path) -> PathGuard:
+        if workspace_root.resolve() == self._workspace_root.resolve():
+            return self._path_guard
+        return PathGuard(workspace_root)
 
 
 class NullHookRuntime:

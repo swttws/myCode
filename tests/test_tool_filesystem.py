@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from mycode.permission.pathing import PathGuard, ToolPathError
+from mycode.tool import ToolInvocationContext
 from mycode.tool.cache import FileTextCache
 from mycode.tool.filesystem import (
     EditFileTool,
@@ -11,6 +12,7 @@ from mycode.tool.filesystem import (
     SearchCodeTool,
     WriteFileTool,
 )
+from tests.helpers import shared_workspace
 
 
 def test_path_guard_resolves_relative_path_inside_workspace(tmp_path):
@@ -54,6 +56,21 @@ def test_read_file_tool_rejects_path_outside_workspace(tmp_path):
     assert result.ok is False
     assert result.tool_name == "read_file"
     assert "工作区" in result.error
+
+
+def test_read_file_tool_rejects_mismatched_invocation_workspace(tmp_path):
+    workspace_a = tmp_path / "a"
+    workspace_b = tmp_path / "b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    (workspace_a / "notes.txt").write_text("secret", encoding="utf-8")
+    tool = ReadFileTool(PathGuard(workspace_a), FileTextCache())
+    context = ToolInvocationContext(workspace=shared_workspace(workspace_b))
+
+    result = tool.execute({"path": "notes.txt"}, context)
+
+    assert result.ok is False
+    assert "调用工作区" in result.error
 
 
 def test_write_file_tool_writes_text_and_creates_parent(tmp_path):

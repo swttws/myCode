@@ -7,6 +7,7 @@ from typing import Awaitable, Callable
 
 from mycode.agent.events import AgentEvent, AgentEventType
 from mycode.subagent.models import (
+    AgentIsolationMode,
     SubAgentConfig,
     SubAgentExecutionReport,
     SubAgentLaunchRequest,
@@ -19,6 +20,8 @@ from mycode.subagent.models import (
 )
 from mycode.subagent.notifications import SubAgentNotificationInbox
 from mycode.subagent.rendering import publish_current_render_event
+from mycode.workspace import WorkspaceKind, WorkspaceLease, WorkspaceTaskIdentity
+from mycode.worktree.models import WorktreeDispositionResult
 
 
 SubAgentRunner = Callable[[asyncio.Event], Awaitable[SubAgentExecutionReport]]
@@ -28,6 +31,7 @@ SubAgentRunner = Callable[[asyncio.Event], Awaitable[SubAgentExecutionReport]]
 class _TaskRecord:
     id: str
     sequence: int
+    task_token: str
     request: SubAgentLaunchRequest
     runner: SubAgentRunner | None
     state: SubAgentTaskState
@@ -37,6 +41,8 @@ class _TaskRecord:
     error_code: str | None = None
     error_message: str | None = None
     usage: SubAgentUsage = SubAgentUsage()
+    workspace_lease: WorkspaceLease | None = None
+    disposition: WorktreeDispositionResult | None = None
     cancel_event: asyncio.Event | None = None
     task: asyncio.Task | None = None
 
@@ -80,6 +86,7 @@ class SubAgentTaskManager:
             record = _TaskRecord(
                 id=task_id,
                 sequence=sequence,
+                task_token=task_id,
                 request=request,
                 runner=None,
                 state=SubAgentTaskState.QUEUED,
@@ -92,6 +99,20 @@ class SubAgentTaskManager:
 
         await _publish_task_event(snapshot, AgentEventType.SUBAGENT_TASK_QUEUED)
         return snapshot
+
+    async def bind_workspace(self, task_id: str, lease: WorkspaceLease) -> SubAgentTaskSnapshot:
+        if not isinstance(lease, WorkspaceLease):
+            raise ValueError("lease must be a WorkspaceLease")
+        async with self._lock:
+            record = self._records.get(task_id)
+            if record is None:
+                raise KeyError(f"task_not_found: {task_id}")
+            if record.state is not SubAgentTaskState.QUEUED:
+                raise RuntimeError("workspace_can_only_bind_queued_task")
+            if record.workspace_lease is not None:
+                raise RuntimeError("workspace_already_bound")
+            record.workspace_lease = lease
+            return self._snapshot(record)
 
     async def start_reserved(self, task_id: str, runner: SubAgentRunner) -> SubAgentTaskSnapshot:
         async with self._lock:
@@ -134,6 +155,7 @@ class SubAgentTaskManager:
                         summary_truncated=False,
                         usage=record.usage,
                         role_name=record.request.role_name or record.request.kind.value,
+                        **self._workspace_fields(record),
                     ),
                 )
             self._start_next_queued()
@@ -171,6 +193,23 @@ class SubAgentTaskManager:
         if record is None:
             raise KeyError(f"task_not_found: {task_id}")
         return self._snapshot(record)
+
+    def is_workspace_active(self, identity: WorkspaceTaskIdentity) -> bool:
+        if not isinstance(identity, WorkspaceTaskIdentity):
+            raise ValueError("identity must be a WorkspaceTaskIdentity")
+        for record in self._records.values():
+            if record.state in (
+                SubAgentTaskState.COMPLETED,
+                SubAgentTaskState.FAILED,
+                SubAgentTaskState.CANCELLED,
+            ):
+                continue
+            lease = record.workspace_lease
+            if lease is None or lease.context.task_identity is None:
+                continue
+            if lease.context.task_identity == identity:
+                return True
+        return False
 
     async def cancel_all_and_clear(self) -> None:
         cancelled_snapshots: list[SubAgentTaskSnapshot] = []
@@ -257,6 +296,7 @@ class SubAgentTaskManager:
         record.error_code = report.error_code
         record.error_message = report.error_message
         record.usage = report.usage
+        record.disposition = report.disposition
         if record.detached:
             self._notification_inbox.enqueue(
                 sequence=record.sequence,
@@ -266,6 +306,8 @@ class SubAgentTaskManager:
                     summary=_notification_summary(record),
                     summary_truncated=False,
                     usage=record.usage,
+                    role_name=record.request.role_name or record.request.kind.value,
+                    **self._workspace_fields(record),
                 ),
             )
         self._enforce_retention()
@@ -305,6 +347,7 @@ class SubAgentTaskManager:
         return SubAgentTaskSummary(
             id=record.id,
             sequence=record.sequence,
+            task_token=record.task_token,
             kind=record.request.kind,
             role_name=record.request.role_name,
             state=record.state,
@@ -312,12 +355,14 @@ class SubAgentTaskManager:
             rounds=record.rounds,
             error_code=record.error_code,
             usage=record.usage,
+            **self._workspace_fields(record),
         )
 
     def _snapshot(self, record: _TaskRecord) -> SubAgentTaskSnapshot:
         return SubAgentTaskSnapshot(
             id=record.id,
             sequence=record.sequence,
+            task_token=record.task_token,
             kind=record.request.kind,
             role_name=record.request.role_name,
             state=record.state,
@@ -327,7 +372,33 @@ class SubAgentTaskManager:
             error_code=record.error_code,
             error_message=record.error_message,
             usage=record.usage,
+            **self._workspace_fields(record),
         )
+
+    def _workspace_fields(self, record: _TaskRecord) -> dict[str, object]:
+        lease = record.workspace_lease
+        if lease is None:
+            return {
+                "isolation": AgentIsolationMode.SHARED,
+                "workspace_root": None,
+                "branch_name": None,
+                "workspace_preparation": None,
+                "initialized_rules": (),
+                "disposition": record.disposition,
+            }
+        isolation = (
+            AgentIsolationMode.WORKTREE
+            if lease.context.kind is WorkspaceKind.WORKTREE
+            else AgentIsolationMode.SHARED
+        )
+        return {
+            "isolation": isolation,
+            "workspace_root": lease.context.root,
+            "branch_name": lease.context.branch_name,
+            "workspace_preparation": lease.preparation,
+            "initialized_rules": lease.initialized_rules,
+            "disposition": record.disposition,
+        }
 
 
 def _notification_summary(record: _TaskRecord) -> str:

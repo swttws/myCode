@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import httpx
 
 from mycode.compact.models import (
@@ -8,10 +10,51 @@ from mycode.compact.models import (
     RequestSnapshot,
     TokenEstimate,
 )
+from mycode.workspace import WorkspaceContext, WorkspaceKind, WorkspaceTaskIdentity
 
 
 async def collect_async(async_iterable):
     return [item async for item in async_iterable]
+
+
+def shared_workspace(root: str | Path) -> WorkspaceContext:
+    resolved = Path(root).resolve()
+    return WorkspaceContext(
+        kind=WorkspaceKind.SHARED,
+        root=resolved,
+        repository_root=resolved,
+        repository_id="test-repository",
+        task_identity=None,
+        branch_name=None,
+        hooks_path=None,
+    )
+
+
+def worktree_workspace(
+    root: str | Path,
+    *,
+    token: str = "task-000001",
+    hooks_path: str | Path | None = None,
+) -> WorkspaceContext:
+    resolved = Path(root).resolve()
+    identity = WorkspaceTaskIdentity(
+        repository_id="test-repository",
+        task_id="agent-000001",
+        role_name="review",
+        task_token=token,
+        relative_name=f"review/{token}",
+        branch_name=f"mycode/worktree/review/{token}",
+        base_commit="a" * 40,
+    )
+    return WorkspaceContext(
+        kind=WorkspaceKind.WORKTREE,
+        root=resolved,
+        repository_root=resolved.parent,
+        repository_id=identity.repository_id,
+        task_identity=identity,
+        branch_name=identity.branch_name,
+        hooks_path=Path(hooks_path).resolve() if hooks_path is not None else None,
+    )
 
 
 def _default_compact_report() -> CompactReport:
