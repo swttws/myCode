@@ -1,21 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Protocol
-
 from mycode.workspace import WorkspaceKind, WorkspaceLease
-from mycode.worktree.models import GitStatus, WorktreeProtectionStatus
-
-
-class ProtectionGit(Protocol):
-    def status(self, target: Path) -> GitStatus: ...
-    def capture_head(self, target: Path) -> str: ...
-    def upstream(self, target: Path) -> str | None: ...
-    def commits_not_in_upstream(self, target: Path, upstream: str) -> tuple[str, ...]: ...
+from mycode.worktree.git import GitWorktreeGateway
+from mycode.worktree.models import WorktreeProtectionStatus
 
 
 class WorktreeProtectionInspector:
-    def __init__(self, *, git: ProtectionGit) -> None:
+    def __init__(self, *, git: GitWorktreeGateway) -> None:
         self._git = git
 
     def inspect(self, lease: WorkspaceLease) -> WorktreeProtectionStatus:

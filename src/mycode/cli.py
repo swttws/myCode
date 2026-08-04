@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import logging
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,39 +50,17 @@ from mycode.subagent.runtime import SubAgentRuntimeFactory
 from mycode.subagent.service import SubAgentService
 from mycode.subagent.tasks import SubAgentTaskManager
 from mycode.subagent.tool import AgentTool
-from mycode.subagent.isolation import SubAgentIsolationCoordinator
 from mycode.subagent.tooling import TaskToolRegistryFactory, create_task_permission_service
 from mycode.tool import ToolExecutor, create_default_tool_registry
 from mycode.tui import ChatTUI
-from mycode.workspace import WorkspaceContext, WorkspaceKind
 from mycode.worktree import (
-    GitWorktreeGateway,
-    RepositoryIdentity,
     WorktreeCleaner,
-    WorktreeConfig,
-    WorktreeConfigLoader,
     WorktreeError,
-    WorktreeInitializer,
-    WorktreeManager,
-    WorktreeMetadataStore,
-    WorktreePathPolicy,
-    WorktreeProtectionInspector,
+    WorktreeService,
 )
 
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class _WorktreeComponents:
-    shared_workspace: WorkspaceContext
-    repository_identity: RepositoryIdentity
-    config_loader: WorktreeConfigLoader
-    path_policy: WorktreePathPolicy
-    git: GitWorktreeGateway
-    metadata_store: WorktreeMetadataStore
-    manager: WorktreeManager
-    isolation_coordinator: SubAgentIsolationCoordinator
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -187,12 +164,12 @@ async def _run_application(
     try:
         memory = InMemoryConversationMemory()
         try:
-            worktree_components = _create_worktree_components(workspace_root)
+            worktree_service = WorktreeService.create(workspace_root)
         except (OSError, RuntimeError, ValueError, WorktreeError) as exc:
             logger.error("myCode Worktree 配置错误：%s", exc)
             print(f"myCode Worktree 配置错误：{exc}", file=sys.stderr)
             return 1
-        shared_workspace = worktree_components.shared_workspace
+        shared_workspace = worktree_service.shared_workspace
         hook_runtime = HookRuntime(
             config=hook_config,
             workspace_root=workspace_root,
@@ -284,7 +261,7 @@ async def _run_application(
             skill_loader=skill_loader,
             reserved_slash_names=_reserved_slash_names(registry),
             mcp_pool=pool,
-            worktree_components=worktree_components,
+            worktree_service=worktree_service,
         )
         if subagent_bundle is None:
             return 1
@@ -365,54 +342,6 @@ def _builtin_subagent_root() -> Path:
     return Path(__file__).resolve().parent / "subagent" / "builtins"
 
 
-def _create_worktree_components(workspace_root: Path) -> _WorktreeComponents:
-    workspace_root = Path(workspace_root).resolve()
-    bootstrap_git = GitWorktreeGateway(config=WorktreeConfig(digest="bootstrap"))
-    repository_identity = bootstrap_git.identify_repository(workspace_root)
-    config_loader = WorktreeConfigLoader()
-    worktree_config = config_loader.load(repository_identity.root)
-    git = GitWorktreeGateway(config=worktree_config)
-    path_policy = WorktreePathPolicy(repository_root=repository_identity.root)
-    worktrees_root = path_policy.validate_root(repository_identity.root)
-    git.validate_ignored_root(worktrees_root)
-    metadata_store = WorktreeMetadataStore(path_policy)
-    initializer = WorktreeInitializer(path_policy=path_policy, git=git)
-    protection_inspector = WorktreeProtectionInspector(git=git)
-    manager = WorktreeManager(
-        path_policy=path_policy,
-        config_loader=config_loader,
-        git=git,
-        metadata_store=metadata_store,
-        initializer=initializer,
-        protection_inspector=protection_inspector,
-    )
-    shared_workspace = WorkspaceContext(
-        kind=WorkspaceKind.SHARED,
-        root=workspace_root,
-        repository_root=repository_identity.root,
-        repository_id=repository_identity.repository_id,
-        task_identity=None,
-        branch_name=None,
-        hooks_path=None,
-    )
-    isolation_coordinator = SubAgentIsolationCoordinator(
-        shared_workspace=shared_workspace,
-        worktree_manager=manager,
-        git=git,
-        path_policy=path_policy,
-    )
-    return _WorktreeComponents(
-        shared_workspace=shared_workspace,
-        repository_identity=repository_identity,
-        config_loader=config_loader,
-        path_policy=path_policy,
-        git=git,
-        metadata_store=metadata_store,
-        manager=manager,
-        isolation_coordinator=isolation_coordinator,
-    )
-
-
 def _create_subagent_service(
     *,
     config,
@@ -422,7 +351,7 @@ def _create_subagent_service(
     skill_loader,
     reserved_slash_names: frozenset[str],
     mcp_pool,
-    worktree_components: _WorktreeComponents,
+    worktree_service: WorktreeService,
 ):
     subagent_config = getattr(config, "sub_agent", None)
     if subagent_config is None:
@@ -478,7 +407,7 @@ def _create_subagent_service(
         workspace_root=workspace_root,
         workspace_environment=f"workspace={workspace_root}",
         project_instructions=(),
-        isolation_coordinator=worktree_components.isolation_coordinator,
+        worktree_service=worktree_service,
     )
     task_manager = SubAgentTaskManager(
         config=subagent_config,
@@ -488,15 +417,11 @@ def _create_subagent_service(
         config=subagent_config,
         runtime_factory=runtime_factory,
         task_manager=task_manager,
-        isolation_coordinator=worktree_components.isolation_coordinator,
+        worktree_service=worktree_service,
     )
     cleaner = WorktreeCleaner(
-        repository_identity=worktree_components.repository_identity,
-        path_policy=worktree_components.path_policy,
-        config_loader=worktree_components.config_loader,
-        metadata_store=worktree_components.metadata_store,
-        manager=worktree_components.manager,
-        active_registry=task_manager,
+        worktree_service=worktree_service,
+        is_workspace_active=task_manager.is_workspace_active,
     )
     return snapshot_store, notification_inbox, service, cleaner
 

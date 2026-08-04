@@ -10,7 +10,7 @@ from mycode.workspace import WorkspacePreparation, WorkspaceTaskIdentity
 from mycode.worktree.config import WorktreeConfigLoader
 from mycode.worktree.git import GitWorktreeGateway
 from mycode.worktree.initializer import WorktreeInitializer
-from mycode.worktree.manager import WorktreeManager
+from mycode.worktree.service import WorktreeService
 from mycode.worktree.metadata import WorktreeMetadataStore
 from mycode.worktree.models import (
     InitializationResult,
@@ -329,12 +329,12 @@ def _manager(
     metadata_store=None,
     initializer=None,
     protection_inspector=None,
-) -> WorktreeManager:
+) -> WorktreeService:
     policy = _path_policy(repo_root)
     metadata_store = metadata_store or WorktreeMetadataStore(policy)
     initializer = initializer or WorktreeInitializer(path_policy=policy, git=git)
     protection_inspector = protection_inspector or WorktreeProtectionInspector(git=git)
-    return WorktreeManager(
+    return WorktreeService(
         path_policy=policy,
         config_loader=WorktreeConfigLoader(),
         git=git,

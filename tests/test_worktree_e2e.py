@@ -12,7 +12,7 @@ from mycode.worktree.cleaner import WorktreeCleaner
 from mycode.worktree.config import WorktreeConfigLoader
 from mycode.worktree.git import GitWorktreeGateway
 from mycode.worktree.initializer import WorktreeInitializer
-from mycode.worktree.manager import WorktreeManager
+from mycode.worktree.service import WorktreeService
 from mycode.worktree.metadata import WorktreeMetadataStore
 from mycode.worktree.models import (
     InitializationResult,
@@ -259,6 +259,29 @@ class InactiveRegistry:
         return False
 
 
+class CleanerWorktreeServiceView:
+    def __init__(
+        self,
+        *,
+        repository_identity: RepositoryIdentity,
+        path_policy: WorktreePathPolicy,
+        config_loader,
+        metadata_store,
+        release_service: WorktreeService,
+    ) -> None:
+        self.repository_identity = repository_identity
+        self.path_policy = path_policy
+        self.config_loader = config_loader
+        self.metadata_store = metadata_store
+        self._release_service = release_service
+
+    async def release_candidate(self, metadata: WorktreeMetadata, *, require_expired: bool):
+        return await self._release_service.release_candidate(
+            metadata,
+            require_expired=require_expired,
+        )
+
+
 class SignalingMetadataStore:
     def __init__(self, delegate: WorktreeMetadataStore) -> None:
         self._delegate = delegate
@@ -370,12 +393,12 @@ def _manager(
     initializer=None,
     protection_inspector=None,
     clock=None,
-) -> WorktreeManager:
+) -> WorktreeService:
     policy = _policy(repo_root)
     metadata_store = metadata_store or WorktreeMetadataStore(policy)
     initializer = initializer or WorktreeInitializer(path_policy=policy, git=git)
     protection_inspector = protection_inspector or WorktreeProtectionInspector(git=git)
-    return WorktreeManager(
+    return WorktreeService(
         path_policy=policy,
         config_loader=config_loader or WorktreeConfigLoader(),
         git=git,
@@ -389,20 +412,23 @@ def _manager(
 def _cleaner(
     repository_identity: RepositoryIdentity,
     repo_root: Path,
-    manager: WorktreeManager,
+    manager: WorktreeService,
     config: WorktreeConfig,
     clock: MutableClock,
     *,
     metadata_store=None,
 ) -> WorktreeCleaner:
     policy = _policy(repo_root)
+    store = metadata_store or WorktreeMetadataStore(policy)
     return WorktreeCleaner(
-        repository_identity=repository_identity,
-        path_policy=policy,
-        config_loader=FixedConfigLoader(config),
-        metadata_store=metadata_store or WorktreeMetadataStore(policy),
-        manager=manager,
-        active_registry=InactiveRegistry(),
+        worktree_service=CleanerWorktreeServiceView(
+            repository_identity=repository_identity,
+            path_policy=policy,
+            config_loader=FixedConfigLoader(config),
+            metadata_store=store,
+            release_service=manager,
+        ),
+        is_workspace_active=InactiveRegistry().is_workspace_active,
         clock=clock,
     )
 

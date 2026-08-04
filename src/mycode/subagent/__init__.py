@@ -9,7 +9,6 @@ from mycode.subagent.context import (
     build_fork_prompt,
 )
 from mycode.subagent.loader import AgentRoleCandidate, AgentRoleLoader
-from mycode.subagent.isolation import SubAgentIsolationCoordinator
 from mycode.subagent.notifications import SubAgentNotificationInbox
 from mycode.subagent.runtime import SubAgentRuntime, SubAgentRuntimeFactory
 from mycode.subagent.service import (
@@ -68,7 +67,6 @@ __all__ = [
     "ParentAgentSnapshot",
     "SubAgentConfig",
     "SubAgentExecutionReport",
-    "SubAgentIsolationCoordinator",
     "SubAgentKind",
     "SubAgentLaunchRequest",
     "SubAgentNotification",
