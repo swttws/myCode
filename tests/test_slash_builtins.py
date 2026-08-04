@@ -17,6 +17,7 @@ from mycode.slash import (
     SlashMode,
 )
 from mycode.subagent.models import (
+    AgentIsolationMode,
     SubAgentKind,
     SubAgentResult,
     SubAgentTaskSnapshot,
@@ -24,6 +25,8 @@ from mycode.subagent.models import (
     SubAgentTaskSummary,
     SubAgentUsage,
 )
+from mycode.workspace import WorkspacePreparation
+from mycode.worktree.models import WorktreeDisposition, WorktreeDispositionResult
 import mycode.slash.builtins as builtins
 
 
@@ -563,6 +566,83 @@ def test_task_command_formats_detail_and_unknown_task_stably():
     assert result is SlashHandlerSignal.CONTINUE
     assert controller.messages[-1][1] is True
     assert "/task <id>" in controller.messages[-1][0]
+
+
+def test_task_commands_show_worktree_workspace_fields_in_stable_order(tmp_path):
+    workspace_root = tmp_path / ".worktrees" / "general" / "task-000001"
+    branch_name = "mycode/worktree/general/task-000001"
+    disposition = WorktreeDispositionResult(
+        disposition=WorktreeDisposition.RETAINED,
+        workspace_root=workspace_root,
+        branch_name=branch_name,
+        reasons=("未推送提交", "工作区已保留"),
+    )
+    summary = SubAgentTaskSummary(
+        id="task-000001",
+        sequence=1,
+        task_token="task-000001",
+        kind=SubAgentKind.DEFINED,
+        role_name="general",
+        state=SubAgentTaskState.COMPLETED,
+        detached=True,
+        rounds=1,
+        usage=SubAgentUsage(input_tokens=1),
+        isolation=AgentIsolationMode.WORKTREE,
+        workspace_root=workspace_root,
+        branch_name=branch_name,
+        workspace_preparation=WorkspacePreparation.RECOVERED,
+        initialized_rules=("copy:.mycode", "hooks:.githooks"),
+        disposition=disposition,
+    )
+    snapshot = SubAgentTaskSnapshot(
+        id="task-000001",
+        sequence=1,
+        task_token="task-000001",
+        kind=SubAgentKind.DEFINED,
+        role_name="general",
+        state=SubAgentTaskState.COMPLETED,
+        detached=True,
+        rounds=1,
+        result=SubAgentResult(detail="detail", summary="summary"),
+        usage=SubAgentUsage(input_tokens=1),
+        isolation=AgentIsolationMode.WORKTREE,
+        workspace_root=workspace_root,
+        branch_name=branch_name,
+        workspace_preparation=WorkspacePreparation.RECOVERED,
+        initialized_rules=("copy:.mycode", "hooks:.githooks"),
+        disposition=disposition,
+    )
+    controller = FakeController()
+    controller.subagent_summaries = (summary,)
+    controller.subagent_details = {"task-000001": snapshot}
+
+    _run_command("tasks", controller)
+    list_text = controller.messages[-1][0]
+    _run_command("task", controller, "task-000001")
+    detail_text = controller.messages[-1][0]
+
+    _assert_in_order(
+        list_text,
+        [
+            "isolation=worktree",
+            f"workspace={workspace_root}",
+            f"branch={branch_name}",
+            "preparation=recovered",
+            "disposition=retained",
+        ],
+    )
+    _assert_in_order(
+        detail_text,
+        [
+            "isolation: worktree",
+            f"workspace: {workspace_root}",
+            f"branch: {branch_name}",
+            "preparation: recovered",
+            "initialized_rules: copy:.mycode, hooks:.githooks",
+            "disposition: retained",
+            "disposition_reasons: 未推送提交, 工作区已保留",
+        ],
+    )
 
 
 def test_status_command_formats_application_status_without_forwarding_user_message():

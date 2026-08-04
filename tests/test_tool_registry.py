@@ -12,6 +12,7 @@ from mycode.tool import (
     ToolDefinition,
     ToolKind,
     ToolRuntimeScope,
+    ToolWorkspaceScope,
 )
 
 
@@ -65,6 +66,7 @@ def test_tool_definition_defaults_to_shared_runtime_scope_and_no_timeout():
     definition = FakeTool().definition
 
     assert definition.runtime_scope is ToolRuntimeScope.SHARED
+    assert definition.workspace_scope is ToolWorkspaceScope.SHARED_ONLY
     assert definition.execution_timeout_seconds is None
 
 
@@ -187,6 +189,7 @@ def test_tool_registry_converts_definitions_to_openai_chat_tool_specs():
                 },
                 kind=ToolKind.READ,
                 runtime_scope=ToolRuntimeScope.TASK_LOCAL,
+                workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
                 execution_timeout_seconds=1.5,
             )
 
@@ -269,7 +272,9 @@ def test_default_tool_registry_marks_file_tools_as_task_local(tmp_path):
 
     for name in ("read_file", "write_file", "edit_file", "find_files", "search_code"):
         assert definitions[name].runtime_scope is ToolRuntimeScope.TASK_LOCAL
+        assert definitions[name].workspace_scope is ToolWorkspaceScope.WORKSPACE_AWARE
     assert definitions["run_command"].runtime_scope is ToolRuntimeScope.SHARED
+    assert definitions["run_command"].workspace_scope is ToolWorkspaceScope.WORKSPACE_AWARE
 
 
 def test_default_tool_registry_declares_exact_grant_arguments(tmp_path):

@@ -1,6 +1,9 @@
 from dataclasses import FrozenInstanceError, is_dataclass
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -228,3 +231,36 @@ def test_worktree_error_preserves_bounded_public_fields(tmp_path: Path):
 
     with pytest.raises(ValueError, match="code"):
         WorktreeError(code="", phase="create", message="bad")
+
+
+def test_worktree_package_exports_public_lifecycle_classes_without_subagent_import():
+    script = (
+        "import sys\n"
+        "import mycode.worktree as worktree\n"
+        "required = [\n"
+        "    'WorktreeConfigLoader', 'WorktreePathPolicy', 'GitWorktreeGateway',\n"
+        "    'WorktreeMetadataStore', 'WorktreeInitializer', 'WorktreeProtectionInspector',\n"
+        "    'WorktreeManager', 'WorktreeCleaner', 'ActiveWorkspaceRegistry',\n"
+        "]\n"
+        "missing = [name for name in required if not hasattr(worktree, name)]\n"
+        "duplicates = len(worktree.__all__) != len(set(worktree.__all__))\n"
+        "private = [name for name in worktree.__all__ if name.startswith('_')]\n"
+        "subagent_loaded = 'mycode.subagent' in sys.modules\n"
+        "if missing or duplicates or private or subagent_loaded:\n"
+        "    print({'missing': missing, 'duplicates': duplicates, 'private': private, 'subagent': subagent_loaded})\n"
+        "    raise SystemExit(1)\n"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path.cwd(),
+        env=env,
+        shell=False,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr

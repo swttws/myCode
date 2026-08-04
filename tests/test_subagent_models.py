@@ -5,6 +5,7 @@ import pytest
 
 from mycode.llm import UsageObservation
 from mycode.subagent.models import (
+    AgentIsolationMode,
     AgentModelTier,
     AgentPermissionMode,
     AgentRoleDefinition,
@@ -45,6 +46,7 @@ def test_subagent_models_are_frozen_and_have_expected_fields():
         "model",
         "max_rounds",
         "permission_mode",
+        "isolation",
     ]
     assert [field.name for field in fields(AgentRoleDefinition)] == [
         "metadata",
@@ -63,6 +65,7 @@ def test_subagent_models_are_frozen_and_have_expected_fields():
     assert [field.name for field in fields(SubAgentTaskSummary)] == [
         "id",
         "sequence",
+        "task_token",
         "kind",
         "role_name",
         "state",
@@ -70,6 +73,12 @@ def test_subagent_models_are_frozen_and_have_expected_fields():
         "rounds",
         "error_code",
         "usage",
+        "isolation",
+        "workspace_root",
+        "branch_name",
+        "workspace_preparation",
+        "initialized_rules",
+        "disposition",
     ]
 
     usage = SubAgentUsage(input_tokens=1)
@@ -78,6 +87,8 @@ def test_subagent_models_are_frozen_and_have_expected_fields():
 
 
 def test_subagent_enums_use_stable_protocol_values():
+    assert AgentIsolationMode.SHARED.value == "shared"
+    assert AgentIsolationMode.WORKTREE.value == "worktree"
     assert SubAgentKind.DEFINED.value == "defined"
     assert SubAgentKind.FORK.value == "fork"
     assert AgentRoleSource.PLUGIN.value == "plugin"
@@ -187,6 +198,7 @@ def test_subagent_models_accept_valid_role_and_task_shapes():
     )
 
     assert definition.metadata is metadata
+    assert definition.metadata.isolation is AgentIsolationMode.SHARED
     assert summary.usage.total_tokens == 3
     assert result.detail == result.summary
 

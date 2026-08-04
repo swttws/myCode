@@ -390,6 +390,7 @@ def _format_subagent_task_list(summaries) -> str:
             f"state={_enum_text(summary.state)} "
             f"rounds={summary.rounds} "
             f"detached={str(summary.detached).lower()} "
+            f"{_format_workspace_summary(summary)} "
             f"error={_optional(summary.error_code)} "
             f"usage={_format_usage(summary.usage)}"
         )
@@ -407,6 +408,15 @@ def _format_subagent_task_detail(snapshot) -> str:
         f"错误码：{_optional(snapshot.error_code)}",
         f"错误信息：{_optional(snapshot.error_message)}",
         f"usage：{_format_usage(snapshot.usage)}",
+    ]
+    lines[6:6] = [
+        f"isolation: {_enum_text(snapshot.isolation)}",
+        f"workspace: {_optional(snapshot.workspace_root)}",
+        f"branch: {_optional(snapshot.branch_name)}",
+        f"preparation: {_optional(snapshot.workspace_preparation)}",
+        f"initialized_rules: {_format_list(snapshot.initialized_rules)}",
+        f"disposition: {_format_disposition_value(snapshot.disposition)}",
+        f"disposition_reasons: {_format_disposition_reasons(snapshot.disposition)}",
     ]
     if snapshot.result is not None:
         lines.extend(
@@ -430,11 +440,44 @@ def _format_usage(usage) -> str:
     )
 
 
+def _format_workspace_summary(summary) -> str:
+    return (
+        f"isolation={_enum_text(getattr(summary, 'isolation', None))} "
+        f"workspace={_optional(getattr(summary, 'workspace_root', None))} "
+        f"branch={_optional(getattr(summary, 'branch_name', None))} "
+        f"preparation={_optional(getattr(summary, 'workspace_preparation', None))} "
+        f"disposition={_format_disposition_value(getattr(summary, 'disposition', None))}"
+    )
+
+
+def _format_disposition_value(disposition) -> str:
+    if disposition is None:
+        return "未知"
+    return _enum_text(disposition.disposition)
+
+
+def _format_disposition_reasons(disposition) -> str:
+    if disposition is None:
+        return "未知"
+    return _format_list(disposition.reasons)
+
+
+def _format_list(values) -> str:
+    values = tuple(values or ())
+    return ", ".join(str(value) for value in values) if values else "无"
+
+
 def _value_or_unknown(value) -> str:
     return "未知" if value is None else str(value)
 
 
 def _optional(value) -> str:
+    if value is None:
+        return "无"
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, str):
+        return enum_value
+    return str(value)
     return "无" if value is None else str(value)
 
 

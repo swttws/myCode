@@ -45,7 +45,15 @@ from mycode.permission.models import (
     PermissionMode,
 )
 from mycode.permission.service import PermissionInterceptor
-from mycode.tool import ToolCall, ToolExecutor, ToolKind, ToolRegistry, ToolResult
+from mycode.tool import (
+    ToolCall,
+    ToolExecutor,
+    ToolInvocationContext,
+    ToolKind,
+    ToolRegistry,
+    ToolResult,
+)
+from mycode.workspace import WorkspaceContext, WorkspaceKind
 
 
 @dataclass
@@ -124,14 +132,20 @@ class AgentLoop:
         notification_inbox: Any | None = None,
         main_model_id: str | None = None,
         permission_mode_provider: Any | None = None,
+        workspace: WorkspaceContext | None = None,
     ) -> None:
+        self._workspace = workspace or _legacy_shared_workspace()
+        self._tool_context = ToolInvocationContext(workspace=self._workspace)
         self._llm = llm
         self._memory = memory
         self._tool_executor = tool_executor
         self._tool_registry = tool_registry
         self.config = config or AgentConfig()
         self._permission = permission
-        self._prompt_builder = prompt_builder or create_default_prompt_builder(Path.cwd(), self.config.prompt)
+        self._prompt_builder = prompt_builder or create_default_prompt_builder(
+            self._workspace.root,
+            self.config.prompt,
+        )
         self._context_manager = context_manager
         self._project_memory = project_memory
         self._skill_runtime = skill_runtime
@@ -341,7 +355,7 @@ class AgentLoop:
                 await self._trigger_hook(
                     build_event_hook_context(
                         event=HookEvent.MODEL_ROUND_END,
-                        workspace_root=Path.cwd(),
+                        workspace_root=self._workspace.root,
                         turn_id=state.turn_id,
                         round_index=round_index,
                         user_text=state.user_text,
@@ -500,7 +514,7 @@ class AgentLoop:
         await self._trigger_hook(
             build_event_hook_context(
                 event=HookEvent.USER_REQUEST_START,
-                workspace_root=Path.cwd(),
+                workspace_root=self._workspace.root,
                 turn_id=turn_id,
                 user_text=user_text,
                 plan_only=mode.plan_only,
@@ -513,7 +527,7 @@ class AgentLoop:
         await self._trigger_hook(
             build_message_hook_context(
                 event=HookEvent.USER_MESSAGE,
-                workspace_root=Path.cwd(),
+                workspace_root=self._workspace.root,
                 message=current_user_message,
                 turn_id=turn_id,
                 plan_only=mode.plan_only,
@@ -540,7 +554,7 @@ class AgentLoop:
         await self._trigger_hook(
             build_event_hook_context(
                 event=HookEvent.USER_REQUEST_END,
-                workspace_root=Path.cwd(),
+                workspace_root=self._workspace.root,
                 turn_id=state.turn_id,
                 user_text=state.user_text,
                 plan_only=state.mode.plan_only,
@@ -561,7 +575,7 @@ class AgentLoop:
         await self._trigger_hook(
             build_event_hook_context(
                 event=HookEvent.MODEL_ROUND_START,
-                workspace_root=Path.cwd(),
+                workspace_root=self._workspace.root,
                 turn_id=state.turn_id,
                 round_index=round_index,
                 user_text=state.user_text,
@@ -768,7 +782,7 @@ class AgentLoop:
         await self._trigger_hook(
             build_message_hook_context(
                 event=HookEvent.ASSISTANT_MESSAGE,
-                workspace_root=Path.cwd(),
+                workspace_root=self._workspace.root,
                 message=final_message,
                 turn_id=state.turn_id,
                 round_index=round_index,
@@ -845,6 +859,7 @@ class AgentLoop:
                 round_index=round_index,
                 turn_id=state.turn_id,
                 plan_only=state.mode.plan_only,
+                workspace_root=self._workspace.root,
             )
             if hook_result.blocked_tool_result is not None:
                 outcome.tool_result = hook_result.blocked_tool_result
@@ -897,6 +912,7 @@ class AgentLoop:
                     round_index=round_index,
                     turn_id=state.turn_id,
                     plan_only=state.mode.plan_only,
+                    workspace_root=self._workspace.root,
                 )
                 if hook_result.blocked_tool_result is not None:
                     outcome.tool_result = hook_result.blocked_tool_result
@@ -941,6 +957,7 @@ class AgentLoop:
                         _execute_tool_with_run_deadline(
                             self._tool_executor,
                             call,
+                            self._tool_context,
                             run_deadline,
                         )
                         for call in executable_calls
@@ -951,6 +968,7 @@ class AgentLoop:
                     await _execute_tool_with_run_deadline(
                         self._tool_executor,
                         call,
+                        self._tool_context,
                         run_deadline,
                     )
                     for call in executable_calls
@@ -991,6 +1009,7 @@ class AgentLoop:
                 round_index=round_index,
                 turn_id=state.turn_id,
                 plan_only=state.mode.plan_only,
+                workspace_root=self._workspace.root,
             )
         if apply_skill_scope:
             self._maybe_set_skill_scope(result)
@@ -1028,7 +1047,7 @@ class AgentLoop:
         if isinstance(exc, (PromptBuildError, PromptConfigurationError)):
             await self._trigger_hook(
                 build_error_hook_context(
-                    workspace_root=Path.cwd(),
+                    workspace_root=self._workspace.root,
                     error_code=AgentErrorCode.PROMPT_ERROR.value,
                     error_message=str(exc),
                     turn_id=state.turn_id,
@@ -1044,7 +1063,7 @@ class AgentLoop:
         if isinstance(exc, LLMError):
             await self._trigger_hook(
                 build_error_hook_context(
-                    workspace_root=Path.cwd(),
+                    workspace_root=self._workspace.root,
                     error_code=AgentErrorCode.LLM_ERROR.value,
                     error_message=str(exc),
                     turn_id=state.turn_id,
@@ -1061,7 +1080,7 @@ class AgentLoop:
         self._clear_skill_current_scope()
         await self._trigger_hook(
             build_error_hook_context(
-                workspace_root=Path.cwd(),
+                workspace_root=self._workspace.root,
                 error_code=AgentErrorCode.CANCELLED.value,
                 error_message="cancelled",
                 turn_id=state.turn_id,
@@ -1108,7 +1127,7 @@ class AgentLoop:
         await self._trigger_hook(
             HookContext(
                 event=HookEvent.TOOL_RESULT_MESSAGE,
-                workspace_root=Path.cwd(),
+                workspace_root=self._workspace.root,
                 turn_id=turn_id,
                 round_index=round_index,
                 tool_call=call,
@@ -1179,15 +1198,16 @@ def _has_compaction_action(report) -> bool:
 async def _execute_tool_with_run_deadline(
     executor: ToolExecutor,
     call,
+    context: ToolInvocationContext,
     run_deadline: float | None,
 ):
     # ToolExecutor 负责单工具超时；这里额外保证整次 Agent run 的截止时间。
     if run_deadline is None:
-        return await executor.execute(call)
+        return await executor.execute(call, context=context)
     remaining = run_deadline - time.monotonic()
     if remaining <= 0:
         raise asyncio.TimeoutError
-    return await asyncio.wait_for(executor.execute(call), timeout=remaining)
+    return await asyncio.wait_for(executor.execute(call, context=context), timeout=remaining)
 
 
 def _make_deferred_tool_reminder(summaries) -> SystemReminder | None:
@@ -1232,3 +1252,16 @@ def _project_memory_blocking_diagnostic(framework_context: FrameworkContext):
 
 def _empty_framework_context() -> FrameworkContext:
     return FrameworkContext(blocks=(), restored_history=(), session_summary=None, diagnostics=())
+
+
+def _legacy_shared_workspace() -> WorkspaceContext:
+    root = Path(".").resolve()
+    return WorkspaceContext(
+        kind=WorkspaceKind.SHARED,
+        root=root,
+        repository_root=root,
+        repository_id="legacy-current-workspace",
+        task_identity=None,
+        branch_name=None,
+        hooks_path=None,
+    )

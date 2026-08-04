@@ -9,6 +9,7 @@ from mycode.tool import (
     ToolKind,
     ToolRegistry,
     ToolResult,
+    ToolWorkspaceScope,
 )
 
 
@@ -29,6 +30,7 @@ class MCPToolWrapper:
             parameters=dict(remote_tool.parameters),
             kind=remote_tool.kind,
             grant_arguments=(),
+            workspace_scope=ToolWorkspaceScope.SHARED_ONLY,
         )
 
     @property
@@ -82,6 +84,7 @@ class ToolSearch:
             },
             kind=ToolKind.READ,
             grant_arguments=(),
+            workspace_scope=ToolWorkspaceScope.SHARED_ONLY,
         )
 
     @property

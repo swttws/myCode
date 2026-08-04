@@ -9,6 +9,7 @@ from typing import Iterable
 import yaml
 
 from mycode.subagent.models import (
+    AgentIsolationMode,
     AgentModelTier,
     AgentPermissionMode,
     AgentRoleDefinition,
@@ -29,7 +30,9 @@ ROLE_FIELDS = {
     "model",
     "max_rounds",
     "permission_mode",
+    "isolation",
 }
+REQUIRED_ROLE_FIELDS = ROLE_FIELDS - {"isolation"}
 SOURCE_ORDER = {
     AgentRoleSource.PLUGIN: 0,
     AgentRoleSource.BUILTIN: 1,
@@ -171,7 +174,7 @@ class AgentRoleLoader:
         unknown_fields = set(raw) - ROLE_FIELDS
         if unknown_fields:
             return self._diagnostic(role_name, source, path, "unknown_field")
-        missing = [field for field in ROLE_FIELDS if field not in raw]
+        missing = [field for field in REQUIRED_ROLE_FIELDS if field not in raw]
         if missing:
             return self._diagnostic(role_name, source, path, "missing_field")
 
@@ -197,6 +200,9 @@ class AgentRoleLoader:
         permission_mode = self._parse_permission(raw["permission_mode"], role_name, source, path)
         if isinstance(permission_mode, AgentRoleDiagnostic):
             return permission_mode
+        isolation = self._parse_isolation(raw.get("isolation", "shared"), role_name, source, path)
+        if isinstance(isolation, AgentRoleDiagnostic):
+            return isolation
         max_rounds = raw["max_rounds"]
         if type(max_rounds) is not int or max_rounds <= 0:
             return self._diagnostic(role_name, source, path, "invalid_max_rounds")
@@ -209,6 +215,7 @@ class AgentRoleLoader:
             model=model,
             max_rounds=max_rounds,
             permission_mode=permission_mode,
+            isolation=isolation,
         )
 
     def _parse_tool_list(
@@ -266,6 +273,20 @@ class AgentRoleLoader:
             return AgentPermissionMode(raw)
         except ValueError:
             return self._diagnostic(role_name, source, path, "invalid_permission_mode")
+
+    def _parse_isolation(
+        self,
+        raw: object,
+        role_name: str,
+        source: AgentRoleSource,
+        path: Path,
+    ) -> AgentIsolationMode | AgentRoleDiagnostic:
+        if type(raw) is not str:
+            return self._diagnostic(role_name, source, path, "invalid_isolation")
+        try:
+            return AgentIsolationMode(raw)
+        except ValueError:
+            return self._diagnostic(role_name, source, path, "invalid_isolation")
 
     def _invalid(
         self,

@@ -1,12 +1,13 @@
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from mycode.config import LLMConfig
 from mycode.compact.models import CompactConfig
 from mycode.hook.models import HookTriggerResult
-from mycode.agent.events import AgentEventType
+from mycode.agent.events import AgentEvent, AgentEventType
 from mycode.llm import BaseLLM, ChatMessage, LLMError, StreamEvent, StreamEventType, UsageObservation
 from mycode.permission.models import PermissionDecision, PermissionEffect, PermissionMode
 from mycode.subagent.models import (
@@ -21,9 +22,17 @@ from mycode.subagent.models import (
     SubAgentLaunchRequest,
     SubAgentTaskState,
 )
-from mycode.subagent.runtime import SubAgentRuntimeFactory
+from mycode.subagent.runtime import SubAgentRuntime, SubAgentRuntimeFactory
 from mycode.subagent.tooling import TaskToolRegistryFactory, TaskToolRuntime
 from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
+from mycode.workspace import (
+    WorkspaceContext,
+    WorkspaceKind,
+    WorkspaceLease,
+    WorkspacePreparation,
+    WorkspaceTaskIdentity,
+)
+from mycode.worktree.models import WorktreeDisposition, WorktreeDispositionResult
 
 
 class ScriptedLLM(BaseLLM):
@@ -100,6 +109,19 @@ class SimpleTaskToolRegistryFactory:
         )
 
 
+class LeaseRecordingTaskToolRegistryFactory:
+    def __init__(self):
+        self.workspace_leases = []
+
+    def create(self, parent_registry, **kwargs):
+        self.workspace_leases.append(kwargs.get("workspace_lease"))
+        registry = ToolRegistry()
+        return TaskToolRuntime(
+            registry=registry,
+            executor=ToolExecutor(registry),
+        )
+
+
 class AllowPermission:
     async def before_tool(self, call, definition, *, plan_only, round_index):
         return PermissionDecision(
@@ -133,11 +155,30 @@ class RecordingHookRuntime:
         self.events.append(context.event)
         return HookTriggerResult(actions=())
 
-    async def before_tool(self, *, call, definition, round_index, turn_id, plan_only):
+    async def before_tool(
+        self,
+        *,
+        call,
+        definition,
+        round_index,
+        turn_id,
+        plan_only,
+        workspace_root=None,
+    ):
         self.before_tool_calls.append(call.name)
         return HookTriggerResult(actions=())
 
-    async def after_tool(self, *, call, definition, result, round_index, turn_id, plan_only):
+    async def after_tool(
+        self,
+        *,
+        call,
+        definition,
+        result,
+        round_index,
+        turn_id,
+        plan_only,
+        workspace_root=None,
+    ):
         self.after_tool_calls.append(call.name)
         return HookTriggerResult(actions=())
 
@@ -146,6 +187,21 @@ class RecordingHookRuntime:
 
     def clear_request_state(self):
         self.clear_calls += 1
+
+
+class FinalEventAgentLoop:
+    async def run(self, *args, **kwargs):
+        yield AgentEvent(AgentEventType.FINAL_RESPONSE, content="done", round_index=1)
+
+
+class RecordingIsolationCoordinator:
+    def __init__(self, result):
+        self.result = result
+        self.released = []
+
+    async def release(self, lease):
+        self.released.append(lease)
+        return self.result
 
 
 class FakeCatalog:
@@ -282,6 +338,33 @@ def test_runtime_direct_text_completes_with_rounds_result_and_usage(tmp_path):
     assert "你是测试用子 Agent" in rendered
 
 
+def test_runtime_releases_worktree_lease_and_returns_disposition(tmp_path):
+    lease = worktree_lease("task-000001", "task-000001")
+    disposition = WorktreeDispositionResult(
+        disposition=WorktreeDisposition.RETAINED,
+        workspace_root=lease.context.root,
+        branch_name=lease.context.branch_name,
+        reasons=("未推送提交",),
+    )
+    coordinator = RecordingIsolationCoordinator(disposition)
+    runtime = SubAgentRuntime(
+        request=request(),
+        agent_loop=FinalEventAgentLoop(),
+        model_id="model",
+        max_rounds=1,
+        max_result_bytes=1024,
+        task_id="task-000001",
+        workspace_lease=lease,
+        isolation_coordinator=coordinator,
+    )
+
+    report = asyncio.run(run_report(runtime))
+
+    assert report.state is SubAgentTaskState.COMPLETED
+    assert report.disposition == disposition
+    assert coordinator.released == [lease]
+
+
 def test_runtime_uses_real_agent_loop_for_tool_round_memory_and_hook(tmp_path):
     first_usage = UsageObservation(provider="fake", input_tokens=1, output_tokens=2, total_tokens=3)
     second_usage = UsageObservation(provider="fake", input_tokens=5, output_tokens=None, total_tokens=8)
@@ -394,6 +477,40 @@ def test_factory_selects_model_and_max_rounds_for_defined_inherit_and_fork(tmp_p
     assert inherit_runtime.max_rounds == 5
     assert fork_runtime.model_id == "parent-model"
     assert fork_runtime.max_rounds == 9
+
+
+def test_factory_accepts_workspace_lease_and_passes_it_to_task_runtime(tmp_path):
+    llm = ScriptedLLM([[StreamEvent(StreamEventType.TEXT_DELTA, "done"), StreamEvent(StreamEventType.DONE)]])
+    task_factory = LeaseRecordingTaskToolRegistryFactory()
+    lease = worktree_lease("task-000001", "task-000001")
+    factory = SubAgentRuntimeFactory(
+        config=subagent_config(),
+        llm_config=llm_config(),
+        llm_factory=RecordingLLMFactory({"sonnet-child": [llm]}),
+        catalog=FakeCatalog(role()),
+        parent_tool_registry=ToolRegistry(),
+        task_tool_registry_factory=task_factory,
+        permission_factory=lambda mode: AllowPermission(),
+        workspace_root=tmp_path,
+        workspace_environment=f"workspace={tmp_path}",
+    )
+
+    runtime = factory.create(
+        request(),
+        detached=False,
+        task_id="task-000001",
+        workspace_lease=lease,
+    )
+    report = asyncio.run(run_report(runtime))
+    rendered = "\n".join(message.content for message in llm.requests[0])
+
+    assert report.state is SubAgentTaskState.COMPLETED
+    assert runtime._workspace_lease == lease
+    assert runtime._agent_loop._workspace == lease.context
+    assert task_factory.workspace_leases == [lease]
+    assert "隔离 Worktree" in rendered
+    assert str(lease.context.root) in rendered
+    assert lease.context.branch_name in rendered
 
 
 @pytest.mark.parametrize(
@@ -513,3 +630,29 @@ def test_factory_uses_task_context_manager_and_cleans_archive_session(tmp_path):
     assert report.state is SubAgentTaskState.COMPLETED
     assert context_manager.__class__.__name__ == "ContextManager"
     assert not session_dir.exists()
+
+
+def worktree_lease(task_id: str, task_token: str) -> WorkspaceLease:
+    identity = WorkspaceTaskIdentity(
+        repository_id="repo-123",
+        task_id=task_id,
+        role_name="general",
+        task_token=task_token,
+        relative_name=f"general/{task_token}",
+        branch_name=f"mycode/worktree/general/{task_token}",
+        base_commit="a" * 40,
+    )
+    return WorkspaceLease(
+        context=WorkspaceContext(
+            kind=WorkspaceKind.WORKTREE,
+            root=Path(f"C:/repo/.worktrees/general/{task_token}"),
+            repository_root=Path("C:/repo"),
+            repository_id=identity.repository_id,
+            task_identity=identity,
+            branch_name=identity.branch_name,
+            hooks_path=None,
+        ),
+        preparation=WorkspacePreparation.CREATED,
+        metadata_path=Path(f"C:/repo/.worktrees/.metadata/general/{task_token}.json"),
+        initialized_rules=(),
+    )

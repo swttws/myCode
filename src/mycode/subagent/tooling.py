@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import inspect
 from pathlib import Path
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -27,8 +28,10 @@ from mycode.tool import (
     ToolRegistry,
     ToolResult,
     ToolRuntimeScope,
+    ToolWorkspaceScope,
     create_default_tool_registry,
 )
+from mycode.workspace import WorkspaceContext, WorkspaceKind, WorkspaceLease
 
 
 class ParentOnlyToolAdapter:
@@ -93,9 +96,17 @@ class TaskToolRegistryFactory:
         permission=None,
         agent_config=None,
         hook_runtime_factory: Callable[[], object] | None = None,
+        workspace_lease: WorkspaceLease | None = None,
     ) -> TaskToolRuntime:
         cleanup_callbacks: list[Callable[[], None]] = []
+        workspace_context = (
+            workspace_lease.context
+            if workspace_lease is not None
+            else _shared_workspace(self._workspace_root)
+        )
+        workspace_root = workspace_context.root
         context_manager = self._create_context_manager(
+            workspace_root=workspace_root,
             memory=memory,
             llm=llm,
             llm_config=llm_config,
@@ -104,7 +115,7 @@ class TaskToolRegistryFactory:
         )
         hook_runtime = hook_runtime_factory() if hook_runtime_factory is not None else None
 
-        local_defaults = create_default_tool_registry(self._workspace_root)
+        local_defaults = create_default_tool_registry(workspace_root)
         local_by_name = {
             definition.name: local_defaults.get(definition.name)
             for definition in local_defaults.definitions()
@@ -119,10 +130,19 @@ class TaskToolRegistryFactory:
         load_skill_requested = False
         tool_search_parent = None
         mcp_pool = self._mcp_pool
+        is_worktree_workspace = (
+            workspace_lease is not None
+            and workspace_lease.context.kind is WorkspaceKind.WORKTREE
+        )
 
         for definition in parent_registry.definitions():
             parent_tool = parent_registry.get(definition.name)
             if parent_tool is None:
+                continue
+            if (
+                is_worktree_workspace
+                and definition.workspace_scope is ToolWorkspaceScope.SHARED_ONLY
+            ):
                 continue
             if _is_tool_search(parent_tool):
                 tool_search_parent = parent_tool
@@ -176,6 +196,7 @@ class TaskToolRegistryFactory:
         if load_skill_requested:
             try:
                 skill_runtime = self._create_skill_runtime(
+                    workspace_root=workspace_root,
                     registry=registry,
                     executor=executor,
                     llm=llm,
@@ -183,6 +204,7 @@ class TaskToolRegistryFactory:
                     llm_factory=llm_factory,
                     permission=permission,
                     agent_config=agent_config,
+                    workspace_context=workspace_context,
                 )
             except Exception:
                 _run_cleanup(tuple(cleanup_callbacks))
@@ -200,6 +222,7 @@ class TaskToolRegistryFactory:
     def _create_context_manager(
         self,
         *,
+        workspace_root: Path,
         memory,
         llm,
         llm_config,
@@ -209,7 +232,7 @@ class TaskToolRegistryFactory:
         if memory is None or llm is None or llm_config is None or agent_config is None:
             return None
         context_manager = create_context_manager(
-            workspace_root=self._workspace_root,
+            workspace_root=workspace_root,
             home=self._home,
             llm=llm,
             memory=memory,
@@ -222,6 +245,7 @@ class TaskToolRegistryFactory:
     def _create_skill_runtime(
         self,
         *,
+        workspace_root: Path,
         registry: ToolRegistry,
         executor: ToolExecutor,
         llm,
@@ -229,6 +253,7 @@ class TaskToolRegistryFactory:
         llm_factory,
         permission,
         agent_config,
+        workspace_context: WorkspaceContext,
     ):
         if (
             self._skill_catalog_factory is None
@@ -248,7 +273,11 @@ class TaskToolRegistryFactory:
             names = frozenset(definition.name for definition in registry.definitions())
             return names | {SkillRuntime.LOAD_TOOL_NAME}
 
-        catalog = self._skill_catalog_factory(task_tool_names)
+        catalog = _create_skill_catalog(
+            self._skill_catalog_factory,
+            task_tool_names,
+            workspace_context.root,
+        )
         catalog.initialize()
         skill_runtime = SkillRuntime(catalog)
         skill_executor = SkillExecutor(
@@ -260,7 +289,7 @@ class TaskToolRegistryFactory:
             tool_executor=executor,
             permission=permission,
             agent_config=agent_config,
-            workspace_root=self._workspace_root,
+            workspace=workspace_context,
         )
         registry.register(SkillLoadTool(runtime=skill_runtime, executor=skill_executor))
         return skill_runtime
@@ -310,6 +339,38 @@ def _clone_tool_search(parent_tool, *, registry: ToolRegistry, pool):
     if pool is None:
         raise RuntimeError("task_mcp_pool_missing")
     return parent_tool.__class__(registry, pool)
+
+
+def _create_skill_catalog(factory, tool_names, workspace_root: Path):
+    if _factory_accepts_workspace_root(factory):
+        return factory(tool_names, workspace_root)
+    return factory(tool_names)
+
+
+def _factory_accepts_workspace_root(factory) -> bool:
+    try:
+        signature = inspect.signature(factory)
+    except (TypeError, ValueError):
+        return False
+    parameters = tuple(signature.parameters.values())
+    return any(
+        parameter.kind is inspect.Parameter.VAR_POSITIONAL
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    ) or len(parameters) >= 2
+
+
+def _shared_workspace(workspace_root: Path) -> WorkspaceContext:
+    root = Path(workspace_root).resolve()
+    return WorkspaceContext(
+        kind=WorkspaceKind.SHARED,
+        root=root,
+        repository_root=root,
+        repository_id="task-tool-workspace",
+        task_identity=None,
+        branch_name=None,
+        hooks_path=None,
+    )
 
 
 def _cleanup_all(callbacks: tuple[Callable[[], None], ...]):

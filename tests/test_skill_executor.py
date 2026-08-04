@@ -7,6 +7,7 @@ from pathlib import Path
 from mycode.agent import AgentConfig, AgentMode, make_assistant_text_message, make_user_message
 from mycode.config import LLMConfig
 from mycode.compact.models import CompactConfig
+from mycode.llm import StreamEvent, StreamEventType
 from mycode.memory import InMemoryConversationMemory
 from mycode.permission.models import PermissionDecision, PermissionEffect, PermissionMode
 from mycode.skill import (
@@ -22,7 +23,16 @@ from mycode.skill.catalog import SkillCatalog
 from mycode.skill.executor import SkillExecutor
 from mycode.skill.loader import SkillLoader
 from mycode.skill.runtime import SkillRuntime
-from mycode.tool import ToolExecutor
+from mycode.tool import (
+    ToolCall,
+    ToolDefinition,
+    ToolExecutor,
+    ToolKind,
+    ToolRegistry,
+    ToolResult,
+    ToolWorkspaceScope,
+)
+from tests.helpers import shared_workspace
 from tests.skill_test_support import FakeLLM, fixed_tool_registry
 
 
@@ -38,6 +48,42 @@ class AllowPermission:
 
     async def after_tool(self, call, result):
         return result
+
+
+class ToolCallingLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def stream_chat(self, messages, tools=None):
+        self.requests.append({"messages": tuple(messages), "tools": tuple(tools or ())})
+        if len(self.requests) == 1:
+            yield StreamEvent(
+                StreamEventType.TOOL_CALL,
+                tool_call=ToolCall(id="call-read", name="read_file", arguments={}, raw_arguments="{}"),
+            )
+            yield StreamEvent(StreamEventType.DONE)
+            return
+        yield StreamEvent(StreamEventType.TEXT_DELTA, content="skill done")
+        yield StreamEvent(StreamEventType.DONE)
+
+
+class ContextRecordingTool:
+    def __init__(self) -> None:
+        self.contexts = []
+
+    @property
+    def definition(self):
+        return ToolDefinition(
+            name="read_file",
+            description="Record workspace context.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            kind=ToolKind.READ,
+            workspace_scope=ToolWorkspaceScope.WORKSPACE_AWARE,
+        )
+
+    def execute(self, arguments, context):
+        self.contexts.append(context)
+        return ToolResult(ok=True, tool_name="read_file", content={"ok": True})
 
 
 def llm_config(model: str = "main-model") -> LLMConfig:
@@ -189,3 +235,47 @@ def test_execute_isolated_summary_uses_selected_model_without_tools_then_runs_so
     assert override_llm.requests[0]["tools"] == ()
     execution_text = "\n".join(message.content for message in override_llm.requests[1]["messages"])
     assert "context summary" in execution_text
+
+
+def test_execute_isolated_passes_workspace_context_to_nested_agent_tools(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    home = tmp_path / "home"
+    builtin = tmp_path / "builtins"
+    for root in (workspace_root / ".mycode" / "skills", home / ".mycode" / "skills", builtin):
+        root.mkdir(parents=True)
+    runtime = SkillRuntime(
+        SkillCatalog(
+            loader=SkillLoader(workspace_root=workspace_root, home=home, builtin_root=builtin),
+            tool_names=lambda: frozenset({"read_file", "load_skill"}),
+            reserved_slash_names=frozenset(),
+        )
+    )
+    tool = ContextRecordingTool()
+    registry = ToolRegistry([tool])
+    llm = ToolCallingLLM()
+    workspace = shared_workspace(workspace_root)
+    executor = SkillExecutor(
+        runtime=runtime,
+        main_llm=llm,
+        llm_config=llm_config(),
+        llm_factory=lambda config: llm,
+        tool_registry=registry,
+        tool_executor=ToolExecutor(registry),
+        permission=AllowPermission(),
+        agent_config=AgentConfig(max_rounds=2),
+        workspace=workspace,
+    )
+    definition = make_definition(workspace_root, strategy=SkillContextStrategy.NONE)
+    run_context = SkillRunContext(
+        history=(),
+        framework_blocks=(),
+        approval_provider=None,
+        scope=None,
+        isolated_depth=0,
+    )
+
+    result = asyncio.run(executor.execute_isolated(definition, "target", run_context=run_context, mode=AgentMode()))
+
+    assert result.ok is True
+    assert result.summary == "skill done"
+    assert tool.contexts[0].workspace == workspace
