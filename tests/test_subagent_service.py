@@ -128,13 +128,8 @@ class FakeRuntimeFactory:
         self.runtimes = list(runtimes)
         self.calls = []
 
-    def role_for(self, launch_request):
-        if launch_request.kind is SubAgentKind.FORK:
-            return None
-        return role(name=launch_request.role_name or "general")
-
-    def create(self, launch_request, *, detached, task_id, workspace_lease):
-        self.calls.append((launch_request, detached, task_id, workspace_lease))
+    def __call__(self, *, request, detached, task_id, workspace_lease):
+        self.calls.append((request, detached, task_id, workspace_lease))
         return self.runtimes.pop(0)
 
 
@@ -143,13 +138,8 @@ class TaskIdAwareRuntimeFactory:
         self.runtime = runtime
         self.calls = []
 
-    def role_for(self, launch_request):
-        if launch_request.kind is SubAgentKind.FORK:
-            return None
-        return role(name=launch_request.role_name or "general")
-
-    def create(self, launch_request, *, detached, task_id, workspace_lease):
-        self.calls.append((launch_request, detached, task_id, workspace_lease))
+    def __call__(self, *, request, detached, task_id, workspace_lease):
+        self.calls.append((request, detached, task_id, workspace_lease))
         return self.runtime
 
 
@@ -158,13 +148,8 @@ class WorkspaceAwareRuntimeFactory:
         self.runtime = runtime
         self.calls = []
 
-    def role_for(self, launch_request):
-        if launch_request.kind is SubAgentKind.FORK:
-            return None
-        return role(name=launch_request.role_name or "general")
-
-    def create(self, launch_request, *, detached, task_id, workspace_lease):
-        self.calls.append((launch_request, detached, task_id, workspace_lease))
+    def __call__(self, *, request, detached, task_id, workspace_lease):
+        self.calls.append((request, detached, task_id, workspace_lease))
         return self.runtime
 
 
@@ -222,12 +207,14 @@ class DetachWaiter:
         return ForegroundWaitResult(ForegroundWaitOutcome.DETACHED, manager.get(task_id))
 
 
-def make_service(*, cfg=None, inbox=None, runtimes, waiter=None):
+def make_service(*, cfg=None, inbox=None, runtimes, waiter=None, catalog=None):
     cfg = cfg or config()
     inbox = inbox or SubAgentNotificationInbox()
+    catalog = catalog or FakeCatalog(role())
     manager = SubAgentTaskManager(config=cfg, notification_inbox=inbox)
     service = SubAgentService(
         config=cfg,
+        catalog=catalog,
         runtime_factory=FakeRuntimeFactory(*runtimes),
         task_manager=manager,
         foreground_waiter=waiter or ImmediateTerminalWaiter(),
@@ -273,6 +260,14 @@ def role(
         entry_path=Path("general.md"),
         revision="rev",
     )
+
+
+class FakeCatalog:
+    def __init__(self, *roles):
+        self._roles = {item.metadata.name: item for item in roles}
+
+    def get(self, name):
+        return self._roles[name]
 
 
 def worktree_lease(task_id: str, task_token: str) -> WorkspaceLease:
@@ -324,6 +319,7 @@ def test_service_allocates_task_id_before_runtime_creation():
         manager = SubAgentTaskManager(config=cfg, notification_inbox=inbox)
         service = SubAgentService(
             config=cfg,
+            catalog=FakeCatalog(role()),
             runtime_factory=factory,
             task_manager=manager,
             foreground_waiter=ImmediateTerminalWaiter(),
@@ -352,6 +348,7 @@ def test_service_prepares_binds_workspace_before_runtime_creation():
         worktree_service = RecordingWorktreeService(lease=lease)
         service = SubAgentService(
             config=cfg,
+            catalog=FakeCatalog(role()),
             runtime_factory=factory,
             task_manager=manager,
             foreground_waiter=ImmediateTerminalWaiter(),
@@ -383,6 +380,7 @@ def test_service_marks_reserved_task_failed_when_workspace_prepare_fails():
         worktree_service = RecordingWorktreeService(error=RuntimeError("worktree boom"))
         service = SubAgentService(
             config=cfg,
+            catalog=FakeCatalog(role()),
             runtime_factory=factory,
             task_manager=manager,
             foreground_waiter=ImmediateTerminalWaiter(),

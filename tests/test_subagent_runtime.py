@@ -22,8 +22,8 @@ from mycode.subagent.models import (
     SubAgentLaunchRequest,
     SubAgentTaskState,
 )
-from mycode.subagent.runtime import SubAgentRuntime, SubAgentRuntimeFactory
-from mycode.subagent.tooling import TaskToolRegistryFactory, TaskToolRuntime
+from mycode.subagent.runtime import SubAgentRuntime, create_subagent_runtime
+from mycode.subagent.tooling import TaskToolRuntime, create_task_tool_runtime
 from mycode.tool import ToolCall, ToolDefinition, ToolExecutor, ToolKind, ToolRegistry, ToolResult
 from mycode.workspace import (
     WorkspaceContext,
@@ -119,6 +119,43 @@ class LeaseRecordingTaskToolRegistryFactory:
         return TaskToolRuntime(
             registry=registry,
             executor=ToolExecutor(registry),
+        )
+
+
+class TaskToolRegistryFactory:
+    def __init__(
+        self,
+        *,
+        workspace_root,
+        home=None,
+        skill_catalog_factory=None,
+        mcp_pool=None,
+        executor_timeout_seconds=10.0,
+    ) -> None:
+        self._workspace_root = workspace_root
+        self._home = home
+        self._skill_catalog_factory = skill_catalog_factory
+        self._mcp_pool = mcp_pool
+        self._executor_timeout_seconds = executor_timeout_seconds
+
+    def create(self, parent_registry, **kwargs):
+        lease = kwargs.get("workspace_lease")
+        workspace = lease.context if lease is not None else _shared_workspace(self._workspace_root)
+        return create_task_tool_runtime(
+            workspace=workspace,
+            parent_registry=parent_registry,
+            allowed_tool_names=frozenset(definition.name for definition in parent_registry.definitions()),
+            permission=kwargs.get("permission"),
+            memory=kwargs.get("memory"),
+            llm=kwargs.get("llm"),
+            llm_config=kwargs.get("llm_config"),
+            llm_factory=kwargs.get("llm_factory"),
+            agent_config=kwargs.get("agent_config"),
+            hook_runtime_factory=kwargs.get("hook_runtime_factory"),
+            home=self._home,
+            skill_catalog_factory=self._skill_catalog_factory,
+            mcp_pool=kwargs.get("mcp_pool", self._mcp_pool),
+            executor_timeout_seconds=self._executor_timeout_seconds,
         )
 
 
@@ -291,20 +328,28 @@ def request(*, kind=SubAgentKind.DEFINED, task="请完成子任务", role_name="
     )
 
 
-def make_factory(tmp_path, *, llm_factory, catalog, parent_registry=None, hook_factory=None):
-    return SubAgentRuntimeFactory(
-        config=subagent_config(),
-        llm_config=llm_config(),
-        llm_factory=llm_factory,
-        catalog=catalog,
-        parent_tool_registry=parent_registry or ToolRegistry(),
-        task_tool_registry_factory=SimpleTaskToolRegistryFactory(),
-        permission_factory=lambda mode: AllowPermission(),
-        hook_runtime_factory=hook_factory or (lambda: RecordingHookRuntime()),
-        workspace_root=tmp_path,
-        workspace_environment=f"workspace={tmp_path}",
-        project_instructions=("项目规则 A",),
-    )
+def make_factory(tmp_path, *, llm_factory, catalog, parent_registry=None, hook_factory=None, home=None):
+    class RuntimeFactory:
+        def create(self, request, *, detached, task_id=None, workspace_lease=None):
+            return create_subagent_runtime(
+                request=request,
+                detached=detached,
+                config=subagent_config(),
+                llm_config=llm_config(),
+                llm_factory=llm_factory,
+                catalog=catalog,
+                parent_tool_registry=parent_registry or ToolRegistry(),
+                permission_factory=lambda mode: AllowPermission(),
+                hook_runtime_factory=hook_factory or (lambda: RecordingHookRuntime()),
+                workspace_root=tmp_path,
+                workspace_environment=f"workspace={tmp_path}",
+                project_instructions=("项目规则 A",),
+                task_id=task_id,
+                workspace_lease=workspace_lease,
+                home=home,
+            )
+
+    return RuntimeFactory()
 
 
 async def run_report(runtime):
@@ -346,6 +391,11 @@ def test_runtime_direct_text_completes_with_rounds_result_and_usage(tmp_path):
     assert "项目规则 A" in rendered
     assert "读取 README 并总结。" in rendered
     assert "你是测试用子 Agent" in rendered
+
+
+def test_runtime_keeps_single_event_consumer_method():
+    assert hasattr(SubAgentRuntime, "_consume_events")
+    assert not hasattr(SubAgentRuntime, "_consume_events_with_sink")
 
 
 def test_runtime_releases_worktree_lease_and_returns_disposition(tmp_path):
@@ -507,18 +557,15 @@ def test_factory_selects_model_and_max_rounds_for_defined_inherit_and_fork(tmp_p
 
 def test_factory_accepts_workspace_lease_and_passes_it_to_task_runtime(tmp_path):
     llm = ScriptedLLM([[StreamEvent(StreamEventType.TEXT_DELTA, "done"), StreamEvent(StreamEventType.DONE)]])
-    task_factory = LeaseRecordingTaskToolRegistryFactory()
-    lease = worktree_lease("task-000001", "task-000001")
-    factory = SubAgentRuntimeFactory(
-        config=subagent_config(),
-        llm_config=llm_config(),
+    lease = worktree_lease(
+        "task-000001",
+        "task-000001",
+        root=tmp_path / ".worktrees" / "general" / "task-000001",
+    )
+    factory = make_factory(
+        tmp_path,
         llm_factory=RecordingLLMFactory({"sonnet-child": [llm]}),
         catalog=FakeCatalog(role()),
-        parent_tool_registry=ToolRegistry(),
-        task_tool_registry_factory=task_factory,
-        permission_factory=lambda mode: AllowPermission(),
-        workspace_root=tmp_path,
-        workspace_environment=f"workspace={tmp_path}",
     )
 
     runtime = factory.create(
@@ -528,12 +575,11 @@ def test_factory_accepts_workspace_lease_and_passes_it_to_task_runtime(tmp_path)
         workspace_lease=lease,
     )
     report = asyncio.run(run_report(runtime))
-    rendered = "\n".join(message.content for message in llm.requests[0])
+    rendered = "\\n".join(message.content for message in llm.requests[0])
 
     assert report.state is SubAgentTaskState.COMPLETED
     assert runtime._workspace_lease == lease
     assert runtime._agent_loop._workspace == lease.context
-    assert task_factory.workspace_leases == [lease]
     assert "隔离 Worktree" in rendered
     assert str(lease.context.root) in rendered
     assert lease.context.branch_name in rendered
@@ -633,20 +679,12 @@ def test_factory_uses_task_context_manager_and_cleans_archive_session(tmp_path):
     llm = ScriptedLLM(
         [[StreamEvent(StreamEventType.TEXT_DELTA, "done"), StreamEvent(StreamEventType.DONE)]]
     )
-    runtime = SubAgentRuntimeFactory(
-        config=subagent_config(),
-        llm_config=llm_config(),
+    runtime = make_factory(
+        tmp_path,
         llm_factory=RecordingLLMFactory({"sonnet-child": [llm]}),
         catalog=FakeCatalog(role()),
-        parent_tool_registry=ToolRegistry(),
-        task_tool_registry_factory=TaskToolRegistryFactory(
-            workspace_root=tmp_path,
-            home=tmp_path / "home",
-        ),
-        permission_factory=lambda mode: AllowPermission(),
-        hook_runtime_factory=lambda: RecordingHookRuntime(),
-        workspace_root=tmp_path,
-        workspace_environment=f"workspace={tmp_path}",
+        hook_factory=lambda: RecordingHookRuntime(),
+        home=tmp_path / "home",
     ).create(request(), detached=False)
     context_manager = runtime._agent_loop._context_manager
     session_dir = context_manager._store.session_dir
@@ -658,7 +696,24 @@ def test_factory_uses_task_context_manager_and_cleans_archive_session(tmp_path):
     assert not session_dir.exists()
 
 
-def worktree_lease(task_id: str, task_token: str) -> WorkspaceLease:
+def _shared_workspace(root: Path) -> WorkspaceContext:
+    resolved = Path(root).resolve()
+    return WorkspaceContext(
+        kind=WorkspaceKind.SHARED,
+        root=resolved,
+        repository_root=resolved,
+        repository_id="shared",
+        task_identity=None,
+        branch_name=None,
+        hooks_path=None,
+    )
+
+
+def worktree_lease(task_id: str, task_token: str, *, root: Path | None = None) -> WorkspaceLease:
+    if root is None:
+        root = Path(f"C:/repo/.worktrees/general/{task_token}")
+    else:
+        root.mkdir(parents=True, exist_ok=True)
     identity = WorkspaceTaskIdentity(
         repository_id="repo-123",
         task_id=task_id,
@@ -671,7 +726,7 @@ def worktree_lease(task_id: str, task_token: str) -> WorkspaceLease:
     return WorkspaceLease(
         context=WorkspaceContext(
             kind=WorkspaceKind.WORKTREE,
-            root=Path(f"C:/repo/.worktrees/general/{task_token}"),
+            root=root,
             repository_root=Path("C:/repo"),
             repository_id=identity.repository_id,
             task_identity=identity,

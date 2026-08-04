@@ -6,7 +6,9 @@ from types import MappingProxyType
 
 import pytest
 
-if "httpx" not in sys.modules:
+try:
+    import httpx  # noqa: F401
+except ModuleNotFoundError:
     fake_httpx = types.ModuleType("httpx")
 
     class FakeHTTPError(Exception):
@@ -33,6 +35,7 @@ if "httpx" not in sys.modules:
     fake_httpx.Response = FakeResponse
     fake_httpx.AsyncByteStream = FakeAsyncByteStream
     sys.modules["httpx"] = fake_httpx
+    import httpx  # noqa: F401
 
 from mycode.agent import AgentConfig
 from mycode.compact.archive import ReadCompactArtifactTool
@@ -42,6 +45,7 @@ from mycode.memory import InMemoryConversationMemory
 from mycode.memory.tools import ReadMemoryNoteTool
 from mycode.permission.models import PermissionDecision, PermissionEffect, PermissionMode
 from mycode.permission.service import PermissionService
+from mycode.mcp.tools import MCPToolWrapper, ToolSearch
 from mycode.skill.catalog import SkillCatalog
 from mycode.skill.load_tool import SkillLoadTool
 from mycode.skill.loader import SkillLoader
@@ -57,10 +61,9 @@ from mycode.subagent.models import (
     SubAgentLaunchRequest,
 )
 from mycode.subagent.tooling import (
-    ParentOnlyToolAdapter,
     SubAgentPermissionInterceptor,
     SubAgentToolPolicy,
-    TaskToolRegistryFactory,
+    create_task_tool_runtime,
     create_task_permission_service,
 )
 from mycode.tool import (
@@ -123,61 +126,17 @@ class FakeMCPPool:
         )
 
 
-class FakeMCPToolWrapper:
+class FakeMCPToolWrapper(MCPToolWrapper):
     def __init__(self, remote_tool, pool):
-        self.remote_tool = remote_tool
-        self.pool = pool
-        self._definition = ToolDefinition(
-            name=remote_tool.public_name,
-            description=remote_tool.description,
-            parameters=dict(remote_tool.parameters),
-            kind=remote_tool.kind,
-        )
-
-    @property
-    def definition(self):
-        return self._definition
-
-    @property
-    def server_name(self):
-        return self.remote_tool.server_name
-
-    @property
-    def remote_name(self):
-        return self.remote_tool.remote_name
+        super().__init__(remote_tool, pool)
 
     def should_defer(self):
         return True
 
 
-class FakeToolSearch:
+class FakeToolSearch(ToolSearch):
     def __init__(self, registry, pool):
-        self.registry = registry
-        self.pool = pool
-
-    @property
-    def definition(self):
-        return ToolDefinition(
-            name="tool_search",
-            description="Search deferred tools.",
-            parameters={
-                "type": "object",
-                "properties": {"name": {"type": "string"}},
-                "required": ["name"],
-            },
-            kind=ToolKind.READ,
-        )
-
-    async def execute_async(self, arguments):
-        name = arguments.get("name")
-        tool = self.registry.get(name)
-        if tool is None or not self.registry.mark_discovered(name):
-            return ToolResult(ok=False, tool_name="tool_search", content={}, error="not_found")
-        return ToolResult(
-            ok=True,
-            tool_name="tool_search",
-            content={"definition": {"name": tool.definition.name}},
-        )
+        super().__init__(registry, pool)
 
 
 class AllowPermission:
@@ -209,6 +168,43 @@ class FakeTaskLocalTool:
 
     def execute(self, arguments):
         raise AssertionError("missing task-local factory should fail before execution")
+
+
+class TaskToolRegistryFactory:
+    def __init__(
+        self,
+        *,
+        workspace_root: Path,
+        home: Path | None = None,
+        skill_catalog_factory=None,
+        mcp_pool=None,
+        executor_timeout_seconds: float = 10.0,
+    ) -> None:
+        self._workspace_root = workspace_root
+        self._home = home
+        self._skill_catalog_factory = skill_catalog_factory
+        self._mcp_pool = mcp_pool
+        self._executor_timeout_seconds = executor_timeout_seconds
+
+    def create(self, parent_registry, **kwargs):
+        lease = kwargs.get("workspace_lease")
+        workspace = lease.context if lease is not None else shared_workspace(self._workspace_root)
+        return create_task_tool_runtime(
+            workspace=workspace,
+            parent_registry=parent_registry,
+            allowed_tool_names=frozenset(definition.name for definition in parent_registry.definitions()),
+            permission=kwargs.get("permission"),
+            memory=kwargs.get("memory"),
+            llm=kwargs.get("llm"),
+            llm_config=kwargs.get("llm_config"),
+            llm_factory=kwargs.get("llm_factory"),
+            agent_config=kwargs.get("agent_config"),
+            hook_runtime_factory=kwargs.get("hook_runtime_factory"),
+            home=self._home,
+            skill_catalog_factory=self._skill_catalog_factory,
+            mcp_pool=kwargs.get("mcp_pool", self._mcp_pool),
+            executor_timeout_seconds=self._executor_timeout_seconds,
+        )
 
 
 def parent_only_definition(name="Agent"):
@@ -272,6 +268,19 @@ def launch_request(kind=SubAgentKind.DEFINED, *, parent_tools=None):
     )
 
 
+def shared_workspace(root: Path) -> WorkspaceContext:
+    resolved = root.resolve()
+    return WorkspaceContext(
+        kind=WorkspaceKind.SHARED,
+        root=resolved,
+        repository_root=resolved,
+        repository_id="test-shared-workspace",
+        task_identity=None,
+        branch_name=None,
+        hooks_path=None,
+    )
+
+
 def test_parent_state_tools_are_marked_parent_only_and_skill_load_is_task_local():
     assert (
         ReadMemoryNoteTool(FakeNotes()).definition.runtime_scope
@@ -284,17 +293,26 @@ def test_parent_state_tools_are_marked_parent_only_and_skill_load_is_task_local(
     assert SkillLoadTool(runtime=object()).definition.runtime_scope is ToolRuntimeScope.TASK_LOCAL
 
 
-def test_parent_only_tool_adapter_preserves_definition_and_refuses_execution():
-    definition = parent_only_definition()
-    adapter = ParentOnlyToolAdapter(definition)
+def test_create_task_tool_runtime_omits_parent_only_tools_from_child_registry(tmp_path):
+    definition = parent_only_definition("read_memory_note")
 
-    result = adapter.execute({})
+    class ParentTool:
+        @property
+        def definition(self):
+            return definition
 
-    assert adapter.definition == definition
-    assert result.ok is False
-    assert result.tool_name == "Agent"
-    assert result.content["reason_code"] == "parent_runtime_tool_forbidden"
-    assert "parent_runtime_tool_forbidden" in result.error
+        def execute(self, arguments):
+            raise AssertionError("parent-only tool must not be registered")
+
+    parent_registry = ToolRegistry([ParentTool()])
+    runtime = create_task_tool_runtime(
+        workspace=shared_workspace(tmp_path),
+        parent_registry=parent_registry,
+        allowed_tool_names=frozenset({"read_memory_note"}),
+        permission=AllowPermission(),
+    )
+
+    assert runtime.registry.get("read_memory_note") is None
 
 
 def test_policy_visible_names_filters_defined_tools_in_order():
@@ -341,9 +359,7 @@ def test_policy_evaluate_denies_fork_runtime_forbidden_tools_before_executor():
     )
     request = launch_request(kind=SubAgentKind.FORK, parent_tools=definitions)
 
-    assert policy.visible_names(request=request, role=None, detached=True) == frozenset(
-        {"read_file", "write_file", "read_memory_note", "Agent"}
-    )
+    assert policy.visible_names(request=request, role=None, detached=True) == frozenset({"read_file"})
     assert policy.evaluate(
         request=request,
         role=None,
@@ -525,9 +541,7 @@ def test_task_tool_registry_preserves_shared_tools_and_replaces_parent_only_tool
     runtime = TaskToolRegistryFactory(workspace_root=tmp_path).create(parent_registry)
 
     assert runtime.registry.get("shared") is shared
-    assert isinstance(runtime.registry.get("read_memory_note"), ParentOnlyToolAdapter)
-    result = runtime.registry.get("read_memory_note").execute({})
-    assert result.content["reason_code"] == "parent_runtime_tool_forbidden"
+    assert runtime.registry.get("read_memory_note") is None
 
 
 def test_task_tool_registry_reports_missing_task_local_factory(tmp_path):
@@ -551,9 +565,9 @@ def test_task_tool_registry_rebuilds_load_skill_with_child_skill_runtime(tmp_pat
     parent_runtime = object()
     parent_registry.register(SkillLoadTool(runtime=parent_runtime))
 
-    def skill_catalog_factory(tool_names):
+    def skill_catalog_factory(tool_names, workspace_root):
         return SkillCatalog(
-            loader=SkillLoader(workspace_root=workspace, home=home, builtin_root=builtin),
+            loader=SkillLoader(workspace_root=workspace_root, home=home, builtin_root=builtin),
             tool_names=tool_names,
             reserved_slash_names=frozenset(),
         )
@@ -740,8 +754,7 @@ def test_task_registry_can_replace_parent_compact_tool_with_child_archive_tool(t
 
     child_tool = runtime.registry.get("read_compact_artifact")
 
-    assert not isinstance(child_tool, ParentOnlyToolAdapter)
-    assert child_tool.definition.runtime_scope is ToolRuntimeScope.TASK_LOCAL
+    assert child_tool is None
     assert runtime.context_manager is not None
 
 

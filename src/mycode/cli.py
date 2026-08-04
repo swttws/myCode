@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from functools import partial
 import logging
 import sys
 from datetime import datetime, timezone
@@ -46,11 +47,11 @@ from mycode.subagent.config import validate_subagent_tool_names
 from mycode.subagent.context import ParentAgentSnapshotStore
 from mycode.subagent.loader import AgentRoleLoader
 from mycode.subagent.notifications import SubAgentNotificationInbox
-from mycode.subagent.runtime import SubAgentRuntimeFactory
+from mycode.subagent.runtime import create_subagent_runtime
 from mycode.subagent.service import SubAgentService
 from mycode.subagent.tasks import SubAgentTaskManager
 from mycode.subagent.tool import AgentTool
-from mycode.subagent.tooling import TaskToolRegistryFactory, create_task_permission_service
+from mycode.subagent.tooling import create_task_permission_service
 from mycode.tool import ToolExecutor, create_default_tool_registry
 from mycode.tui import ChatTUI
 from mycode.worktree import (
@@ -380,26 +381,13 @@ def _create_subagent_service(
     notification_inbox = SubAgentNotificationInbox(
         max_notification_bytes=subagent_config.max_notification_bytes,
     )
-    runtime_factory = SubAgentRuntimeFactory(
+    runtime_factory = partial(
+        create_subagent_runtime,
         config=subagent_config,
         llm_config=config,
         llm_factory=create_llm,
         catalog=catalog,
         parent_tool_registry=tool_registry,
-        task_tool_registry_factory=TaskToolRegistryFactory(
-            workspace_root=workspace_root,
-            home=Path.home(),
-            mcp_pool=mcp_pool,
-            skill_catalog_factory=lambda tool_names, workspace_root: SkillCatalog(
-                loader=SkillLoader(
-                    workspace_root=workspace_root,
-                    home=Path.home(),
-                    builtin_root=_builtin_skill_root(),
-                ),
-                tool_names=tool_names,
-                reserved_slash_names=reserved_slash_names,
-            ),
-        ),
         permission_factory=lambda mode: _create_task_permission_interceptor(
             workspace_root,
             mode,
@@ -408,6 +396,17 @@ def _create_subagent_service(
         workspace_environment=f"workspace={workspace_root}",
         project_instructions=(),
         worktree_service=worktree_service,
+        home=Path.home(),
+        skill_catalog_factory=lambda tool_names, workspace_root: SkillCatalog(
+            loader=SkillLoader(
+                workspace_root=workspace_root,
+                home=Path.home(),
+                builtin_root=_builtin_skill_root(),
+            ),
+            tool_names=tool_names,
+            reserved_slash_names=reserved_slash_names,
+        ),
+        mcp_pool=mcp_pool,
     )
     task_manager = SubAgentTaskManager(
         config=subagent_config,
@@ -415,6 +414,7 @@ def _create_subagent_service(
     )
     service = SubAgentService(
         config=subagent_config,
+        catalog=catalog,
         runtime_factory=runtime_factory,
         task_manager=task_manager,
         worktree_service=worktree_service,

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import inspect
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 
 from mycode.compact import create_context_manager
+from mycode.mcp.tools import MCPToolWrapper, ToolSearch
 from mycode.permission.models import (
     PermissionDecision,
     PermissionEffect,
@@ -21,7 +21,6 @@ from mycode.subagent.models import (
     ToolPolicyDecision,
 )
 from mycode.tool import (
-    ToolArguments,
     ToolCall,
     ToolDefinition,
     ToolExecutor,
@@ -31,28 +30,7 @@ from mycode.tool import (
     ToolWorkspaceScope,
     create_default_tool_registry,
 )
-from mycode.workspace import WorkspaceContext, WorkspaceKind, WorkspaceLease
-
-
-class ParentOnlyToolAdapter:
-    def __init__(self, definition: ToolDefinition) -> None:
-        self._definition = definition
-
-    @property
-    def definition(self) -> ToolDefinition:
-        return self._definition
-
-    def execute(self, arguments: ToolArguments) -> ToolResult:
-        reason_code = "parent_runtime_tool_forbidden"
-        return ToolResult(
-            ok=False,
-            tool_name=self._definition.name,
-            content={
-                "reason_code": reason_code,
-                "message": "该工具只能在父 Agent 运行时执行，子 Agent 中已拒绝。",
-            },
-            error=reason_code,
-        )
+from mycode.workspace import WorkspaceContext, WorkspaceKind
 
 
 @dataclass(frozen=True)
@@ -69,308 +47,260 @@ class TaskToolRuntime:
             self.cleanup()
 
 
-class TaskToolRegistryFactory:
-    def __init__(
-        self,
-        *,
-        workspace_root: str | Path,
-        home: str | Path | None = None,
-        skill_catalog_factory: Callable[[Callable[[], frozenset[str]]], object] | None = None,
-        mcp_pool: object | None = None,
-        executor_timeout_seconds: float = 10.0,
-    ) -> None:
-        self._workspace_root = Path(workspace_root)
-        self._home = Path(home) if home is not None else Path.home()
-        self._skill_catalog_factory = skill_catalog_factory
-        self._mcp_pool = mcp_pool
-        self._executor_timeout_seconds = executor_timeout_seconds
+def create_task_tool_runtime(
+    *,
+    workspace: WorkspaceContext,
+    parent_registry: ToolRegistry,
+    allowed_tool_names: frozenset[str],
+    permission,
+    memory=None,
+    llm=None,
+    llm_config=None,
+    llm_factory=None,
+    agent_config=None,
+    hook_runtime_factory: Callable[[], object] | None = None,
+    home: str | Path | None = None,
+    skill_catalog_factory: Callable[[Callable[[], frozenset[str]], Path], object] | None = None,
+    mcp_pool=None,
+    executor_timeout_seconds: float = 10.0,
+) -> TaskToolRuntime:
+    cleanup_callbacks: list[Callable[[], None]] = []
+    workspace_root = workspace.root
+    context_manager = _create_context_manager(
+        workspace_root=workspace_root,
+        home=Path(home) if home is not None else Path.home(),
+        memory=memory,
+        llm=llm,
+        llm_config=llm_config,
+        agent_config=agent_config,
+        cleanup_callbacks=cleanup_callbacks,
+    )
+    hook_runtime = hook_runtime_factory() if hook_runtime_factory is not None else None
+    local_by_name = _workspace_tool_factories(workspace_root)
 
-    def create(
-        self,
-        parent_registry: ToolRegistry,
-        *,
-        memory=None,
-        llm=None,
-        llm_config=None,
-        llm_factory=None,
-        permission=None,
-        agent_config=None,
-        hook_runtime_factory: Callable[[], object] | None = None,
-        workspace_lease: WorkspaceLease | None = None,
-    ) -> TaskToolRuntime:
-        cleanup_callbacks: list[Callable[[], None]] = []
-        workspace_context = (
-            workspace_lease.context
-            if workspace_lease is not None
-            else _shared_workspace(self._workspace_root)
-        )
-        workspace_root = workspace_context.root
-        context_manager = self._create_context_manager(
-            workspace_root=workspace_root,
-            memory=memory,
-            llm=llm,
-            llm_config=llm_config,
-            agent_config=agent_config,
-            cleanup_callbacks=cleanup_callbacks,
-        )
-        hook_runtime = hook_runtime_factory() if hook_runtime_factory is not None else None
+    task_tools, missing_task_local_tools, load_skill_requested, tool_search_requested, active_mcp_pool = _collect_task_tools(
+        parent_registry=parent_registry,
+        workspace=workspace,
+        allowed_tool_names=allowed_tool_names,
+        local_by_name=local_by_name,
+        mcp_pool=mcp_pool,
+    )
 
-        local_defaults = create_default_tool_registry(workspace_root)
-        local_by_name = {
-            definition.name: local_defaults.get(definition.name)
-            for definition in local_defaults.definitions()
-        }
-        if context_manager is not None:
-            local_by_name["read_compact_artifact"] = context_manager.artifact_tool_for_scope(
-                ToolRuntimeScope.TASK_LOCAL
-            )
-
-        task_tools = []
-        missing_task_local_tools: list[str] = []
-        load_skill_requested = False
-        tool_search_parent = None
-        mcp_pool = self._mcp_pool
-        is_worktree_workspace = (
-            workspace_lease is not None
-            and workspace_lease.context.kind is WorkspaceKind.WORKTREE
+    if missing_task_local_tools:
+        _run_cleanup(tuple(cleanup_callbacks))
+        raise RuntimeError(
+            "task_local_tool_factory_missing: "
+            + ", ".join(sorted(missing_task_local_tools))
         )
 
-        for definition in parent_registry.definitions():
-            parent_tool = parent_registry.get(definition.name)
-            if parent_tool is None:
-                continue
-            if (
-                is_worktree_workspace
-                and definition.workspace_scope is ToolWorkspaceScope.SHARED_ONLY
-            ):
-                continue
-            if _is_tool_search(parent_tool):
-                tool_search_parent = parent_tool
-                mcp_pool = _pool_for(parent_tool, fallback=mcp_pool)
-                continue
+    registry = ToolRegistry(task_tools)
+    executor = ToolExecutor(registry, timeout_seconds=executor_timeout_seconds)
 
-            if _is_mcp_wrapper(parent_tool):
-                mcp_pool = _pool_for(parent_tool, fallback=mcp_pool)
-                task_tools.append(_clone_mcp_wrapper(parent_tool, pool=mcp_pool))
-                continue
-
-            if definition.name == "load_skill" and definition.runtime_scope is ToolRuntimeScope.TASK_LOCAL:
-                load_skill_requested = True
-                continue
-
-            if definition.name in local_by_name:
-                task_tools.append(local_by_name[definition.name])
-                continue
-
-            if definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY:
-                task_tools.append(ParentOnlyToolAdapter(definition))
-                continue
-
-            if definition.runtime_scope is ToolRuntimeScope.TASK_LOCAL:
-                local_tool = local_by_name.get(definition.name)
-                if local_tool is None:
-                    missing_task_local_tools.append(definition.name)
-                    continue
-                task_tools.append(local_tool)
-                continue
-
-            task_tools.append(parent_tool)
-
-        if missing_task_local_tools:
+    if tool_search_requested:
+        if active_mcp_pool is None:
             _run_cleanup(tuple(cleanup_callbacks))
-            raise RuntimeError(
-                "task_local_tool_factory_missing: "
-                + ", ".join(sorted(missing_task_local_tools))
+            raise RuntimeError("task_mcp_pool_missing")
+        registry.register(ToolSearch(registry, active_mcp_pool))
+
+    skill_runtime = None
+    if load_skill_requested:
+        try:
+            skill_runtime = _create_skill_runtime(
+                workspace_root=workspace_root,
+                registry=registry,
+                executor=executor,
+                llm=llm,
+                llm_config=llm_config,
+                llm_factory=llm_factory,
+                permission=permission,
+                agent_config=agent_config,
+                workspace_context=workspace,
+                skill_catalog_factory=skill_catalog_factory,
             )
+        except Exception:
+            _run_cleanup(tuple(cleanup_callbacks))
+            raise
 
-        registry = ToolRegistry(task_tools)
-        executor = ToolExecutor(registry, timeout_seconds=self._executor_timeout_seconds)
+    return TaskToolRuntime(
+        registry=registry,
+        executor=executor,
+        context_manager=context_manager,
+        skill_runtime=skill_runtime,
+        hook_runtime=hook_runtime,
+        cleanup=_cleanup_all(tuple(cleanup_callbacks)),
+    )
 
-        if tool_search_parent is not None:
-            if mcp_pool is None:
-                _run_cleanup(tuple(cleanup_callbacks))
-                raise RuntimeError("task_mcp_pool_missing")
-            registry.register(_clone_tool_search(tool_search_parent, registry=registry, pool=mcp_pool))
 
-        skill_runtime = None
-        if load_skill_requested:
-            try:
-                skill_runtime = self._create_skill_runtime(
-                    workspace_root=workspace_root,
-                    registry=registry,
-                    executor=executor,
-                    llm=llm,
-                    llm_config=llm_config,
-                    llm_factory=llm_factory,
-                    permission=permission,
-                    agent_config=agent_config,
-                    workspace_context=workspace_context,
-                )
-            except Exception:
-                _run_cleanup(tuple(cleanup_callbacks))
-                raise
+@dataclass(frozen=True)
+class _TaskToolSelection:
+    tool: object | None = None
+    missing_task_local_tool: str | None = None
+    load_skill_requested: bool = False
+    tool_search_requested: bool = False
+    active_mcp_pool: object | None = None
 
-        return TaskToolRuntime(
-            registry=registry,
-            executor=executor,
-            context_manager=context_manager,
-            skill_runtime=skill_runtime,
-            hook_runtime=hook_runtime,
-            cleanup=_cleanup_all(tuple(cleanup_callbacks)),
+
+def _collect_task_tools(
+    *,
+    parent_registry: ToolRegistry,
+    workspace: WorkspaceContext,
+    allowed_tool_names: frozenset[str],
+    local_by_name: dict[str, object],
+    mcp_pool,
+) -> tuple[list[object], list[str], bool, bool, object | None]:
+    task_tools: list[object] = []
+    missing_task_local_tools: list[str] = []
+    load_skill_requested = False
+    tool_search_requested = False
+    active_mcp_pool = mcp_pool
+
+    for definition in parent_registry.definitions():
+        selection = _select_task_tool(
+            parent_registry=parent_registry,
+            definition=definition,
+            workspace=workspace,
+            allowed_tool_names=allowed_tool_names,
+            local_by_name=local_by_name,
+            active_mcp_pool=active_mcp_pool,
         )
+        if selection.tool is not None:
+            task_tools.append(selection.tool)
+        if selection.missing_task_local_tool is not None:
+            missing_task_local_tools.append(selection.missing_task_local_tool)
+        load_skill_requested = load_skill_requested or selection.load_skill_requested
+        tool_search_requested = tool_search_requested or selection.tool_search_requested
+        active_mcp_pool = active_mcp_pool or selection.active_mcp_pool
 
-    def _create_context_manager(
-        self,
-        *,
-        workspace_root: Path,
-        memory,
-        llm,
-        llm_config,
-        agent_config,
-        cleanup_callbacks: list[Callable[[], None]],
-    ):
-        if memory is None or llm is None or llm_config is None or agent_config is None:
-            return None
-        context_manager = create_context_manager(
-            workspace_root=workspace_root,
-            home=self._home,
-            llm=llm,
-            memory=memory,
-            config=llm_config.compact,
-            model_timeout_seconds=agent_config.model_timeout_seconds,
+    return task_tools, missing_task_local_tools, load_skill_requested, tool_search_requested, active_mcp_pool
+
+
+def _select_task_tool(
+    *,
+    parent_registry: ToolRegistry,
+    definition: ToolDefinition,
+    workspace: WorkspaceContext,
+    allowed_tool_names: frozenset[str],
+    local_by_name: dict[str, object],
+    active_mcp_pool,
+) -> _TaskToolSelection:
+    name = definition.name
+    if name not in allowed_tool_names or _hidden_in_workspace(definition, workspace):
+        return _TaskToolSelection()
+
+    parent_tool = parent_registry.get(name)
+    if parent_tool is None:
+        return _TaskToolSelection()
+    if isinstance(parent_tool, ToolSearch):
+        return _TaskToolSelection(
+            tool=None,
+            tool_search_requested=True,
+            active_mcp_pool=active_mcp_pool or parent_tool.pool,
         )
-        cleanup_callbacks.append(context_manager.close)
-        return context_manager
-
-    def _create_skill_runtime(
-        self,
-        *,
-        workspace_root: Path,
-        registry: ToolRegistry,
-        executor: ToolExecutor,
-        llm,
-        llm_config,
-        llm_factory,
-        permission,
-        agent_config,
-        workspace_context: WorkspaceContext,
-    ):
-        if (
-            self._skill_catalog_factory is None
-            or llm is None
-            or llm_config is None
-            or llm_factory is None
-            or permission is None
-            or agent_config is None
-        ):
-            raise RuntimeError("task_local_tool_factory_missing: load_skill")
-
-        from mycode.skill.executor import SkillExecutor
-        from mycode.skill.load_tool import SkillLoadTool
-        from mycode.skill.runtime import SkillRuntime
-
-        def task_tool_names() -> frozenset[str]:
-            names = frozenset(definition.name for definition in registry.definitions())
-            return names | {SkillRuntime.LOAD_TOOL_NAME}
-
-        catalog = _create_skill_catalog(
-            self._skill_catalog_factory,
-            task_tool_names,
-            workspace_context.root,
+    if isinstance(parent_tool, MCPToolWrapper):
+        pool = active_mcp_pool or parent_tool.pool
+        return _TaskToolSelection(
+            tool=MCPToolWrapper(parent_tool.remote_tool, pool),
+            active_mcp_pool=pool,
         )
-        catalog.initialize()
-        skill_runtime = SkillRuntime(catalog)
-        skill_executor = SkillExecutor(
-            runtime=skill_runtime,
-            main_llm=llm,
-            llm_config=llm_config,
-            llm_factory=llm_factory,
-            tool_registry=registry,
-            tool_executor=executor,
-            permission=permission,
-            agent_config=agent_config,
-            workspace=workspace_context,
-        )
-        registry.register(SkillLoadTool(runtime=skill_runtime, executor=skill_executor))
-        return skill_runtime
+    if name == "load_skill" and definition.runtime_scope is ToolRuntimeScope.TASK_LOCAL:
+        return _TaskToolSelection(load_skill_requested=True)
+    if name in local_by_name:
+        return _TaskToolSelection(tool=local_by_name[name])
+    if definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY:
+        return _TaskToolSelection()
+    if definition.runtime_scope is ToolRuntimeScope.TASK_LOCAL:
+        return _TaskToolSelection(missing_task_local_tool=name)
+    return _TaskToolSelection(tool=parent_tool)
 
 
-def _is_mcp_wrapper(tool) -> bool:
-    should_defer = getattr(tool, "should_defer", None)
+
+def _workspace_tool_factories(workspace_root: Path) -> dict[str, object]:
+    local_defaults = create_default_tool_registry(workspace_root)
+    local_by_name = {
+        definition.name: local_defaults.get(definition.name)
+        for definition in local_defaults.definitions()
+    }
+    return local_by_name
+
+
+def _hidden_in_workspace(definition: ToolDefinition, workspace: WorkspaceContext) -> bool:
     return (
-        callable(should_defer)
-        and should_defer() is True
-        and _remote_tool_for(tool) is not None
-        and _pool_for(tool) is not None
+        workspace.kind is WorkspaceKind.WORKTREE
+        and definition.workspace_scope is ToolWorkspaceScope.SHARED_ONLY
     )
 
 
-def _is_tool_search(tool) -> bool:
-    definition = getattr(tool, "definition", None)
-    return (
-        getattr(definition, "name", None) == "tool_search"
-        and _pool_for(tool) is not None
+def _create_context_manager(
+    *,
+    workspace_root: Path,
+    home: Path,
+    memory,
+    llm,
+    llm_config,
+    agent_config,
+    cleanup_callbacks: list[Callable[[], None]],
+):
+    if memory is None or llm is None or llm_config is None or agent_config is None:
+        return None
+    context_manager = create_context_manager(
+        workspace_root=workspace_root,
+        home=home,
+        llm=llm,
+        memory=memory,
+        config=llm_config.compact,
+        model_timeout_seconds=agent_config.model_timeout_seconds,
     )
+    cleanup_callbacks.append(context_manager.close)
+    return context_manager
 
 
-def _remote_tool_for(tool):
-    remote_tool = getattr(tool, "remote_tool", None)
-    if remote_tool is not None:
-        return remote_tool
-    return getattr(tool, "_remote_tool", None)
+def _create_skill_runtime(
+    *,
+    workspace_root: Path,
+    registry: ToolRegistry,
+    executor: ToolExecutor,
+    llm,
+    llm_config,
+    llm_factory,
+    permission,
+    agent_config,
+    workspace_context: WorkspaceContext,
+    skill_catalog_factory: Callable[[Callable[[], frozenset[str]], Path], object] | None,
+):
+    if (
+        skill_catalog_factory is None
+        or llm is None
+        or llm_config is None
+        or llm_factory is None
+        or permission is None
+        or agent_config is None
+    ):
+        raise RuntimeError("task_local_tool_factory_missing: load_skill")
 
+    from mycode.skill.executor import SkillExecutor
+    from mycode.skill.load_tool import SkillLoadTool
+    from mycode.skill.runtime import SkillRuntime
 
-def _pool_for(tool, *, fallback=None):
-    pool = getattr(tool, "pool", None)
-    if pool is not None:
-        return pool
-    pool = getattr(tool, "_pool", None)
-    return pool if pool is not None else fallback
+    def task_tool_names() -> frozenset[str]:
+        names = frozenset(definition.name for definition in registry.definitions())
+        return names | {SkillRuntime.LOAD_TOOL_NAME}
 
-
-def _clone_mcp_wrapper(parent_tool, *, pool):
-    remote_tool = _remote_tool_for(parent_tool)
-    if remote_tool is None or pool is None:
-        raise RuntimeError("task_mcp_wrapper_clone_failed")
-    return parent_tool.__class__(remote_tool, pool)
-
-
-def _clone_tool_search(parent_tool, *, registry: ToolRegistry, pool):
-    if pool is None:
-        raise RuntimeError("task_mcp_pool_missing")
-    return parent_tool.__class__(registry, pool)
-
-
-def _create_skill_catalog(factory, tool_names, workspace_root: Path):
-    if _factory_accepts_workspace_root(factory):
-        return factory(tool_names, workspace_root)
-    return factory(tool_names)
-
-
-def _factory_accepts_workspace_root(factory) -> bool:
-    try:
-        signature = inspect.signature(factory)
-    except (TypeError, ValueError):
-        return False
-    parameters = tuple(signature.parameters.values())
-    return any(
-        parameter.kind is inspect.Parameter.VAR_POSITIONAL
-        or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    ) or len(parameters) >= 2
-
-
-def _shared_workspace(workspace_root: Path) -> WorkspaceContext:
-    root = Path(workspace_root).resolve()
-    return WorkspaceContext(
-        kind=WorkspaceKind.SHARED,
-        root=root,
-        repository_root=root,
-        repository_id="task-tool-workspace",
-        task_identity=None,
-        branch_name=None,
-        hooks_path=None,
+    catalog = skill_catalog_factory(task_tool_names, workspace_root)
+    catalog.initialize()
+    skill_runtime = SkillRuntime(catalog)
+    skill_executor = SkillExecutor(
+        runtime=skill_runtime,
+        main_llm=llm,
+        llm_config=llm_config,
+        llm_factory=llm_factory,
+        tool_registry=registry,
+        tool_executor=executor,
+        permission=permission,
+        agent_config=agent_config,
+        workspace=workspace_context,
     )
+    registry.register(SkillLoadTool(runtime=skill_runtime, executor=skill_executor))
+    return skill_runtime
 
 
 def _cleanup_all(callbacks: tuple[Callable[[], None], ...]):
@@ -405,22 +335,18 @@ class SubAgentToolPolicy:
         role: AgentRoleDefinition | None,
         detached: bool,
     ) -> frozenset[str]:
+        candidates = self._candidate_names()
         if request.kind is SubAgentKind.FORK:
-            return frozenset(tool.name for tool in request.parent.tools)
-        if role is None:
-            return frozenset()
-
-        candidates = {
-            name
-            for name, definition in self._definitions.items()
-            if name != "Agent" and definition.runtime_scope is not ToolRuntimeScope.PARENT_ONLY
-        }
-        allowed = (
-            set(candidates)
-            if role.metadata.allowed_tools == ("*",)
-            else set(role.metadata.allowed_tools) & candidates
-        )
-        visible = allowed - set(role.metadata.denied_tools)
+            visible = {definition.name for definition in request.parent.tools} & candidates
+        elif role is None:
+            visible = set()
+        else:
+            allowed = (
+                set(candidates)
+                if role.metadata.allowed_tools == ("*",)
+                else set(role.metadata.allowed_tools) & candidates
+            )
+            visible = allowed - set(role.metadata.denied_tools)
         if detached:
             visible &= self._background_allowed_tools
         return frozenset(visible)
@@ -435,16 +361,16 @@ class SubAgentToolPolicy:
     ) -> ToolPolicyDecision:
         definition = self._definition_for(request, tool_name)
         if tool_name == "Agent":
-            return _denied("subagent_recursive_forbidden", "子 Agent 中禁止再次调用 Agent 工具。")
+            return _denied("subagent_recursive_forbidden", "subagent cannot call Agent recursively.")
         if definition is not None and definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY:
-            return _denied("parent_runtime_tool_forbidden", "该工具只能在父 Agent 运行时执行。")
+            return _denied("parent_runtime_tool_forbidden", "tool is only executable in the parent runtime.")
         if detached and tool_name not in self._background_allowed_tools:
-            return _denied("background_tool_forbidden", "后台子 Agent 不允许执行该工具。")
+            return _denied("background_tool_forbidden", "background subagent cannot execute this tool.")
         if request.kind is SubAgentKind.DEFINED and role is not None:
             if tool_name in role.metadata.denied_tools:
-                return _denied("role_tool_forbidden", "角色黑名单禁止执行该工具。")
+                return _denied("role_tool_forbidden", "role denied this tool.")
             if role.metadata.allowed_tools != ("*",) and tool_name not in role.metadata.allowed_tools:
-                return _denied("role_tool_not_allowed", "角色白名单未开放该工具。")
+                return _denied("role_tool_not_allowed", "role did not allow this tool.")
         return ToolPolicyDecision(allowed=True)
 
     def effective_permission_mode(
@@ -456,6 +382,13 @@ class SubAgentToolPolicy:
             return parent
         role_mode = _ROLE_PERMISSION_MAP[role.metadata.permission_mode]
         return min((parent, role_mode), key=lambda mode: _PERMISSION_RANK[mode])
+
+    def _candidate_names(self) -> frozenset[str]:
+        return frozenset(
+            name
+            for name, definition in self._definitions.items()
+            if name != "Agent" and definition.runtime_scope is not ToolRuntimeScope.PARENT_ONLY
+        )
 
     def _definition_for(
         self,
@@ -503,7 +436,7 @@ class SubAgentPermissionInterceptor:
         if not policy.allowed:
             return _permission_denied(
                 policy.reason_code or "subagent_tool_forbidden",
-                policy.message_zh or "子 Agent 工具策略拒绝执行该工具。",
+                policy.message_zh or "subagent tool policy denied this tool.",
                 self._request.parent.permission_mode,
             )
 
@@ -516,7 +449,7 @@ class SubAgentPermissionInterceptor:
         if decision.effect is PermissionEffect.ASK:
             return _permission_denied(
                 "approval_required_non_interactive",
-                "子 Agent 非交互执行中不能请求人工审批，已拒绝该工具调用。",
+                "subagent cannot request interactive approval; tool call denied.",
                 decision.mode,
             )
         return decision
@@ -535,10 +468,7 @@ class SubAgentPermissionInterceptor:
         )
 
     async def after_tool(self, call: ToolCall, result: ToolResult) -> ToolResult:
-        after_tool = getattr(self._permission, "after_tool", None)
-        if callable(after_tool):
-            return await after_tool(call, result)
-        return result
+        return await self._permission.after_tool(call, result)
 
 
 def create_task_permission_service(
