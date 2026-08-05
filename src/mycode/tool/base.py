@@ -44,6 +44,7 @@ class ToolDefinition:
     kind: ToolKind
     grant_arguments: tuple[str, ...] = ()
     parallel_safe: bool = True
+    requires_approval: bool = True
     runtime_scope: ToolRuntimeScope = ToolRuntimeScope.SHARED
     workspace_scope: ToolWorkspaceScope = ToolWorkspaceScope.SHARED_ONLY
     execution_timeout_seconds: float | None = None
@@ -51,6 +52,8 @@ class ToolDefinition:
     def __post_init__(self) -> None:
         if self.kind not in (ToolKind.READ, ToolKind.WRITE):
             raise ValueError(f"invalid tool kind: {self.kind}")
+        if type(self.requires_approval) is not bool:
+            raise ValueError("requires_approval must be a bool.")
         if self.runtime_scope not in (
             ToolRuntimeScope.SHARED,
             ToolRuntimeScope.TASK_LOCAL,

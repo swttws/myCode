@@ -10,7 +10,7 @@ from mycode.subagent.context import (
 )
 from mycode.subagent.loader import AgentRoleCandidate, AgentRoleLoader
 from mycode.subagent.notifications import SubAgentNotificationInbox
-from mycode.subagent.runtime import SubAgentRuntime, SubAgentRuntimeFactory
+from mycode.subagent.runtime import SubAgentRuntime, create_subagent_runtime
 from mycode.subagent.service import (
     ForegroundWaitOutcome,
     ForegroundWaitResult,
@@ -72,7 +72,7 @@ __all__ = [
     "SubAgentNotification",
     "SubAgentNotificationInbox",
     "SubAgentRuntime",
-    "SubAgentRuntimeFactory",
+    "create_subagent_runtime",
     "SubAgentRunResponse",
     "SubAgentService",
     "SubAgentTaskManager",

@@ -159,7 +159,7 @@ def test_agent_loop_updates_parent_snapshot_after_successful_prompt_prepare():
         permission_mode_provider=lambda: PermissionMode.PERMISSIVE,
     )
 
-    events = asyncio.run(collect(loop.run("hello", mode=AgentMode())))
+    events = asyncio.run(collect(loop.run("hello", mode=AgentMode(plan_only=True))))
     snapshot = captured[0]
 
     assert events[-1].type is AgentEventType.FINAL_RESPONSE
@@ -168,6 +168,7 @@ def test_agent_loop_updates_parent_snapshot_after_successful_prompt_prepare():
     assert snapshot.model_id == "parent-real-model"
     assert snapshot.max_rounds == 3
     assert snapshot.permission_mode is PermissionMode.PERMISSIVE
+    assert snapshot.plan_only is True
 
 
 def test_agent_loop_injects_subagent_notifications_once_and_does_not_store_them_in_memory():

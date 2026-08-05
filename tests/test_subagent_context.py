@@ -34,7 +34,7 @@ def make_request(messages=None, tools=None):
     )
 
 
-def make_tool(name="read_file"):
+def make_tool(name="read_file", *, requires_approval=True):
     return ToolDefinition(
         name=name,
         description="Read.",
@@ -44,6 +44,7 @@ def make_tool(name="read_file"):
             "required": ["path"],
         },
         kind=ToolKind.READ,
+        requires_approval=requires_approval,
     )
 
 
@@ -68,7 +69,7 @@ def make_role():
 def test_parent_snapshot_store_uses_contextvar_and_deep_copies_tools():
     async def scenario():
         store = ParentAgentSnapshotStore()
-        tool = make_tool()
+        tool = make_tool(requires_approval=False)
         request = make_request(
             messages=(ChatMessage(role="user", content="parent"),),
             tools=(tool,),
@@ -78,6 +79,7 @@ def test_parent_snapshot_store_uses_contextvar_and_deep_copies_tools():
             model_id="model-a",
             max_rounds=5,
             permission_mode=PermissionMode.DEFAULT,
+            plan_only=True,
         )
         snapshot = store.current()
         tool.parameters["properties"]["path"]["description"] = "mutated"
@@ -87,6 +89,8 @@ def test_parent_snapshot_store_uses_contextvar_and_deep_copies_tools():
         assert snapshot.model_id == "model-a"
         assert snapshot.max_rounds == 5
         assert snapshot.permission_mode is PermissionMode.DEFAULT
+        assert snapshot.plan_only is True
+        assert snapshot.tools[0].requires_approval is False
 
         async def child(model_id):
             store.update(
@@ -94,6 +98,7 @@ def test_parent_snapshot_store_uses_contextvar_and_deep_copies_tools():
                 model_id=model_id,
                 max_rounds=1,
                 permission_mode=PermissionMode.STRICT,
+                plan_only=False,
             )
             await asyncio.sleep(0)
             return store.current().model_id, store.current().messages[0].content
@@ -185,6 +190,7 @@ def test_fork_prompt_keeps_parent_messages_and_tools_prefix_unchanged():
         model_id="model-parent",
         max_rounds=9,
         permission_mode=PermissionMode.PERMISSIVE,
+        plan_only=False,
     )
     snapshot = store.current()
 

@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 
 from mycode.agent import AgentConfig, AgentLoop, AgentMode
 from mycode.agent.events import AgentEventType
@@ -24,12 +25,15 @@ from mycode.subagent.models import (
     SubAgentUsage,
 )
 from mycode.subagent.notifications import SubAgentNotificationInbox
-from mycode.subagent.runtime import SubAgentRuntimeFactory
+from functools import partial
+
+from mycode.subagent.runtime import create_subagent_runtime
 from mycode.subagent.service import SubAgentService
 from mycode.subagent.tasks import SubAgentTaskManager
 from mycode.subagent.tool import AgentTool
-from mycode.subagent.tooling import TaskToolRegistryFactory
+from mycode.subagent.tooling import create_task_tool_runtime
 from mycode.tool import ToolExecutor, ToolRegistry, ToolResult
+from mycode.workspace import WorkspaceContext, WorkspaceKind
 from tests.helpers import PassthroughContextManager, collect_async
 
 
@@ -168,9 +172,52 @@ class FakeRuntimeFactory:
         self.runtimes = list(runtimes)
         self.calls = []
 
-    def create(self, launch_request, *, detached, task_id, workspace_lease):
-        self.calls.append((launch_request, detached, task_id, workspace_lease))
+    def __call__(self, *, request, detached, task_id, workspace_lease):
+        return self.create(request, detached=detached, task_id=task_id, workspace_lease=workspace_lease)
+
+    def create(self, request, *, detached, task_id, workspace_lease):
+        self.calls.append((request, detached, task_id, workspace_lease))
         return self.runtimes.pop(0)
+
+
+class TaskToolRegistryFactory:
+    def __init__(self, *, workspace_root, home=None, skill_catalog_factory=None, mcp_pool=None):
+        self._workspace_root = workspace_root
+        self._home = home
+        self._skill_catalog_factory = skill_catalog_factory
+        self._mcp_pool = mcp_pool
+
+    def create(self, parent_registry, **kwargs):
+        lease = kwargs.get("workspace_lease")
+        workspace = lease.context if lease is not None else _shared_workspace(self._workspace_root)
+        return create_task_tool_runtime(
+            workspace=workspace,
+            parent_registry=parent_registry,
+            allowed_tool_names=frozenset(definition.name for definition in parent_registry.definitions()),
+            permission=kwargs.get("permission"),
+            memory=kwargs.get("memory"),
+            llm=kwargs.get("llm"),
+            llm_config=kwargs.get("llm_config"),
+            llm_factory=kwargs.get("llm_factory"),
+            agent_config=kwargs.get("agent_config"),
+            hook_runtime_factory=kwargs.get("hook_runtime_factory"),
+            home=self._home,
+            skill_catalog_factory=self._skill_catalog_factory,
+            mcp_pool=kwargs.get("mcp_pool", self._mcp_pool),
+        )
+
+
+def _shared_workspace(root: Path) -> WorkspaceContext:
+    resolved = root.resolve()
+    return WorkspaceContext(
+        kind=WorkspaceKind.SHARED,
+        root=resolved,
+        repository_root=resolved,
+        repository_id="shared",
+        task_identity=None,
+        branch_name=None,
+        hooks_path=None,
+    )
 
 
 def subagent_config(*, foreground_timeout_seconds=0.5, max_concurrency=4):
@@ -228,6 +275,7 @@ def make_parent_snapshot_store(parent_registry, *, model_id="parent-model", max_
         model_id=model_id,
         max_rounds=max_rounds,
         permission_mode=PermissionMode.DEFAULT,
+        plan_only=False,
     )
     return store
 
@@ -237,13 +285,14 @@ def make_real_agent_tool(tmp_path, *, child_factory, cfg=None, inbox=None):
     inbox = inbox or SubAgentNotificationInbox()
     parent_registry = ToolRegistry()
     snapshot_store = make_parent_snapshot_store(parent_registry)
-    runtime_factory = SubAgentRuntimeFactory(
+    catalog = FakeCatalog(role())
+    runtime_factory = partial(
+        create_subagent_runtime,
         config=cfg,
         llm_config=llm_config(cfg),
         llm_factory=child_factory,
-        catalog=FakeCatalog(role()),
+        catalog=catalog,
         parent_tool_registry=parent_registry,
-        task_tool_registry_factory=TaskToolRegistryFactory(workspace_root=tmp_path),
         permission_factory=lambda mode: AllowPermission(),
         workspace_root=tmp_path,
         workspace_environment=f"workspace={tmp_path}",
@@ -252,6 +301,7 @@ def make_real_agent_tool(tmp_path, *, child_factory, cfg=None, inbox=None):
     manager = SubAgentTaskManager(config=cfg, notification_inbox=inbox)
     service = SubAgentService(
         config=cfg,
+        catalog=catalog,
         runtime_factory=runtime_factory,
         task_manager=manager,
     )
@@ -273,6 +323,7 @@ def make_real_agent_tool(tmp_path, *, child_factory, cfg=None, inbox=None):
         model_id="parent-model",
         max_rounds=3,
         permission_mode=PermissionMode.DEFAULT,
+        plan_only=False,
     )
     return agent_tool, service, inbox
 
@@ -423,6 +474,7 @@ def test_five_background_agent_tool_runs_use_fifo_queue_and_clear_resets_ids(tmp
     manager = SubAgentTaskManager(config=cfg, notification_inbox=inbox)
     service = SubAgentService(
         config=cfg,
+        catalog=FakeCatalog(role()),
         runtime_factory=runtime_factory,
         task_manager=manager,
     )

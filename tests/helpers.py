@@ -1,6 +1,20 @@
+import types
 from pathlib import Path
 
-import httpx
+try:
+    import httpx
+except ModuleNotFoundError:
+    import sys
+
+    fake_httpx = types.ModuleType("httpx")
+
+    class FakeAsyncByteStream:
+        pass
+
+    fake_httpx.AsyncByteStream = FakeAsyncByteStream
+    sys.modules["httpx"] = fake_httpx
+
+    import httpx
 
 from mycode.compact.models import (
     CompactAction,

@@ -23,6 +23,7 @@ def _definition(
     properties=None,
     required=(),
     grant_arguments=(),
+    requires_approval=True,
 ):
     return ToolDefinition(
         name=name,
@@ -34,6 +35,7 @@ def _definition(
         },
         kind=kind,
         grant_arguments=tuple(grant_arguments),
+        requires_approval=requires_approval,
     )
 
 
@@ -316,6 +318,52 @@ def test_permission_modes_only_control_unmatched_fallback(tmp_path, mode, kind, 
 
     _, decision = _policy(tmp_path, mode=mode).evaluate(
         _call(definition.name, {"path": "note.txt"}), definition, plan_only=False
+    )
+
+    assert decision.effect is expected
+
+
+@pytest.mark.parametrize("mode", [PermissionMode.STRICT, PermissionMode.DEFAULT, PermissionMode.PERMISSIVE])
+@pytest.mark.parametrize("plan_only", [False, True])
+def test_tool_that_does_not_require_approval_bypasses_default_and_plan_only_approval(
+    tmp_path,
+    mode,
+    plan_only,
+):
+    definition = _definition(
+        "Agent",
+        kind=ToolKind.WRITE,
+        requires_approval=False,
+    )
+
+    _, decision = _policy(tmp_path, mode=mode).evaluate(
+        _call("Agent", {"action": "run"}), definition, plan_only=plan_only
+    )
+
+    assert decision.effect is PermissionEffect.ALLOW
+
+
+@pytest.mark.parametrize(
+    ("effect", "expected"),
+    [
+        (PermissionEffect.DENY, PermissionEffect.DENY),
+        (PermissionEffect.ASK, PermissionEffect.ASK),
+    ],
+)
+def test_explicit_deny_and_ask_rules_override_tools_that_do_not_require_approval(
+    tmp_path,
+    effect,
+    expected,
+):
+    definition = _definition(
+        "Agent",
+        kind=ToolKind.WRITE,
+        requires_approval=False,
+    )
+    rule = _rule("explicit", effect, tool="Agent")
+
+    _, decision = _policy(tmp_path, rules=(rule,), mode=PermissionMode.PERMISSIVE).evaluate(
+        _call("Agent", {"action": "run"}), definition, plan_only=False
     )
 
     assert decision.effect is expected

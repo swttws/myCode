@@ -15,6 +15,7 @@ from mycode.subagent.models import (
     SubAgentTaskSummary,
 )
 from mycode.subagent.tasks import SubAgentTaskManager
+from mycode.subagent.runtime import resolve_subagent_role
 from mycode.worktree.service import WorktreeService
 
 
@@ -41,12 +42,14 @@ class SubAgentService:
         self,
         *,
         config: SubAgentConfig,
+        catalog,
         runtime_factory,
         task_manager: SubAgentTaskManager,
         foreground_waiter=None,
         worktree_service: WorktreeService | None = None,
     ) -> None:
         self._config = config
+        self._catalog = catalog
         self._runtime_factory = runtime_factory
         self._task_manager = task_manager
         self._foreground_waiter = foreground_waiter or _PollingForegroundWaiter()
@@ -67,7 +70,7 @@ class SubAgentService:
             workspace_lease = None
             if self._worktree_service is not None:
                 try:
-                    role = self._runtime_factory.role_for(request)
+                    role = resolve_subagent_role(self._catalog, request)
                     workspace_lease = await self._prepare_workspace(
                         request=request,
                         role=role,
@@ -130,8 +133,8 @@ class SubAgentService:
         task_id: str,
         workspace_lease=None,
     ):
-        return self._runtime_factory.create(
-            request,
+        return self._runtime_factory(
+            request=request,
             detached=detached,
             task_id=task_id,
             workspace_lease=workspace_lease,

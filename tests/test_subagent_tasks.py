@@ -52,6 +52,7 @@ def request(*, background=False):
             model_id="model",
             max_rounds=8,
             permission_mode=PermissionMode.DEFAULT,
+            plan_only=False,
         ),
     )
 
