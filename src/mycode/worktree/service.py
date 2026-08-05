@@ -121,6 +121,10 @@ class WorktreeService:
         return self._config_loader
 
     @property
+    def git(self) -> GitWorktreeGateway:
+        return self._git
+
+    @property
     def metadata_store(self) -> WorktreeMetadataStore:
         return self._metadata_store
 
@@ -189,6 +193,27 @@ class WorktreeService:
                     )
                 return await self._recover_locked(identity, workspace_root, metadata_path, config)
             return await self._create_locked(identity, workspace_root, metadata_path, config)
+
+    async def prepare_member(
+        self,
+        *,
+        team_name: str,
+        member_name: str,
+        role_name: str,
+        base_commit: str,
+    ) -> WorkspaceLease:
+        relative_name = self._path_policy.validate_relative_name(f"team/{team_name}/{member_name}")
+        branch_name = self._path_policy.validate_branch_name(f"mycode/team/{team_name}/{member_name}")
+        identity = WorkspaceTaskIdentity(
+            repository_id=self.shared_workspace.repository_id,
+            task_id=member_name,
+            role_name=role_name,
+            task_token=member_name,
+            relative_name=relative_name,
+            branch_name=branch_name,
+            base_commit=base_commit,
+        )
+        return await self.prepare(identity)
 
     async def release(self, lease: WorkspaceLease) -> WorktreeDispositionResult | None:
         if not isinstance(lease, WorkspaceLease):

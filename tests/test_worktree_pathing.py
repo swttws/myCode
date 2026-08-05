@@ -83,6 +83,10 @@ def test_validate_branch_name_accepts_only_controlled_safe_prefix(tmp_path: Path
         policy.validate_branch_name("mycode/worktree/general/task-000001")
         == "mycode/worktree/general/task-000001"
     )
+    assert (
+        policy.validate_branch_name("mycode/team/team-a/dev")
+        == "mycode/team/team-a/dev"
+    )
 
     for branch_name in (
         "",
@@ -94,6 +98,8 @@ def test_validate_branch_name_accepts_only_controlled_safe_prefix(tmp_path: Path
         "mycode/worktree/general/CON",
         "mycode/worktree/general/task.lock",
         "mycode/worktree/general/task~1",
+        "mycode/team/team-a/..",
+        "mycode/team/team-a/dev.lock",
     ):
         with pytest.raises(WorktreeError, match="分支"):
             policy.validate_branch_name(branch_name)

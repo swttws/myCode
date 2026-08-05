@@ -181,6 +181,92 @@ class GitWorktreeGateway:
             )
         return head
 
+    def current_branch(self, repository_root: Path) -> str:
+        root = self._resolve_directory_arg("repository_root", repository_root)
+        result = self._run(("branch", "--show-current"), cwd=root)
+        branch = result.stdout.decode("utf-8", errors="replace").strip()
+        if not _is_safe_local_branch(branch):
+            raise WorktreeError(
+                code="git_parse_failed",
+                phase="git",
+                message="current branch name is invalid",
+                path=root,
+            )
+        return branch
+
+    def create_integration_branch(
+        self,
+        repository_root: Path,
+        batch_id: str,
+        base_commit: str,
+    ) -> tuple[Path, str]:
+        root = self._resolve_directory_arg("repository_root", repository_root)
+        if type(batch_id) is not str or not batch_id:
+            raise WorktreeError(
+                code="git_invalid_arguments",
+                phase="git",
+                message="batch_id must be a non-empty string",
+                path=root,
+            )
+        if not _OID_RE.match(base_commit):
+            raise WorktreeError(
+                code="git_invalid_arguments",
+                phase="git",
+                message="base_commit OID is invalid",
+                path=root,
+            )
+        policy = WorktreePathPolicy(repository_root=root)
+        relative_name = policy.validate_relative_name(f"integration/{batch_id}")
+        branch = policy.validate_branch_name(f"mycode/team/integration/{batch_id}")
+        integration_root = root / ".worktrees" / Path(*relative_name.split("/"))
+        integration_root.parent.mkdir(parents=True, exist_ok=True)
+        self._run(
+            (
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                str(integration_root),
+                base_commit,
+            ),
+            cwd=root,
+        )
+        return integration_root, branch
+
+    def merge_commit(self, integration_root: Path, commit_id: str) -> None:
+        root = self._resolve_directory_arg("integration_root", integration_root)
+        if not _OID_RE.match(commit_id):
+            raise WorktreeError(
+                code="git_invalid_arguments",
+                phase="git",
+                message="commit_id OID is invalid",
+                path=root,
+            )
+        self._run(("merge", "--no-edit", commit_id), cwd=root)
+
+    def update_local_ref(self, repository_root: Path, branch: str, commit_id: str) -> None:
+        root = self._resolve_directory_arg("repository_root", repository_root)
+        if not _is_safe_local_branch(branch):
+            raise WorktreeError(
+                code="git_invalid_arguments",
+                phase="git",
+                message="branch name is invalid",
+                path=root,
+                branch_name=branch if isinstance(branch, str) and branch else None,
+            )
+        if not _OID_RE.match(commit_id):
+            raise WorktreeError(
+                code="git_invalid_arguments",
+                phase="git",
+                message="commit_id OID is invalid",
+                path=root,
+            )
+        self._run(("update-ref", f"refs/heads/{branch}", commit_id), cwd=root)
+
+    def abort_merge(self, integration_root: Path) -> None:
+        root = self._resolve_directory_arg("integration_root", integration_root)
+        self._run(("merge", "--abort"), cwd=root)
+
     def add(self, identity: WorkspaceTaskIdentity, target: Path) -> None:
         if not isinstance(identity, WorkspaceTaskIdentity):
             raise WorktreeError(
@@ -246,6 +332,15 @@ class GitWorktreeGateway:
             )
         WorktreePathPolicy(repository_root=root).validate_branch_name(branch)
         self._run(("branch", "-D", branch), cwd=root)
+
+    def remove_integration_worktree(
+        self,
+        repository_root: Path,
+        integration_root: Path,
+        branch: str,
+    ) -> None:
+        self.remove(repository_root, integration_root)
+        self.delete_branch(repository_root, branch, expected_branch=branch)
 
     def _run(
         self,
@@ -586,6 +681,23 @@ def _is_missing_upstream_error(message: str) -> bool:
         or "没有" in message
         or "未配置" in message
     )
+
+
+def _is_safe_local_branch(branch: object) -> bool:
+    if type(branch) is not str or not branch:
+        return False
+    if branch.startswith("-") or branch.startswith("/") or branch.endswith("/"):
+        return False
+    if branch.endswith(".") or branch.endswith(".lock"):
+        return False
+    if branch in {".", "..", "HEAD"}:
+        return False
+    forbidden = set(" ~^:?*[\\")
+    if any(character in forbidden for character in branch):
+        return False
+    if ".." in branch or "@{" in branch or "//" in branch:
+        return False
+    return all(segment not in {"", ".", ".."} for segment in branch.split("/"))
 
 
 def _nonzero_message(command: Sequence[str], returncode: int, stdout: bytes, stderr: bytes) -> str:

@@ -481,6 +481,49 @@ def test_delete_branch_removes_pushed_but_unmerged_temporary_branch(tmp_path: Pa
     )
 
 
+def test_integration_helpers_use_local_structured_git_commands(tmp_path: Path):
+    runner = FakeGitRunner(
+        [
+            completed_git_process(),
+            completed_git_process(),
+            completed_git_process(),
+            completed_git_process(),
+        ]
+    )
+    gateway = GitWorktreeGateway(
+        config=WorktreeConfig(digest="abc123"),
+        env={},
+        runner=runner,
+    )
+    repository_root = tmp_path.resolve()
+    integration_root, branch = gateway.create_integration_branch(
+        repository_root,
+        "batch-1",
+        "a" * 40,
+    )
+    integration_root.mkdir(parents=True, exist_ok=True)
+    gateway.merge_commit(integration_root, "b" * 40)
+    gateway.update_local_ref(repository_root, "main", "c" * 40)
+    gateway.abort_merge(integration_root)
+
+    assert integration_root == repository_root / ".worktrees" / "integration" / "batch-1"
+    assert branch == "mycode/team/integration/batch-1"
+    assert [call.command for call in runner.calls] == [
+        (
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "mycode/team/integration/batch-1",
+            str(integration_root),
+            "a" * 40,
+        ),
+        ("git", "merge", "--no-edit", "b" * 40),
+        ("git", "update-ref", "refs/heads/main", "c" * 40),
+        ("git", "merge", "--abort"),
+    ]
+
+
 def _identity(repository_root: Path, gateway: GitWorktreeGateway) -> WorkspaceTaskIdentity:
     repository_identity = gateway.identify_repository(repository_root)
     base_commit = gateway.capture_head(repository_root)

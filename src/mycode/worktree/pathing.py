@@ -21,6 +21,7 @@ _WINDOWS_RESERVED_NAMES = {
 
 class WorktreePathPolicy:
     branch_prefix = "mycode/worktree/"
+    team_branch_prefix = "mycode/team/"
 
     def __init__(self, *, repository_root: Path, worktrees_root_name: str = ".worktrees") -> None:
         self.repository_root = repository_root
@@ -102,10 +103,11 @@ class WorktreePathPolicy:
     def validate_branch_name(self, value: str) -> str:
         if type(value) is not str or not value:
             raise self._branch_error("分支名称不能为空")
-        if not value.startswith(self.branch_prefix):
+        prefix = self._branch_prefix(value)
+        if prefix is None:
             raise self._branch_error("分支名称必须使用 mycode/worktree/ 前缀")
 
-        suffix = value[len(self.branch_prefix) :]
+        suffix = value[len(prefix) :]
         if not suffix:
             raise self._branch_error("分支名称缺少任务路径")
         try:
@@ -115,6 +117,12 @@ class WorktreePathPolicy:
         if any(segment.lower().endswith(".lock") for segment in suffix.split("/")):
             raise self._branch_error("分支名称不能包含 .lock 段")
         return value
+
+    def _branch_prefix(self, value: str) -> str | None:
+        for prefix in (self.branch_prefix, self.team_branch_prefix):
+            if value.startswith(prefix):
+                return prefix
+        return None
 
     def _validate_relative_name(self, value: str) -> str:
         if type(value) is not str or not value:

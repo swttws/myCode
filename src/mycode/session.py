@@ -31,6 +31,7 @@ class ChatSession:
         hook_runtime=None,
         workspace_root: Path | None = None,
         subagent_service=None,
+        team_service=None,
     ) -> None:
         self._agent = agent
         self._permissions = permissions
@@ -40,6 +41,7 @@ class ChatSession:
         self._hook_runtime = hook_runtime or NullHookRuntime()
         self._workspace_root = workspace_root or Path.cwd()
         self._subagent_service = subagent_service
+        self._team_service = team_service
         self._started = False
         self._closed = False
 
@@ -235,6 +237,7 @@ class ChatSession:
             return
         self._closed = True
         await self._close_subagent_service()
+        await self._close_team_service()
         await self._trigger_session_hook(HookEvent.SESSION_END)
 
     def clear(self):
@@ -248,6 +251,7 @@ class ChatSession:
     async def clear_async(self) -> None:
         await self._trigger_session_hook(HookEvent.SESSION_CLEAR)
         await self._clear_subagent_service()
+        await self._clear_team_service()
         self._clear_state()
 
     async def detach_active_subagent(self):
@@ -311,5 +315,27 @@ class ChatSession:
         except Exception as exc:
             logger.warning(
                 "子 Agent 服务关闭异常：%s",
+                str(exc) or exc.__class__.__name__,
+            )
+
+    async def _clear_team_service(self) -> None:
+        if self._team_service is None:
+            return
+        try:
+            await self._team_service.clear_session()
+        except Exception as exc:
+            logger.warning(
+                "Team service clear failed: %s",
+                str(exc) or exc.__class__.__name__,
+            )
+
+    async def _close_team_service(self) -> None:
+        if self._team_service is None:
+            return
+        try:
+            await self._team_service.close()
+        except Exception as exc:
+            logger.warning(
+                "Team service close failed: %s",
                 str(exc) or exc.__class__.__name__,
             )
