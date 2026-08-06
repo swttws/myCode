@@ -255,6 +255,47 @@ def test_team_tool_exposes_attach_as_stable_parent_entry_action(tmp_path: Path):
     assert service.calls == [("create_or_attach", "alpha", None)]
 
 
+def test_team_tool_schema_describes_action_specific_requirements_in_chinese(tmp_path: Path):
+    tool = TeamTool(service=FakeTeamService(tmp_path), name="team_lead")
+
+    parameters = tool.definition.parameters
+    assert parameters["required"] == ["action"]
+    branches = parameters["oneOf"]
+    spawn = next(branch for branch in branches if branch["properties"]["action"]["enum"] == ["spawn_member"])
+
+    assert spawn["required"] == [
+        "action",
+        "member_name",
+        "role_name",
+        "role_revision",
+        "requested_backend",
+        "task_id",
+        "batch_id",
+        "goal",
+        "read_only",
+        "approval_required",
+    ]
+    assert spawn["properties"]["requested_backend"]["enum"] == [
+        "auto",
+        "tmux",
+        "terminal",
+        "in_process",
+    ]
+    assert all("description" in definition for definition in parameters["properties"].values())
+    assert all("description" in branch for branch in branches)
+    assert "不同 action 使用不同参数" in parameters["description"]
+
+
+def test_team_tool_rejects_missing_action_specific_argument(tmp_path: Path):
+    tool = TeamTool(service=FakeTeamService(tmp_path), name="team_lead")
+
+    result = asyncio.run(tool.execute_async({"action": "start_batch"}))
+
+    assert result.ok is False
+    assert result.content["reason_code"] == "missing_team_argument"
+    assert result.error == "missing required argument: goal"
+
+
 def test_team_tool_dispatches_lead_actions_to_service(tmp_path: Path):
     service = FakeTeamService(tmp_path)
     service.active = True
@@ -307,9 +348,10 @@ def test_team_tool_can_be_parameterized_as_lead_and_member_views(tmp_path: Path)
 
     assert lead_tool.definition.name == "team_lead"
     assert member_tool.definition.name == "team_member"
-    assert parent_tool.definition.description == "创建、接管、查看和协调持久化本地团队。"
-    assert lead_tool.definition.description == "编排团队批次、成员、任务、消息、审批和本地集成。"
-    assert member_tool.definition.description == "领取团队任务、提交计划、报告状态并交换团队消息。"
+    assert parent_tool.definition.description.startswith("创建、接管、查看和协调持久化本地团队。")
+    assert lead_tool.definition.description.startswith("编排团队批次、成员、任务、消息、审批和本地集成。")
+    assert member_tool.definition.description.startswith("领取团队任务、提交计划、报告状态并交换团队消息。")
+    assert "不同 action 使用不同参数" in lead_tool.definition.description
     assert lead_tool.definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY
     assert member_tool.definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY
     assert "create_task" in lead_tool.definition.parameters["properties"]["action"]["enum"]
