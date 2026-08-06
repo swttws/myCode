@@ -301,11 +301,15 @@ def test_team_tool_dispatches_lead_actions_to_service(tmp_path: Path):
 
 def test_team_tool_can_be_parameterized_as_lead_and_member_views(tmp_path: Path):
     service = FakeTeamService(tmp_path)
+    parent_tool = TeamTool(service=service)
     lead_tool = TeamTool(service=service, name="team_lead")
     member_tool = TeamTool(service=service, name="team_member", member_name="dev")
 
     assert lead_tool.definition.name == "team_lead"
     assert member_tool.definition.name == "team_member"
+    assert parent_tool.definition.description == "创建、接管、查看和协调持久化本地团队。"
+    assert lead_tool.definition.description == "编排团队批次、成员、任务、消息、审批和本地集成。"
+    assert member_tool.definition.description == "领取团队任务、提交计划、报告状态并交换团队消息。"
     assert lead_tool.definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY
     assert member_tool.definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY
     assert "create_task" in lead_tool.definition.parameters["properties"]["action"]["enum"]

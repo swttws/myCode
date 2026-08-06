@@ -435,9 +435,9 @@ class TeamTool:
 
 
 _TOOL_DESCRIPTIONS = {
-    "team": "Create, inspect, and coordinate a persistent local team.",
-    "team_lead": "Coordinate team batches, members, tasks, messages, approvals, and local integration.",
-    "team_member": "Claim team tasks, submit plans, report status, and exchange team messages.",
+    "team": "创建、接管、查看和协调持久化本地团队。",
+    "team_lead": "编排团队批次、成员、任务、消息、审批和本地集成。",
+    "team_member": "领取团队任务、提交计划、报告状态并交换团队消息。",
 }
 
 
