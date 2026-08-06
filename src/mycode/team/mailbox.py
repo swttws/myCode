@@ -13,7 +13,15 @@ from typing import Callable, Sequence
 from mycode.team.config import TeamConfig
 from mycode.team.context import JsonConversationMemory
 from mycode.team.locking import FileLease
-from mycode.team.models import DeliveryReceipt, MemberRecord, MessageProtocol, TeamError, TeamMessage
+from mycode.team.models import (
+    DeliveryReceipt,
+    MemberBackend,
+    MemberRecord,
+    MemberState,
+    MessageProtocol,
+    TeamError,
+    TeamMessage,
+)
 from mycode.team.storage import TeamStore
 
 
@@ -78,6 +86,19 @@ class MailboxStore:
                 },
             )
         self._registrations[member.member_name] = member
+
+    def register_lead(self) -> None:
+        self.register(
+            MemberRecord(
+                member_name="lead",
+                role_name="lead",
+                role_revision=0,
+                requested_backend=MemberBackend.IN_PROCESS,
+                state=MemberState.IDLE,
+                mailbox_path=self._store.mailbox_path(self._team_name, "lead"),
+                context_path=self._store.context_path(self._team_name, "lead"),
+            )
+        )
 
     def send(self, message: TeamMessage) -> DeliveryReceipt:
         self._validate_message(message)

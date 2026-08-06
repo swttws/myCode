@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -8,9 +10,14 @@ import pytest
 from mycode.team.models import (
     BackendEnvironment,
     BackendSelection,
+    MemberLaunchSpec,
     MemberBackend,
     ResolvedBackend,
+    WakeEndpoint,
 )
+
+
+NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
 @dataclass
@@ -185,3 +192,120 @@ def test_backend_selector_rejects_invalid_probe_result(tmp_path: Path):
 
     with pytest.raises(ValueError, match="capability probe"):
         selector.select(MemberBackend.AUTO, make_environment(tmp_path))
+
+
+def make_launch_spec(root: Path, *, backend: ResolvedBackend = ResolvedBackend.IN_PROCESS) -> MemberLaunchSpec:
+    workspace = root / "workspace"
+    workspace.mkdir()
+    endpoint = WakeEndpoint(
+        member_name="dev",
+        backend=backend,
+        endpoint=f"{backend.value}:dev",
+        revision=1,
+    )
+    return MemberLaunchSpec(
+        team_name="team-a",
+        member_name="dev",
+        role_name="general",
+        role_revision=1,
+        requested_backend=MemberBackend.IN_PROCESS,
+        resolved_backend=backend,
+        argv=("mycode", "--team-worker", "team-a/dev"),
+        environment={"MYCODE_TEAM": "team-a", "MYCODE_TEAM_MEMBER": "dev"},
+        workspace_root=workspace,
+        repository_root=workspace,
+        repository_id="repo-123",
+        branch_name="mycode/team/team-a/dev",
+        mailbox_path=root / "mailbox.jsonl",
+        context_path=root / "context.json",
+        wake_endpoint=endpoint,
+        task_id="task-1",
+        batch_id="batch-1",
+        goal="ship",
+        approval_required=False,
+        read_only=False,
+        revision=1,
+    )
+
+
+class FakeRuntime:
+    def __init__(self) -> None:
+        self.run_count = 0
+        self.stop_count = 0
+
+    async def run_until_idle(self):
+        self.run_count += 1
+
+    async def graceful_stop(self):
+        self.stop_count += 1
+
+
+def test_in_process_backend_runs_member_runtime_and_wakes_existing_handle(tmp_path: Path):
+    from mycode.team.backends import InProcessBackend
+
+    async def scenario():
+        runtime = FakeRuntime()
+        backend = InProcessBackend(
+            runtime_factory=lambda spec: runtime,
+            clock=lambda: NOW,
+            token_factory=lambda: "token-1",
+        )
+        spec = make_launch_spec(tmp_path)
+
+        handle = await backend.start(spec)
+        await asyncio.sleep(0)
+        await backend.wake(handle)
+        await asyncio.sleep(0)
+        await backend.stop(handle, force=False)
+
+        assert handle.wake_endpoint == spec.wake_endpoint
+        assert handle.process_id > 0
+        assert handle.started_at == NOW
+        assert handle.token == "token-1"
+        assert runtime.run_count == 2
+        assert runtime.stop_count == 1
+
+    asyncio.run(scenario())
+
+
+class FakeProcess:
+    def __init__(self, pid: int = 1234) -> None:
+        self.pid = pid
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
+
+def test_tmux_backend_launches_worker_without_shell_and_tracks_process(tmp_path: Path):
+    from mycode.team.backends import TmuxBackend
+
+    async def scenario():
+        launches = []
+        process = FakeProcess(pid=456)
+        backend = TmuxBackend(
+            process_factory=lambda argv, cwd, env: launches.append((argv, cwd, env)) or process,
+            clock=lambda: NOW,
+            token_factory=lambda: "tmux-token",
+        )
+        spec = make_launch_spec(tmp_path, backend=ResolvedBackend.TMUX)
+
+        handle = await backend.start(spec)
+        await backend.stop(handle, force=False)
+
+        argv, cwd, env = launches[0]
+        assert argv[:4] == ("tmux", "new-session", "-d", "-s")
+        assert argv[-3:] == spec.argv
+        assert cwd == spec.workspace_root
+        assert env["MYCODE_TEAM"] == "team-a"
+        assert handle.process_id == 456
+        assert process.terminated is True
+
+    asyncio.run(scenario())

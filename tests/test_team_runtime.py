@@ -240,6 +240,10 @@ def test_member_runtime_injects_unread_messages_then_acks_after_checkpoint(tmp_p
     assert memory.checkpoint["last_message_id"] == "msg-1"
     assert mailbox.unread("dev") == ()
     assert store.load("team-a").members[0].state is MemberState.IDLE
+    lead_messages = mailbox.receive("lead")
+    assert len(lead_messages) == 1
+    assert lead_messages[0].protocol is MessageProtocol.STATUS_UPDATE
+    assert lead_messages[0].sender == "dev"
 
 
 def test_member_runtime_deduplicates_replayed_messages(tmp_path: Path):
@@ -254,7 +258,7 @@ def test_member_runtime_deduplicates_replayed_messages(tmp_path: Path):
 
 
 def test_member_runtime_checkpoint_helpers_are_stable(tmp_path: Path):
-    runtime, _store, _mailbox, memory, agent, _member = make_runtime(tmp_path)
+    runtime, _store, mailbox, memory, agent, _member = make_runtime(tmp_path)
     memory.append(ChatMessage(role="user", content="old"))
 
     asyncio.run(runtime.graceful_stop())
@@ -263,3 +267,107 @@ def test_member_runtime_checkpoint_helpers_are_stable(tmp_path: Path):
     assert memory.checkpoint["member_state"] == "stopped"
     assert memory.messages() == [ChatMessage(role="user", content="old")]
     assert agent.clear_count == 0
+    lead_messages = mailbox.receive("lead")
+    assert len(lead_messages) == 1
+    assert lead_messages[0].protocol is MessageProtocol.SHUTDOWN_RESPONSE
+
+
+def test_member_runtime_shutdown_request_triggers_shutdown_response(tmp_path: Path):
+    runtime, store, mailbox, memory, agent, member = make_runtime(tmp_path)
+    mailbox.register(
+        replace(
+            member,
+            member_name="lead",
+            mailbox_path=store.mailbox_path("team-a", "lead"),
+            context_path=store.context_path("team-a", "lead"),
+            wake_endpoint=WakeEndpoint(
+                member_name="lead",
+                backend=ResolvedBackend.IN_PROCESS,
+                endpoint="in-process:lead",
+                revision=1,
+            ),
+        )
+    )
+    mailbox.send(
+        TeamMessage(
+            message_id="shutdown-dev-1",
+            protocol=MessageProtocol.SHUTDOWN_REQUEST,
+            sender="lead",
+            target_name="dev",
+            broadcast=False,
+            body="shutdown now",
+            summary="shutdown now",
+            timestamp=NOW,
+        )
+    )
+
+    asyncio.run(runtime.run_until_idle())
+
+    assert memory.checkpoint["member_state"] == "stopped"
+    assert memory.checkpoint["shutdown_request_id"] == "shutdown-dev-1"
+    responses = mailbox.receive("lead")
+    assert len(responses) == 1
+    assert responses[0].protocol is MessageProtocol.SHUTDOWN_RESPONSE
+    assert responses[0].message_id.startswith("shutdown-response-dev-shutdown-dev-1")
+    assert agent.prompts == []
+
+
+def test_member_runtime_registers_team_member_tool_when_registry_is_provided(tmp_path: Path):
+    class Registry:
+        def __init__(self):
+            self.registered = []
+
+        def register(self, tool):
+            self.registered.append(tool)
+
+    _runtime, store, mailbox, memory, agent, _member = make_runtime(tmp_path)
+    registry = Registry()
+
+    TeamMemberRuntime(
+        team_name="team-a",
+        member_name="dev",
+        store=store,
+        mailbox=mailbox,
+        memory=memory,
+        agent=agent,
+        tool_registry=registry,
+    )
+
+    assert [tool.definition.name for tool in registry.registered] == ["team_member"]
+
+
+def test_member_runtime_team_member_tool_can_send_status_to_lead_mailbox(tmp_path: Path):
+    class Registry:
+        def __init__(self):
+            self.registered = []
+
+        def register(self, tool):
+            self.registered.append(tool)
+
+    _runtime, store, mailbox, _memory, agent, _member = make_runtime(tmp_path)
+    registry = Registry()
+    TeamMemberRuntime(
+        team_name="team-a",
+        member_name="dev",
+        store=store,
+        mailbox=mailbox,
+        memory=JsonConversationMemory(path=store.context_path("team-a", "dev")),
+        agent=agent,
+        tool_registry=registry,
+    )
+
+    result = asyncio.run(
+        registry.registered[0].execute_async(
+            {
+                "action": "status_update",
+                "message_id": "status-1",
+                "body": "idle",
+            }
+        )
+    )
+
+    assert result.ok is True
+    messages = mailbox.receive("lead")
+    assert len(messages) == 1
+    assert messages[0].protocol is MessageProtocol.STATUS_UPDATE
+    assert messages[0].sender == "dev"

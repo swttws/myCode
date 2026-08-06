@@ -7,15 +7,22 @@ from types import MappingProxyType
 
 from mycode.permission.models import PermissionDecision, PermissionEffect, PermissionMode
 from mycode.team import (
+    ApprovalState,
     BatchRecord,
     BatchState,
     DeliveryReceipt,
+    IntegrationReport,
     MemberBackend,
     MessageProtocol,
+    TaskKind,
+    TaskPatch,
+    TaskResult,
     TeamMessage,
     TeamRecord,
     TeamSnapshot,
     TeamState,
+    TeamTask,
+    TeamTaskState,
 )
 from mycode.team.policy import TeamPermissionInterceptor, TeamRuntimeRole, TeamToolPolicy
 from mycode.team.tool import TeamTool
@@ -31,6 +38,7 @@ class FakeTeamService:
         self.calls = []
         self.active = False
         self.coordinator = False
+        self.tasks: dict[str, TeamTask] = {}
         self.snapshot = TeamSnapshot(
             team=TeamRecord(
                 team_name="team-a",
@@ -88,6 +96,10 @@ class FakeTeamService:
         self.calls.append(("spawn_member", kwargs))
         return type("Member", (), {"member_name": kwargs["member_name"], "state": "running"})()
 
+    async def terminate_member(self, member_name: str, *, force: bool):
+        self.calls.append(("terminate_member", member_name, force))
+        return type("Member", (), {"member_name": member_name, "state": "stopped"})()
+
     async def send_message(self, message: TeamMessage):
         self.calls.append(("send_message", message))
         return DeliveryReceipt(
@@ -95,6 +107,94 @@ class FakeTeamService:
             recipient_names=(message.target_name or "broadcast",),
             delivered_at=NOW,
             fanout_count=1,
+        )
+
+    def create_task(self, task: TeamTask):
+        self.calls.append(("create_task", task))
+        created = TeamTask(
+            task_id=task.task_id,
+            batch_id=task.batch_id,
+            title=task.title,
+            description=task.description,
+            dependency_ids=task.dependency_ids,
+            kind=task.kind,
+            revision=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        self.tasks[created.task_id] = created
+        return created
+
+    def list_tasks(self, batch_id: str | None = None):
+        self.calls.append(("list_tasks", batch_id))
+        return tuple(self.tasks.values())
+
+    def claim_task(self, task_id: str, member_name: str, expected_revision: int):
+        self.calls.append(("claim_task", task_id, member_name, expected_revision))
+        claimed = TeamTask(
+            task_id=task_id,
+            batch_id="batch-1",
+            title="Task",
+            description="Do it",
+            dependency_ids=(),
+            kind=TaskKind.CODE,
+            owner=member_name,
+            state=TeamTaskState.CLAIMED,
+            revision=expected_revision + 1,
+        )
+        self.tasks[task_id] = claimed
+        return claimed
+
+    def update_task(self, task_id: str, expected_revision: int, patch: TaskPatch):
+        self.calls.append(("update_task", task_id, expected_revision, patch))
+        updated = TeamTask(
+            task_id=task_id,
+            batch_id="batch-1",
+            title=patch.title or "Task",
+            description=patch.description or "Do it",
+            dependency_ids=patch.dependency_ids or (),
+            kind=patch.kind or TaskKind.CODE,
+            owner=patch.owner,
+            plan_revision=patch.plan_revision or 0,
+            approval_state=patch.approval_state or ApprovalState.PENDING,
+            revision=expected_revision + 1,
+        )
+        self.tasks[task_id] = updated
+        return updated
+
+    def transition_task(
+        self,
+        task_id: str,
+        expected_revision: int,
+        state: TeamTaskState,
+        result: TaskResult | None = None,
+        error: str | None = None,
+    ):
+        self.calls.append(("transition_task", task_id, expected_revision, state, result, error))
+        transitioned = TeamTask(
+            task_id=task_id,
+            batch_id="batch-1",
+            title="Task",
+            description="Do it",
+            dependency_ids=(),
+            kind=TaskKind.CODE,
+            state=state,
+            result=result,
+            error=error,
+            revision=expected_revision + 1,
+        )
+        self.tasks[task_id] = transitioned
+        return transitioned
+
+    async def integrate_batch(self, batch_id: str):
+        self.calls.append(("integrate_batch", batch_id))
+        return IntegrationReport(
+            batch_id=batch_id,
+            state=BatchState.COMPLETED,
+            target_ref_before="before",
+            target_ref_after="after",
+            result_commit_id="0123456789abcdef0123456789abcdef01234567",
+            completed_at=NOW,
         )
 
 
@@ -117,6 +217,18 @@ def test_team_tool_is_parent_only_and_dispatches_stable_entry_actions(tmp_path: 
         ("create_or_attach", "alpha", "ship"),
         ("status",),
     ]
+
+
+def test_team_tool_exposes_attach_as_stable_parent_entry_action(tmp_path: Path):
+    service = FakeTeamService(tmp_path)
+    tool = TeamTool(service=service)
+
+    attached = asyncio.run(tool.execute_async({"action": "attach", "team_name": "alpha"}))
+
+    assert attached.ok is True
+    assert attached.content["team_name"] == "alpha"
+    assert "attach" in tool.definition.parameters["properties"]["action"]["enum"]
+    assert service.calls == [("create_or_attach", "alpha", None)]
 
 
 def test_team_tool_dispatches_lead_actions_to_service(tmp_path: Path):
@@ -163,6 +275,205 @@ def test_team_tool_dispatches_lead_actions_to_service(tmp_path: Path):
     assert service.calls[2][1].protocol is MessageProtocol.MESSAGE
 
 
+def test_team_tool_can_be_parameterized_as_lead_and_member_views(tmp_path: Path):
+    service = FakeTeamService(tmp_path)
+    lead_tool = TeamTool(service=service, name="team_lead")
+    member_tool = TeamTool(service=service, name="team_member", member_name="dev")
+
+    assert lead_tool.definition.name == "team_lead"
+    assert member_tool.definition.name == "team_member"
+    assert lead_tool.definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY
+    assert member_tool.definition.runtime_scope is ToolRuntimeScope.PARENT_ONLY
+    assert "create_task" in lead_tool.definition.parameters["properties"]["action"]["enum"]
+    assert "plan_submit" in member_tool.definition.parameters["properties"]["action"]["enum"]
+    assert "spawn_member" not in member_tool.definition.parameters["properties"]["action"]["enum"]
+    assert "force" in lead_tool.definition.parameters["properties"]
+    assert "error" in lead_tool.definition.parameters["properties"]
+
+
+def test_team_lead_tool_dispatches_task_plan_shutdown_and_integration_actions(tmp_path: Path):
+    service = FakeTeamService(tmp_path)
+    tool = TeamTool(service=service, name="team_lead")
+
+    created = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "create_task",
+                "task_id": "task-1",
+                "batch_id": "batch-1",
+                "title": "Build",
+                "description": "Build it",
+                "dependency_ids": [],
+                "kind": "code",
+            }
+        )
+    )
+    decision = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "plan_decision",
+                "task_id": "task-1",
+                "expected_revision": 1,
+                "approved": True,
+                "message_id": "decision-1",
+                "target_name": "dev",
+                "body": "approved",
+            }
+        )
+    )
+    shutdown = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "shutdown_request",
+                "message_id": "shutdown-1",
+                "target_name": "dev",
+                "body": "stop when idle",
+            }
+        )
+    )
+    integration = asyncio.run(tool.execute_async({"action": "integrate", "batch_id": "batch-1"}))
+
+    assert created.content["task_id"] == "task-1"
+    assert decision.content["approval_state"] == "approved"
+    assert shutdown.content["message_id"] == "shutdown-1"
+    assert integration.content["batch_id"] == "batch-1"
+    assert service.calls[0][0] == "create_task"
+    assert service.calls[1][0] == "update_task"
+    assert service.calls[2][0] == "send_message"
+    assert service.calls[2][1].protocol is MessageProtocol.PLAN_DECISION
+    assert service.calls[3][0] == "send_message"
+    assert service.calls[3][1].protocol is MessageProtocol.SHUTDOWN_REQUEST
+    assert service.calls[4] == ("integrate_batch", "batch-1")
+
+
+def test_team_member_tool_dispatches_member_scoped_actions(tmp_path: Path):
+    service = FakeTeamService(tmp_path)
+    tool = TeamTool(service=service, name="team_member", member_name="dev")
+
+    claim = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "claim_task",
+                "task_id": "task-1",
+                "expected_revision": 1,
+            }
+        )
+    )
+    plan = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "plan_submit",
+                "message_id": "plan-1",
+                "task_id": "task-1",
+                "batch_id": "batch-1",
+                "expected_revision": 2,
+                "plan_revision": 3,
+                "body": "I will change the parser.",
+                "summary": "parser plan",
+            }
+        )
+    )
+    status = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "status_update",
+                "message_id": "status-1",
+                "body": "idle",
+                "summary": "idle",
+            }
+        )
+    )
+    response = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "shutdown_response",
+                "message_id": "shutdown-response-1",
+                "body": "checkpoint saved",
+            }
+        )
+    )
+
+    assert claim.content["owner"] == "dev"
+    assert plan.content["plan_revision"] == 3
+    assert status.content["message_id"] == "status-1"
+    assert response.content["message_id"] == "shutdown-response-1"
+    assert service.calls[0] == ("claim_task", "task-1", "dev", 1)
+    assert service.calls[1][0] == "update_task"
+    assert service.calls[2][0] == "send_message"
+    assert service.calls[2][1].protocol is MessageProtocol.PLAN_SUBMIT
+    assert service.calls[3][1].protocol is MessageProtocol.STATUS_UPDATE
+    assert service.calls[4][1].protocol is MessageProtocol.SHUTDOWN_RESPONSE
+
+
+def test_team_member_tool_rejects_spoofed_member_identity(tmp_path: Path):
+    service = FakeTeamService(tmp_path)
+    tool = TeamTool(service=service, name="team_member", member_name="dev")
+
+    claim = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "claim_task",
+                "task_id": "task-1",
+                "member_name": "ops",
+                "expected_revision": 1,
+            }
+        )
+    )
+    message = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "send_message",
+                "message_id": "msg-3",
+                "target_name": "lead",
+                "sender": "ops",
+                "body": "spoofed",
+            }
+        )
+    )
+    update = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "update_task",
+                "task_id": "task-1",
+                "member_name": "ops",
+                "expected_revision": 1,
+                "title": "Spoofed",
+            }
+        )
+    )
+
+    assert claim.ok is False
+    assert "member_name" in claim.error
+    assert message.ok is False
+    assert "sender" in message.error
+    assert update.ok is False
+    assert "member_name" in update.error
+    assert service.calls == []
+
+
+def test_team_tool_send_message_accepts_task_and_batch_metadata(tmp_path: Path):
+    service = FakeTeamService(tmp_path)
+    tool = TeamTool(service=service, name="team_lead")
+
+    result = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "send_message",
+                "message_id": "msg-2",
+                "target_name": "dev",
+                "task_id": "task-1",
+                "batch_id": "batch-1",
+                "body": "task-scoped update",
+            }
+        )
+    )
+
+    assert result.ok is True
+    assert service.calls[0][0] == "send_message"
+    assert service.calls[0][1].task_id == "task-1"
+    assert service.calls[0][1].batch_id == "batch-1"
+
+
 def test_team_tool_rejects_unknown_actions_and_unknown_arguments(tmp_path: Path):
     tool = TeamTool(service=FakeTeamService(tmp_path))
 
@@ -173,6 +484,35 @@ def test_team_tool_rejects_unknown_actions_and_unknown_arguments(tmp_path: Path)
     assert unknown_action.content["reason_code"] == "unknown_team_action"
     assert unknown_argument.ok is False
     assert unknown_argument.content["reason_code"] == "unknown_team_argument"
+
+
+def test_team_tool_rejects_non_boolean_force_and_broadcast_arguments(tmp_path: Path):
+    tool = TeamTool(service=FakeTeamService(tmp_path), name="team_lead")
+
+    force = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "terminate_member",
+                "member_name": "dev",
+                "force": "false",
+            }
+        )
+    )
+    broadcast = asyncio.run(
+        tool.execute_async(
+            {
+                "action": "send_message",
+                "message_id": "msg-4",
+                "broadcast": "false",
+                "body": "hello",
+            }
+        )
+    )
+
+    assert force.ok is False
+    assert "force" in force.error
+    assert broadcast.ok is False
+    assert "broadcast" in broadcast.error
 
 
 def test_team_tool_policy_computes_parent_lead_member_and_coordinator_visibility():

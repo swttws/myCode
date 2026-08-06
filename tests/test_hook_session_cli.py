@@ -301,6 +301,20 @@ def test_cli_explicit_missing_hook_config_returns_startup_error(
     assert "missing.hooks.yaml" in captured.err
 
 
+def test_cli_hidden_team_worker_argument_delegates_to_worker(monkeypatch):
+    cli = _import_cli(monkeypatch)
+    captured = {}
+
+    def fake_worker_main(argv):
+        captured["argv"] = argv
+        return 17
+
+    monkeypatch.setattr(cli.team_worker, "main", fake_worker_main)
+
+    assert cli.main(["--team-worker", "team-a/dev"]) == 17
+    assert captured["argv"] == ["team-a/dev"]
+
+
 def test_run_application_shares_hook_runtime_and_triggers_app_events(
     tmp_path,
     monkeypatch,
@@ -436,6 +450,118 @@ def test_run_application_shares_hook_runtime_and_triggers_app_events(
         HookEvent.APP_STARTED,
         HookEvent.HOOKS_LOADED,
     ]
+
+
+def test_run_application_registers_all_team_tool_views(tmp_path, monkeypatch):
+    cli = _import_cli(monkeypatch)
+    created = {}
+
+    class FakeHookRuntime:
+        def __init__(self, **kwargs):
+            pass
+
+        async def trigger(self, context):
+            return HookTriggerResult(actions=())
+
+        def prompt_blocks(self):
+            return ()
+
+    class FakeAgentLoop:
+        def __init__(self, **kwargs):
+            created["visible_provider"] = kwargs["visible_tool_names_provider"]
+
+    class FakeChatSession:
+        def __init__(self, **kwargs):
+            pass
+
+        async def close(self):
+            return None
+
+    class FakeTUI:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run(self):
+            return 0
+
+    class FakeWorktreeService:
+        def __init__(self, workspace_root):
+            self.shared_workspace = WorkspaceContext(
+                kind=WorkspaceKind.SHARED,
+                root=workspace_root,
+                repository_root=workspace_root,
+                repository_id="repo-123",
+                task_identity=None,
+                branch_name=None,
+                hooks_path=None,
+            )
+
+        @classmethod
+        def create(cls, workspace_root):
+            return cls(workspace_root)
+
+    class FakeWorktreeCleaner:
+        def __init__(self, **kwargs):
+            pass
+
+        async def start(self):
+            return None
+
+        async def close(self):
+            return None
+
+    class FakeSubAgentService:
+        def __init__(self, **kwargs):
+            pass
+
+        async def close(self):
+            return None
+
+    registry = _FakeRegistry()
+    monkeypatch.setattr(cli, "HookRuntime", FakeHookRuntime)
+    monkeypatch.setattr(cli, "create_default_tool_registry", lambda *args, **kwargs: registry)
+    monkeypatch.setattr(cli, "create_context_manager", lambda **kwargs: _FakeContextManager())
+    monkeypatch.setattr(cli, "create_project_memory_manager", lambda **kwargs: _FakeProjectMemory())
+    monkeypatch.setattr(cli, "register_mcp_tools", lambda pool, registry: ())
+    monkeypatch.setattr(cli, "SkillLoader", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "SkillCatalog", _FakeSkillCatalog)
+    monkeypatch.setattr(cli, "SkillRuntime", _FakeSkillRuntime)
+    monkeypatch.setattr(cli, "SkillExecutor", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "SkillLoadTool", lambda **kwargs: _FakeTool("load_skill"))
+    monkeypatch.setattr(cli, "SkillSlashBridge", _FakeSkillSlashBridge)
+    monkeypatch.setattr(cli, "SlashCommandDispatcher", lambda registry, **kwargs: SimpleNamespace(registry=registry))
+    monkeypatch.setattr(cli, "SlashCommandCompleter", lambda registry, **kwargs: object())
+    monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr(cli, "ChatSession", FakeChatSession)
+    monkeypatch.setattr(cli, "ChatTUI", FakeTUI)
+    monkeypatch.setattr(cli, "WorktreeService", FakeWorktreeService, raising=False)
+    monkeypatch.setattr(cli, "WorktreeCleaner", FakeWorktreeCleaner, raising=False)
+    monkeypatch.setattr(cli, "SubAgentService", FakeSubAgentService)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    monkeypatch.setattr(cli, "_current_branch", lambda worktree_service: "main")
+
+    permissions = SimpleNamespace(path_guard=PathGuard(tmp_path))
+    monkeypatch.setattr(cli, "MCPServerPool", lambda config: _FakePool())
+
+    exit_code = asyncio.run(
+        cli._run_application(
+            config=_fake_config(),
+            llm=object(),
+            permissions=permissions,
+            mcp_config=cli.MCPConfig(()),
+            mcp_config_diagnostics=(),
+            workspace_root=tmp_path,
+            registry=_FakeRegistry(),
+            hook_config=HookConfig(version=1, rules=(), path=None),
+        )
+    )
+
+    registered_names = [item.definition.name for item in registry.registered]
+    assert exit_code == 0
+    assert "team" in registered_names
+    assert "team_lead" in registered_names
+    assert "team_member" in registered_names
+    assert created["visible_provider"] is not None
 
 
 def test_tui_exit_path_closes_session(tmp_path, monkeypatch):

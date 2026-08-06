@@ -11,6 +11,7 @@ from typing import Callable
 
 from mycode.team.backends import BackendSelector
 from mycode.team.config import TeamConfig, coordinator_enabled_from_env
+from mycode.team.context import JsonConversationMemory
 from mycode.team.integration import IntegrationService
 from mycode.team.locking import FileLease
 from mycode.team.mailbox import MailboxStore
@@ -23,8 +24,10 @@ from mycode.team.models import (
     MemberLaunchSpec,
     MemberRecord,
     MemberState,
+    MessageProtocol,
     ResolvedBackend,
     TeamError,
+    TeamMessage,
     TeamRecord,
     TeamSnapshot,
     TeamState,
@@ -176,55 +179,59 @@ class TeamService:
             role_name=role_name,
             base_commit=self._capture_head(),
         )
-        workspace = lease.context
-        environment = self._backend_environment(
-            requested_backend=requested_backend,
-            workspace_root=workspace.root,
-            member_name=member_name,
-        )
-        selection = self._backend_selector.select(requested_backend, environment)
-        if not selection.available or selection.resolved_backend is None:
-            raise TeamError(
-                code=selection.reason_code or "backend_unavailable",
-                phase="spawn",
-                message=selection.reason or "backend unavailable",
-                team_name=snapshot.team.team_name,
+        try:
+            workspace = lease.context
+            environment = self._backend_environment(
+                requested_backend=requested_backend,
+                workspace_root=workspace.root,
                 member_name=member_name,
             )
-        wake_endpoint = WakeEndpoint(
-            member_name=member_name,
-            backend=selection.resolved_backend,
-            endpoint=f"{selection.resolved_backend.value}:{member_name}",
-            revision=1,
-        )
-        spec = MemberLaunchSpec(
-            team_name=snapshot.team.team_name,
-            member_name=member_name,
-            role_name=role_name,
-            role_revision=role_revision,
-            requested_backend=requested_backend,
-            resolved_backend=selection.resolved_backend,
-            argv=("mycode", "team-worker", snapshot.team.team_name, member_name),
-            environment={
-                "MYCODE_TEAM": snapshot.team.team_name,
-                "MYCODE_TEAM_MEMBER": member_name,
-                "MYCODE_TEAM_ROLE": role_name,
-            },
-            workspace_root=workspace.root,
-            repository_root=workspace.repository_root,
-            repository_id=workspace.repository_id,
-            branch_name=workspace.branch_name or f"mycode/team/{snapshot.team.team_name}/{member_name}",
-            mailbox_path=self._store.mailbox_path(snapshot.team.team_name, member_name),
-            context_path=self._store.context_path(snapshot.team.team_name, member_name),
-            wake_endpoint=wake_endpoint,
-            task_id=task_id,
-            batch_id=batch_id,
-            goal=goal,
-            approval_required=approval_required,
-            read_only=read_only,
-            revision=1,
-        )
-        handle = await self._start_backend(spec)
+            selection = self._backend_selector.select(requested_backend, environment)
+            if not selection.available or selection.resolved_backend is None:
+                raise TeamError(
+                    code=selection.reason_code or "backend_unavailable",
+                    phase="spawn",
+                    message=selection.reason or "backend unavailable",
+                    team_name=snapshot.team.team_name,
+                    member_name=member_name,
+                )
+            wake_endpoint = WakeEndpoint(
+                member_name=member_name,
+                backend=selection.resolved_backend,
+                endpoint=f"{selection.resolved_backend.value}:{member_name}",
+                revision=1,
+            )
+            spec = MemberLaunchSpec(
+                team_name=snapshot.team.team_name,
+                member_name=member_name,
+                role_name=role_name,
+                role_revision=role_revision,
+                requested_backend=requested_backend,
+                resolved_backend=selection.resolved_backend,
+                argv=("mycode", "--team-worker", f"{snapshot.team.team_name}/{member_name}"),
+                environment={
+                    "MYCODE_TEAM": snapshot.team.team_name,
+                    "MYCODE_TEAM_MEMBER": member_name,
+                    "MYCODE_TEAM_ROLE": role_name,
+                },
+                workspace_root=workspace.root,
+                repository_root=workspace.repository_root,
+                repository_id=workspace.repository_id,
+                branch_name=workspace.branch_name or f"mycode/team/{snapshot.team.team_name}/{member_name}",
+                mailbox_path=self._store.mailbox_path(snapshot.team.team_name, member_name),
+                context_path=self._store.context_path(snapshot.team.team_name, member_name),
+                wake_endpoint=wake_endpoint,
+                task_id=task_id,
+                batch_id=batch_id,
+                goal=goal,
+                approval_required=approval_required,
+                read_only=read_only,
+                revision=1,
+            )
+            handle = await self._start_backend(spec)
+        except Exception:
+            await self._release_member_worktree(lease)
+            raise
         endpoint = getattr(handle, "wake_endpoint", wake_endpoint)
         now = self._clock()
         member = MemberRecord(
@@ -258,10 +265,37 @@ class TeamService:
         snapshot = self._active_snapshot()
         member = _find_member(snapshot.members, member_name)
         handle = self._backend_handles.get(member_name)
+        shutdown_message_id = f"shutdown-{member_name}-{int(self._clock().timestamp() * 1000000)}"
+        graceful = force
+        if not force:
+            seen_response_ids = self._shutdown_response_ids(member_name)
+            await self.send_message(
+                TeamMessage(
+                    message_id=shutdown_message_id,
+                    protocol=MessageProtocol.SHUTDOWN_REQUEST,
+                    sender="lead",
+                    target_name=member_name,
+                    broadcast=False,
+                    body="shutdown requested",
+                    summary="shutdown requested",
+                    timestamp=self._clock(),
+                )
+            )
+            if handle is not None and self._backend is not None:
+                wake = getattr(self._backend, "wake", None)
+                if callable(wake):
+                    result = wake(handle)
+                    if asyncio.iscoroutine(result):
+                        await result
+            graceful = await self._wait_for_shutdown_ack(
+                member_name,
+                shutdown_message_id,
+                seen_response_ids=seen_response_ids,
+            )
         if handle is not None and self._backend is not None:
             stop = getattr(self._backend, "stop", None)
             if callable(stop):
-                await stop(handle, force=force)
+                await stop(handle, force=force or not graceful)
         updated = replace(
             member,
             state=MemberState.STOPPED,
@@ -280,6 +314,27 @@ class TeamService:
                 if callable(wake):
                     await wake(handle)
         return receipt
+
+    def create_task(self, task):
+        return self.task_board.create(task)
+
+    def list_tasks(self, batch_id: str | None = None):
+        return self.task_board.list(batch_id)
+
+    def get_task(self, task_id: str):
+        return self.task_board.get(task_id)
+
+    def update_task(self, task_id: str, expected_revision: int, patch):
+        return self.task_board.update(task_id, expected_revision, patch)
+
+    def delete_task(self, task_id: str, expected_revision: int) -> None:
+        self.task_board.delete(task_id, expected_revision)
+
+    def claim_task(self, task_id: str, member_name: str, expected_revision: int):
+        return self.task_board.claim(task_id, member_name, expected_revision)
+
+    def transition_task(self, task_id: str, expected_revision: int, state, result=None, error=None):
+        return self.task_board.transition(task_id, expected_revision, state, result, error)
 
     async def integrate_batch(self, batch_id: str, *, lead_workspace_root: Path | None = None):
         snapshot = self._active_snapshot()
@@ -331,6 +386,7 @@ class TeamService:
         return archived
 
     async def clear_session(self) -> None:
+        await self._stop_in_process_members()
         await self._release_lead_lease()
         self._team_name = None
         self._lead_lease = None
@@ -362,6 +418,7 @@ class TeamService:
         snapshot = self._store.load(team_name)
         if self._mailbox is None:
             self._mailbox = MailboxStore(team_name, store=self._store, config=self._config)
+        self._mailbox.register_lead()
         for member in snapshot.members:
             self._mailbox.register(member)
         return snapshot
@@ -432,6 +489,14 @@ class TeamService:
             return shared_lease()
         raise TeamError(code="worktree_unavailable", phase="spawn", message="worktree service unavailable")
 
+    async def _release_member_worktree(self, lease) -> None:
+        release = getattr(self._worktree_service, "release", None)
+        if not callable(release):
+            return
+        result = release(lease)
+        if asyncio.iscoroutine(result):
+            await result
+
     async def _start_backend(self, spec: MemberLaunchSpec):
         if self._backend is None:
             return type("BackendHandle", (), {"wake_endpoint": spec.wake_endpoint, "process_id": os.getpid(), "token": "in-process"})()
@@ -442,6 +507,20 @@ class TeamService:
         if asyncio.iscoroutine(result):
             return await result
         return result
+
+    async def _stop_in_process_members(self) -> None:
+        if self._backend is None:
+            return
+        stop = getattr(self._backend, "stop", None)
+        if not callable(stop):
+            return
+        for handle in list(self._backend_handles.values()):
+            endpoint = getattr(handle, "wake_endpoint", None)
+            if getattr(endpoint, "backend", None) is not ResolvedBackend.IN_PROCESS:
+                continue
+            result = stop(handle, force=False)
+            if asyncio.iscoroutine(result):
+                await result
 
     def _backend_environment(
         self,
@@ -467,6 +546,56 @@ class TeamService:
         if self._mailbox is None:
             raise TeamError(code="team_inactive", phase="mailbox", message="team is not active")
         return self._mailbox
+
+    async def _wait_for_shutdown_ack(
+        self,
+        member_name: str,
+        shutdown_message_id: str,
+        *,
+        seen_response_ids: frozenset[str],
+    ) -> bool:
+        deadline = asyncio.get_running_loop().time() + self._config.graceful_shutdown_timeout_seconds
+        interval = min(self._config.lock_retry_interval_seconds, 0.05)
+        while True:
+            if self._has_shutdown_response(
+                member_name,
+                seen_response_ids,
+            ) or self._has_shutdown_checkpoint(member_name, shutdown_message_id):
+                return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(interval)
+
+    def _has_shutdown_response(self, member_name: str, seen_response_ids: frozenset[str]) -> bool:
+        return bool(self._shutdown_response_ids(member_name) - seen_response_ids)
+
+    def _shutdown_response_ids(self, member_name: str) -> frozenset[str]:
+        try:
+            messages = self._mailbox_or_error().receive("lead")
+        except Exception:
+            return frozenset()
+        return frozenset(
+            message.message_id
+            for message in messages
+            if (
+                message.protocol is MessageProtocol.SHUTDOWN_RESPONSE
+                and message.sender == member_name
+            )
+        )
+
+    def _has_shutdown_checkpoint(self, member_name: str, shutdown_message_id: str) -> bool:
+        try:
+            memory = JsonConversationMemory(
+                path=self._store.context_path(self._team_name or "", member_name),
+                max_bytes=self._config.context_max_bytes,
+            )
+        except Exception:
+            return False
+        checkpoint = memory.checkpoint
+        return (
+            checkpoint.get("last_message_id") == shutdown_message_id
+            or checkpoint.get("shutdown_request_id") == shutdown_message_id
+        )
 
     def _replace_member(self, snapshot: TeamSnapshot, replacement: MemberRecord) -> None:
         members = tuple(
