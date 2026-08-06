@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Sequence
 from dataclasses import dataclass, field, is_dataclass, replace
@@ -132,6 +133,7 @@ class AgentLoop:
         notification_inbox: Any | None = None,
         main_model_id: str | None = None,
         permission_mode_provider: Any | None = None,
+        visible_tool_names_provider: Any | None = None,
         workspace: WorkspaceContext | None = None,
     ) -> None:
         self._workspace = workspace or _legacy_shared_workspace()
@@ -154,6 +156,7 @@ class AgentLoop:
         self._notification_inbox = notification_inbox
         self._main_model_id = main_model_id
         self._permission_mode_provider = permission_mode_provider
+        self._visible_tool_names_provider = visible_tool_names_provider
         self._next_turn_id = 0
         self._latest_framework_context = _empty_framework_context()
 
@@ -1140,19 +1143,63 @@ class AgentLoop:
         )
 
     def _model_definitions(self):
-        if self._skill_runtime is None:
+        visible_names = self._combined_visible_tool_names()
+        if visible_names is None:
             return self._tool_registry.model_definitions()
-        return self._tool_registry.model_definitions(visible_names=self._skill_runtime.visible_tool_names())
+        return self._tool_registry.model_definitions(visible_names=visible_names)
 
     def _deferred_summaries(self):
-        if self._skill_runtime is not None and self._skill_runtime.visible_tool_names() is not None:
+        if self._combined_visible_tool_names() is not None:
             return []
         return self._tool_registry.deferred_summaries()
 
     def _skill_allows_tool(self, name: str) -> bool:
+        visible_names = self._combined_visible_tool_names()
+        if visible_names is not None and name not in visible_names:
+            return False
         if self._skill_runtime is None:
             return True
         return self._skill_runtime.allows_tool(name)
+
+    def _combined_visible_tool_names(self) -> frozenset[str] | None:
+        visible_sets: list[frozenset[str]] = []
+        if self._skill_runtime is not None:
+            skill_names = self._skill_runtime.visible_tool_names()
+            if skill_names is not None:
+                visible_sets.append(frozenset(skill_names))
+        provider_names = self._provider_visible_tool_names()
+        if provider_names is not None:
+            visible_sets.append(provider_names)
+        if not visible_sets:
+            return None
+        allowed = visible_sets[0]
+        for names in visible_sets[1:]:
+            allowed = allowed & names
+        return allowed
+
+    def _provider_visible_tool_names(self) -> frozenset[str] | None:
+        provider = self._visible_tool_names_provider
+        if provider is None:
+            return None
+        candidates = frozenset(definition.name for definition in self._tool_registry.definitions())
+        try:
+            signature = inspect.signature(provider)
+            accepts_candidates = any(
+                parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                }
+                for parameter in signature.parameters.values()
+            )
+        except (TypeError, ValueError):
+            accepts_candidates = True
+        result = provider(candidates) if accepts_candidates else provider()
+        if result is None:
+            return None
+        return frozenset(result)
 
     def _maybe_set_skill_scope(self, result: ToolResult) -> None:
         if self._skill_runtime is None or not result.ok:

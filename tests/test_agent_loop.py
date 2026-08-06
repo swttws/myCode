@@ -1417,3 +1417,30 @@ def test_discovered_default_write_mcp_tool_uses_existing_approval_flow(tmp_path)
     assert pool.calls == [("server", "write", {"value": "approved"})]
     assert AgentEventType.APPROVAL_REQUIRED in [event.type for event in events]
     assert events[-1].content == "done"
+
+
+def test_agent_loop_applies_dynamic_visible_tool_names_provider():
+    llm = ScriptedLLM(
+        [
+            [
+                StreamEvent(StreamEventType.TEXT_DELTA, "visible"),
+                StreamEvent(StreamEventType.DONE),
+            ]
+        ]
+    )
+    memory = InMemoryConversationMemory()
+    registry = ToolRegistry([NoopTool(), EchoTool()])
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        context_manager=PassthroughContextManager(memory),
+        visible_tool_names_provider=lambda candidates: frozenset({"echo"}) & candidates,
+    )
+
+    events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert [definition.name for definition in llm.tool_requests[0]] == ["echo"]
+    assert events[-1].content == "visible"

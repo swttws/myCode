@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from functools import partial
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +53,11 @@ from mycode.subagent.service import SubAgentService
 from mycode.subagent.tasks import SubAgentTaskManager
 from mycode.subagent.tool import AgentTool
 from mycode.subagent.tooling import create_task_permission_service
+from mycode.team.config import TeamConfig
+from mycode.team.policy import TeamPermissionInterceptor
+from mycode.team.service import TeamService
+from mycode.team.storage import TeamStore
+from mycode.team.tool import TeamTool
 from mycode.tool import ToolExecutor, create_default_tool_registry
 from mycode.tui import ChatTUI
 from mycode.worktree import (
@@ -171,6 +177,15 @@ async def _run_application(
             print(f"myCode Worktree 配置错误：{exc}", file=sys.stderr)
             return 1
         shared_workspace = worktree_service.shared_workspace
+        team_service = TeamService(
+            store=TeamStore(home=Path.home()),
+            repository_root=shared_workspace.repository_root,
+            repository_id=shared_workspace.repository_id,
+            target_branch=_current_branch(worktree_service),
+            lead_owner=f"mycode-cli:{os.getpid()}",
+            config=getattr(config, "team", TeamConfig()),
+            worktree_service=worktree_service,
+        )
         hook_runtime = HookRuntime(
             config=hook_config,
             workspace_root=workspace_root,
@@ -182,6 +197,7 @@ async def _run_application(
             workspace_root,
             path_guard=permissions.path_guard,
         )
+        tool_registry.register(TeamTool(service=team_service))
         agent_config = AgentConfig()
         try:
             context_manager = create_context_manager(
@@ -216,7 +232,10 @@ async def _run_application(
 
         register_mcp_tools(pool, tool_registry)
         tool_executor = ToolExecutor(tool_registry)
-        permission_interceptor = PermissionInterceptor(permissions)
+        permission_interceptor = TeamPermissionInterceptor(
+            policy_provider=team_service.current_policy,
+            permission=PermissionInterceptor(permissions),
+        )
         skill_loader = SkillLoader(
             workspace_root=workspace_root,
             home=Path.home(),
@@ -295,6 +314,7 @@ async def _run_application(
                 "effective_mode",
                 lambda: (PermissionMode.DEFAULT, None),
             ),
+            visible_tool_names_provider=team_service.visible_team_tools,
         )
         session = ChatSession(
             agent=agent,
@@ -304,6 +324,7 @@ async def _run_application(
             hook_runtime=hook_runtime,
             workspace_root=workspace_root,
             subagent_service=subagent_service,
+            team_service=team_service,
         )
         tui = ChatTUI(
             session=session,
@@ -430,6 +451,13 @@ def _create_task_permission_interceptor(workspace_root: Path, mode: PermissionMo
     service = create_task_permission_service(workspace_root)
     service.set_session_mode(mode)
     return PermissionInterceptor(service)
+
+
+def _current_branch(worktree_service: WorktreeService) -> str:
+    try:
+        return worktree_service.git.current_branch(worktree_service.shared_workspace.repository_root)
+    except Exception:
+        return "main"
 
 
 def _tool_names(registry) -> frozenset[str]:

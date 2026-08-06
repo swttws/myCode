@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import re
@@ -147,6 +147,13 @@ class CommandAnalyzer:
 
         if _is_package_install(executable, lowered):
             return _ask("package_install", "risky_package_install", "软件包安装会修改本地环境，需要确认。")
+        if _is_forbidden_git_remote_write(executable, lowered):
+            return CommandAssessment(
+                PermissionEffect.FORBIDDEN,
+                "version_control_write",
+                "forbidden_git_remote_write",
+                "妫€娴嬪埌 Git 杩滅▼鍐欏叆鎴栧彂閫佹搷浣滐紝宸茬姝㈡墽琛屻€?",
+            )
         if executable in _DOWNLOADERS or _is_network_git(executable, lowered) or executable in {
             "scp",
             "ssh",
@@ -443,9 +450,40 @@ def _is_package_install(executable: str, lowered: tuple[str, ...]) -> bool:
 
 
 def _is_network_git(executable: str, lowered: tuple[str, ...]) -> bool:
-    return executable == "git" and any(
-        token in {"clone", "fetch", "pull", "push", "ls-remote"} for token in lowered[1:]
+    if executable != "git":
+        return False
+    subcommand, tail = _git_subcommand(lowered)
+    return subcommand in {"clone", "fetch", "pull", "ls-remote"} or (
+        subcommand == "remote" and tail and tail[0] == "show"
     )
+
+
+def _is_forbidden_git_remote_write(executable: str, lowered: tuple[str, ...]) -> bool:
+    if executable != "git":
+        return False
+    subcommand, tail = _git_subcommand(lowered)
+    if subcommand == "push":
+        return True
+    return subcommand == "remote" and bool(tail) and tail[0] in {"add", "set-url", "rename", "remove"}
+
+
+def _git_subcommand(tokens: tuple[str, ...]) -> tuple[str | None, tuple[str, ...]]:
+    if not tokens or tokens[0] != "git":
+        return None, ()
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"-c", "--config", "-C", "--git-dir", "--work-tree", "--namespace"}:
+            index += 2
+            continue
+        if token.startswith("--git-dir=") or token.startswith("--work-tree=") or token.startswith("--namespace="):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token, tokens[index + 1 :]
+    return None, ()
 
 
 def _basename(value: str) -> str:

@@ -150,7 +150,7 @@ def test_workspace_root_delete_is_forbidden_and_subdirectory_delete_asks(tmp_pat
         ("pip install example", "risky_package_install"),
         ("npm install example", "risky_package_install"),
         ("curl https://example.test/file -o file", "risky_network_access"),
-        ("git push origin main", "risky_network_access"),
+        ("git clone https://example.test/repo.git", "risky_network_access"),
         ("sudo echo ok", "risky_privilege_operation"),
         ("chmod -R 777 .", "risky_permission_change"),
         ("systemctl restart app", "risky_service_management"),
@@ -162,6 +162,25 @@ def test_high_risk_but_potentially_legitimate_commands_ask(tmp_path, command, re
 
     assert assessment.effect is PermissionEffect.ASK
     assert assessment.reason_code == reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin main",
+        "git -C repo push origin main",
+        "git remote add origin https://example.test/repo.git",
+        "git remote set-url origin https://example.test/repo.git",
+        "bash -c 'git push origin main'",
+        'cmd /c "git push origin main"',
+        "pwsh -Command \"git remote set-url origin https://example.test/repo.git\"",
+    ],
+)
+def test_git_remote_write_commands_are_forbidden(tmp_path, command):
+    assessment = _analyzer(tmp_path).assess(command)
+
+    assert assessment.effect is PermissionEffect.FORBIDDEN
+    assert assessment.reason_code == "forbidden_git_remote_write"
 
 
 def test_command_analysis_never_executes_or_creates_download_target(tmp_path):

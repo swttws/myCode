@@ -4,6 +4,8 @@ import pytest
 
 from mycode.compact.models import CompactConfig
 from mycode.config import ConfigError, load_config
+from mycode.team import MemberBackend
+from mycode.team.config import TeamConfig
 
 
 VALID_SUB_AGENT_CONFIG = """
@@ -287,6 +289,61 @@ compact:
     assert config.compact.context_window_tokens == 128000
     assert config.compact.tool_result_threshold_tokens == 8_000
     assert config.compact.tool_batch_threshold_tokens == 12_000
+
+
+def test_load_config_adds_default_team_config_when_missing(tmp_path):
+    config_path = tmp_path / "mycode.yaml"
+    write_config(
+        config_path,
+        """
+protocol: anthropic
+model: claude-test
+base_url: https://api.anthropic.com
+api_key: sk-test
+compact:
+  context_window_tokens: 128000
+""",
+    )
+
+    config = load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})
+
+    assert config.team == TeamConfig()
+
+
+def test_load_config_parses_team_section(tmp_path):
+    config_path = tmp_path / "mycode.yaml"
+    write_config(
+        config_path,
+        """
+protocol: anthropic
+model: claude-test
+base_url: https://api.anthropic.com
+api_key: sk-test
+compact:
+  context_window_tokens: 128000
+team:
+  max_members: 6
+  max_active_members: 2
+  lock_retry_interval_seconds: 0.2
+  lock_timeout_seconds: 2.0
+  lock_stale_after_seconds: 8.0
+  mailbox_message_max_bytes: 32768
+  mailbox_summary_max_bytes: 2048
+  context_max_bytes: 2097152
+  backend_priority:
+    - in_process
+  coordinator_capability_enabled: true
+  graceful_shutdown_timeout_seconds: 4.0
+""",
+    )
+
+    config = load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})
+
+    assert config.team.max_members == 6
+    assert config.team.max_active_members == 2
+    assert config.team.backend_priority == (MemberBackend.IN_PROCESS,)
+    assert config.team.coordinator_capability_enabled is True
+    assert config.team.graceful_shutdown_timeout_seconds == 4.0
 
 
 def test_load_config_requires_sub_agent_model_mapping(tmp_path):

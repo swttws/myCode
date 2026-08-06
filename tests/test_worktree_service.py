@@ -59,6 +59,28 @@ def test_service_prepare_accepts_role_task_fields_and_writes_ready_metadata(tmp_
     asyncio.run(scenario())
 
 
+def test_service_prepare_member_uses_team_workspace_and_branch(tmp_path: Path):
+    async def scenario():
+        git = FakeGit(head="d" * 40)
+        service = _service(tmp_path, git=git)
+
+        lease = await service.prepare_member(
+            team_name="team-a",
+            member_name="dev",
+            role_name="general",
+            base_commit="e" * 40,
+        )
+
+        assert lease.preparation is WorkspacePreparation.CREATED
+        assert lease.context.task_identity is not None
+        assert lease.context.task_identity.relative_name == "team/team-a/dev"
+        assert lease.context.task_identity.branch_name == "mycode/team/team-a/dev"
+        assert lease.context.task_identity.base_commit == "e" * 40
+        assert git.added == [(lease.context.task_identity, lease.context.root)]
+
+    asyncio.run(scenario())
+
+
 def test_service_release_ignores_shared_lease(tmp_path: Path):
     async def scenario():
         service = _service(tmp_path)

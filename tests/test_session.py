@@ -54,6 +54,23 @@ class FakePermissions:
             self.operations.append("permissions")
 
 
+class FakeTeamService:
+    def __init__(self, operations=None):
+        self.clear_count = 0
+        self.close_count = 0
+        self.operations = operations
+
+    async def clear_session(self):
+        self.clear_count += 1
+        if self.operations is not None:
+            self.operations.append("team")
+
+    async def close(self):
+        self.close_count += 1
+        if self.operations is not None:
+            self.operations.append("team_close")
+
+
 class RecordingMode(AgentMode):
     def __init__(self, operations):
         super().__init__()
@@ -139,6 +156,31 @@ def test_chat_session_clear_resets_memory_and_plan_only():
     assert session.is_plan_only() is False
     assert permissions.clear_count == 1
     assert operations == ["agent", "mode", "permissions"]
+
+
+def test_chat_session_clear_releases_team_session_before_memory_reset():
+    operations = []
+    agent = FakeAgent(operations=operations)
+    permissions = FakePermissions(operations)
+    mode = RecordingMode(operations)
+    team = FakeTeamService(operations)
+    session = ChatSession(agent=agent, permissions=permissions, mode=mode, team_service=team)
+
+    session.clear()
+
+    assert team.clear_count == 1
+    assert operations == ["team", "agent", "mode", "permissions"]
+
+
+def test_chat_session_close_closes_team_service():
+    operations = []
+    team = FakeTeamService(operations)
+    session = ChatSession(agent=FakeAgent(), permissions=FakePermissions(), team_service=team)
+
+    asyncio.run(session.close())
+
+    assert team.close_count == 1
+    assert operations == ["team_close"]
 
 
 def test_chat_session_queries_and_sets_permission_mode():

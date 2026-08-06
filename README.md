@@ -317,6 +317,14 @@ The background cleanup runs once at startup and then on the configured interval.
 
 Stage 13 does not automatically merge worktree branches, does not automatically push, does not force delete protected worktrees, and does not add manual worktree commands. The system only creates, recovers, protects, retains, deletes clean task worktrees, and reports what happened.
 
+## Stage 14 Team coordination
+
+Stage 14 adds a local, persistent team coordinator. The parent runtime exposes a `team` tool that can create or attach to a team under `~/.mycode/teams/<team-name>/`, start batches, spawn members in controlled `mycode/team/...` worktrees, send mailbox messages, integrate completed local commits, and archive quiet teams.
+
+Team state is file-backed and guarded by local leases. Member mailboxes are JSONL files with checkpoint-before-ack semantics, and member context is stored separately so replayed messages can be deduplicated after restart. Integration is local-only: completed code task commits are merged in dependency order into an integration worktree and the target branch ref is updated locally; Stage 14 never pushes or rewrites remotes.
+
+The optional `team` config section controls member limits, backend priority, coordinator mode, and graceful shutdown timing. See `examples/mycode.team.yaml` for a complete starter config.
+
 ## 核心工具
 
 Stage 03 内置六个工具，工具相关代码集中在 `src/mycode/tool` 包下：

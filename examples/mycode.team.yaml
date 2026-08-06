@@ -1,0 +1,20 @@
+protocol: openai_responses
+model: your-openai-model
+base_url: https://api.openai.com/v1
+api_key: ${OPENAI_API_KEY}
+compact:
+  context_window_tokens: 128000
+sub_agent:
+  models:
+    haiku: your-openai-model
+    sonnet: your-openai-model
+    opus: your-openai-model
+team:
+  max_members: 16
+  max_active_members: 4
+  backend_priority:
+    - tmux
+    - terminal
+    - in_process
+  coordinator_capability_enabled: false
+  graceful_shutdown_timeout_seconds: 10.0

@@ -13,6 +13,7 @@ from mycode.compact.models import (
     DEFAULT_TOOL_RESULT_THRESHOLD_TOKENS,
     CompactConfig,
 )
+from mycode.team.config import TeamConfig
 
 if TYPE_CHECKING:
     from mycode.subagent.models import SubAgentConfig
@@ -44,6 +45,7 @@ class LLMConfig:
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
     usage: UsageConfig = field(default_factory=UsageConfig)
     sub_agent: "SubAgentConfig | None" = None
+    team: TeamConfig = field(default_factory=TeamConfig)
 
 
 ENV_VAR_PATTERN = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
@@ -67,8 +69,10 @@ def load_config(
     thinking = _parse_thinking(raw.get("thinking"))
     usage = _parse_usage(raw.get("usage"))
     from mycode.subagent.config import parse_subagent_config
+    from mycode.team.config import parse_team_config
 
     sub_agent = parse_subagent_config(raw.get("sub_agent"))
+    team = parse_team_config(raw.get("team"))
 
     return LLMConfig(
         protocol=str(raw["protocol"]),
@@ -79,6 +83,7 @@ def load_config(
         thinking=thinking,
         usage=usage,
         sub_agent=sub_agent,
+        team=team,
     )
 
 

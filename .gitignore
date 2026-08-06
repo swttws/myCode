@@ -11,3 +11,4 @@ __pycache__/
 !/examples/mycode.mcp.yaml
 !/examples/mycode.hooks.yaml
 !/examples/mycode.worktree.yaml
+!/examples/mycode.team.yaml
