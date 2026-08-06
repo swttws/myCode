@@ -244,7 +244,14 @@ class GitWorktreeGateway:
             )
         self._run(("merge", "--no-edit", commit_id), cwd=root)
 
-    def update_local_ref(self, repository_root: Path, branch: str, commit_id: str) -> None:
+    def update_local_ref(
+        self,
+        repository_root: Path,
+        branch: str,
+        commit_id: str,
+        *,
+        expected_old: str | None = None,
+    ) -> None:
         root = self._resolve_directory_arg("repository_root", repository_root)
         if not _is_safe_local_branch(branch):
             raise WorktreeError(
@@ -261,7 +268,17 @@ class GitWorktreeGateway:
                 message="commit_id OID is invalid",
                 path=root,
             )
-        self._run(("update-ref", f"refs/heads/{branch}", commit_id), cwd=root)
+        if expected_old is not None and not _OID_RE.match(expected_old):
+            raise WorktreeError(
+                code="git_invalid_arguments",
+                phase="git",
+                message="expected_old OID is invalid",
+                path=root,
+            )
+        args = ("update-ref", f"refs/heads/{branch}", commit_id)
+        if expected_old is not None:
+            args = (*args, expected_old)
+        self._run(args, cwd=root)
 
     def abort_merge(self, integration_root: Path) -> None:
         root = self._resolve_directory_arg("integration_root", integration_root)

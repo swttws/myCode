@@ -518,7 +518,14 @@ def test_run_application_registers_all_team_tool_views(tmp_path, monkeypatch):
             return None
 
     registry = _FakeRegistry()
+    real_team_service = cli.TeamService
+
+    def capture_team_service(**kwargs):
+        created["team_service_kwargs"] = kwargs
+        return real_team_service(**kwargs)
+
     monkeypatch.setattr(cli, "HookRuntime", FakeHookRuntime)
+    monkeypatch.setattr(cli, "TeamService", capture_team_service)
     monkeypatch.setattr(cli, "create_default_tool_registry", lambda *args, **kwargs: registry)
     monkeypatch.setattr(cli, "create_context_manager", lambda **kwargs: _FakeContextManager())
     monkeypatch.setattr(cli, "create_project_memory_manager", lambda **kwargs: _FakeProjectMemory())
@@ -562,6 +569,10 @@ def test_run_application_registers_all_team_tool_views(tmp_path, monkeypatch):
     assert "team_lead" in registered_names
     assert "team_member" in registered_names
     assert created["visible_provider"] is not None
+    assert created["team_service_kwargs"]["backend"] is not None
+    assert hasattr(created["team_service_kwargs"]["backend"], "start")
+    assert hasattr(created["team_service_kwargs"]["backend"], "wake")
+    assert hasattr(created["team_service_kwargs"]["backend"], "stop")
 
 
 def test_tui_exit_path_closes_session(tmp_path, monkeypatch):

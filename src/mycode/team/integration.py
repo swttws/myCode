@@ -63,16 +63,15 @@ class IntegrationService:
             and task.result is not None
             and task.result.commit_id is not None
         )
-        merged_commit = target_ref_before
         integrated_member_names: list[str] = []
         try:
             for task in tasks:
                 assert task.result is not None
                 assert task.result.commit_id is not None
                 self._git.merge_commit(integration_root, task.result.commit_id)
-                merged_commit = task.result.commit_id
                 if task.owner is not None and task.owner not in integrated_member_names:
                     integrated_member_names.append(task.owner)
+            merged_commit = self._git.capture_head(integration_root) if tasks else target_ref_before
         except Exception as exc:
             self._git.abort_merge(integration_root)
             conflict_task = self._create_conflict_task(batch_id, exc)
@@ -96,7 +95,12 @@ class IntegrationService:
                 completed_at=self._clock(),
             )
 
-        self._git.update_local_ref(snapshot.team.repository_root, snapshot.team.target_branch, merged_commit)
+        self._git.update_local_ref(
+            snapshot.team.repository_root,
+            snapshot.team.target_branch,
+            merged_commit,
+            expected_old=target_ref_before,
+        )
         completed_at = self._clock()
         completed = replace(
             batch,

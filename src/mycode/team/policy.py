@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import shlex
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -22,6 +22,7 @@ _MEMBER_CONTROL_TOOLS = frozenset({"team_member"})
 _LOCAL_EDIT_TOOLS = frozenset({"read_file", "write_file", "edit_file", "run_command"})
 _LEAD_EXTRA_TOOLS = frozenset({"Agent", "find_files", "search_code"})
 _COORDINATOR_TOOLS = frozenset({"team", "team_lead", "read_file", "run_command"})
+_COORDINATOR_WRITE_TOOLS = frozenset({"team", "team_lead"})
 _LOCAL_GIT_READ_COMMANDS = frozenset(
     {
         "branch",
@@ -42,6 +43,7 @@ class TeamToolPolicy:
     role: TeamRuntimeRole
     coordinator_enabled: bool = False
     mode: PermissionMode = PermissionMode.DEFAULT
+    member_write_allowed_provider: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, TeamRuntimeRole):
@@ -50,6 +52,8 @@ class TeamToolPolicy:
             raise ValueError("coordinator_enabled must be a bool")
         if not isinstance(self.mode, PermissionMode):
             raise ValueError("mode must be a PermissionMode")
+        if self.member_write_allowed_provider is not None and not callable(self.member_write_allowed_provider):
+            raise ValueError("member_write_allowed_provider must be callable")
 
     def visible_names(self, candidates: frozenset[str]) -> frozenset[str]:
         if not isinstance(candidates, frozenset):
@@ -72,6 +76,19 @@ class TeamToolPolicy:
                 self.mode,
                 MappingProxyType({}),
             )
+        if (
+            self.role is TeamRuntimeRole.MEMBER
+            and call.name != "team_member"
+            and definition.kind is ToolKind.WRITE
+            and self.member_write_allowed_provider is not None
+            and not self.member_write_allowed_provider()
+        ):
+            return self._deny(
+                "member_approval_required",
+                "member plan approval is required before workspace writes",
+                self.mode,
+                _display_arguments(call.arguments),
+            )
         if self.coordinator_enabled and self.role is TeamRuntimeRole.LEAD:
             if call.name == "Agent":
                 return self._deny(
@@ -90,6 +107,8 @@ class TeamToolPolicy:
                     self.mode,
                     _display_arguments(call.arguments),
                 )
+            if call.name in _COORDINATOR_WRITE_TOOLS:
+                return self._allow(_display_arguments(call.arguments))
             if definition.kind is ToolKind.WRITE:
                 return self._deny(
                     "coordinator_write_forbidden",

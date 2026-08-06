@@ -21,6 +21,7 @@ from mycode.team.models import (
     MessageProtocol,
     TeamError,
     TeamMessage,
+    TeamState,
 )
 from mycode.team.storage import TeamStore
 
@@ -102,6 +103,7 @@ class MailboxStore:
 
     def send(self, message: TeamMessage) -> DeliveryReceipt:
         self._validate_message(message)
+        self._ensure_writable()
         delivered_at = datetime.now(timezone.utc)
         normalized_message = replace(
             message,
@@ -159,6 +161,7 @@ class MailboxStore:
     def acknowledge(self, member_name: str, message_id: str) -> None:
         if type(message_id) is not str or not message_id:
             raise ValueError("message_id must be a non-empty string")
+        self._ensure_writable()
         member = self._member_or_error(member_name)
         mailbox_path, context_path = self._member_paths(member.member_name)
         context = JsonConversationMemory(path=context_path, max_bytes=self._config.context_max_bytes)
@@ -225,6 +228,17 @@ class MailboxStore:
         mailbox_path = self._store.mailbox_path(self._team_name, member_name)
         context_path = self._store.context_path(self._team_name, member_name)
         return mailbox_path, context_path
+
+    def _ensure_writable(self) -> None:
+        snapshot = self._store.load(self._team_name)
+        if snapshot.team.state is TeamState.ARCHIVED:
+            raise TeamError(
+                code="team_archived",
+                phase="write",
+                message="team is archived and read-only",
+                team_name=self._team_name,
+                revision=snapshot.team.revision,
+            )
 
     def _acquire_mailbox_lock(self, mailbox_path: Path, member_name: str) -> _LockedMailbox:
         lock_path = _mailbox_lock_path(mailbox_path)

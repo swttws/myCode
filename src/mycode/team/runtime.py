@@ -7,7 +7,7 @@ from mycode.agent import AgentMode
 from mycode.team.config import TeamConfig
 from mycode.team.context import JsonConversationMemory
 from mycode.team.mailbox import MailboxStore
-from mycode.team.models import MemberState, MessageProtocol, TeamMessage
+from mycode.team.models import MemberState, MessageProtocol, TeamMessage, TeamTaskState
 from mycode.team.storage import TeamStore
 from mycode.team.tasks import TaskBoard
 from mycode.team.tool import TeamTool
@@ -63,8 +63,19 @@ class TeamMemberRuntime:
                 self._mailbox.acknowledge(self._member_name, message.message_id)
                 await self.graceful_stop()
                 return
-            async for _event in self._agent.run(message.body, mode=AgentMode()):
-                pass
+            try:
+                async for _event in self._agent.run(message.body, mode=AgentMode()):
+                    pass
+            except Exception as exc:
+                self._set_member_state(MemberState.BLOCKED)
+                self._set_task_blocked(str(exc) or exc.__class__.__name__)
+                self._send_member_protocol_message(
+                    protocol=MessageProtocol.STATUS_UPDATE,
+                    message_id=f"blocked-{self._member_name}-{_message_suffix(message.message_id)}",
+                    body="blocked",
+                    summary="blocked",
+                )
+                return
             checkpoint = self._memory.checkpoint
             checkpoint["last_message_id"] = message.message_id
             self._memory.set_checkpoint(checkpoint)
@@ -108,6 +119,24 @@ class TeamMemberRuntime:
                 )
             members.append(member)
         self._store.save(replace(snapshot, members=tuple(members)))
+
+    def _set_task_blocked(self, error: str) -> None:
+        try:
+            snapshot = self._store.load(self._team_name)
+            member = next(item for item in snapshot.members if item.member_name == self._member_name)
+            if member.task_id is None:
+                return
+            board = TaskBoard(self._store, self._team_name, lock_owner=f"{self._member_name}:runtime")
+            task = board.get(member.task_id)
+            if task.state in {TeamTaskState.CLAIMED, TeamTaskState.AWAITING_APPROVAL, TeamTaskState.RUNNING}:
+                board.transition(
+                    task.task_id,
+                    task.revision,
+                    TeamTaskState.BLOCKED,
+                    error=error[:512] or "member agent failed",
+                )
+        except Exception:
+            return
 
     def _send_member_protocol_message(
         self,

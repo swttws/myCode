@@ -27,6 +27,8 @@ from mycode.worktree.models import GitStatus
 BASE = "0123456789abcdef0123456789abcdef01234567"
 FIRST = "1111111111111111111111111111111111111111"
 SECOND = "2222222222222222222222222222222222222222"
+MERGED_FIRST = "3333333333333333333333333333333333333333"
+MERGED_SECOND = "4444444444444444444444444444444444444444"
 NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
@@ -36,6 +38,8 @@ class FakeGitGateway:
         self.conflict_on = conflict_on
         self.calls = []
         self.target_ref = BASE
+        self.integration_root = None
+        self.integration_ref = BASE
 
     def status(self, target: Path):
         self.calls.append(("status", target))
@@ -47,19 +51,27 @@ class FakeGitGateway:
 
     def capture_head(self, target: Path) -> str:
         self.calls.append(("capture_head", target))
+        if self.integration_root is not None and target == self.integration_root:
+            return self.integration_ref
         return self.target_ref
 
     def create_integration_branch(self, repository_root: Path, batch_id: str, base_commit: str):
         self.calls.append(("create_integration_branch", batch_id, base_commit))
-        return repository_root / ".worktrees" / "integration" / batch_id, f"mycode/team/integration/{batch_id}"
+        self.integration_root = repository_root / ".worktrees" / "integration" / batch_id
+        self.integration_ref = base_commit
+        return self.integration_root, f"mycode/team/integration/{batch_id}"
 
     def merge_commit(self, integration_root: Path, commit_id: str) -> None:
         self.calls.append(("merge_commit", commit_id))
         if commit_id == self.conflict_on:
             raise TeamError(code="merge_conflict", phase="git", message="conflict")
+        self.integration_ref = {
+            FIRST: MERGED_FIRST,
+            SECOND: MERGED_SECOND,
+        }[commit_id]
 
-    def update_local_ref(self, repository_root: Path, branch: str, commit_id: str) -> None:
-        self.calls.append(("update_local_ref", branch, commit_id))
+    def update_local_ref(self, repository_root: Path, branch: str, commit_id: str, *, expected_old=None) -> None:
+        self.calls.append(("update_local_ref", branch, commit_id, expected_old))
         self.target_ref = commit_id
 
     def abort_merge(self, integration_root: Path) -> None:
@@ -142,9 +154,10 @@ def test_integration_service_merges_completed_code_tasks_in_dependency_order(tmp
         ("merge_commit", FIRST),
         ("merge_commit", SECOND),
     ]
-    assert git.calls[-2] == ("update_local_ref", "main", SECOND)
+    assert git.calls[-2] == ("update_local_ref", "main", MERGED_SECOND, BASE)
     assert report.state is BatchState.COMPLETED
-    assert report.result_commit_id == SECOND
+    assert report.result_commit_id == MERGED_SECOND
+    assert report.target_ref_after == MERGED_SECOND
     assert report.integrated_member_names == ("alpha", "beta")
     assert store.load("team-a").batches[0].state is BatchState.COMPLETED
 

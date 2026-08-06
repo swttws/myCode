@@ -336,6 +336,55 @@ def test_member_runtime_registers_team_member_tool_when_registry_is_provided(tmp
     assert [tool.definition.name for tool in registry.registered] == ["team_member"]
 
 
+def test_member_runtime_marks_member_blocked_after_agent_failure(tmp_path: Path):
+    _runtime, store, mailbox, memory, _agent, member = make_runtime(tmp_path)
+
+    class FailingAgent:
+        async def run(self, user_text, *, mode, approval_provider=None):
+            raise RuntimeError("agent failed")
+            yield None
+
+    runtime = TeamMemberRuntime(
+        team_name="team-a",
+        member_name="dev",
+        store=store,
+        mailbox=mailbox,
+        memory=memory,
+        agent=FailingAgent(),
+    )
+    mailbox.register(
+        replace(
+            member,
+            member_name="lead",
+            mailbox_path=store.mailbox_path("team-a", "lead"),
+            context_path=store.context_path("team-a", "lead"),
+            wake_endpoint=WakeEndpoint(
+                member_name="lead",
+                backend=ResolvedBackend.IN_PROCESS,
+                endpoint="in-process:lead",
+                revision=1,
+            ),
+        )
+    )
+    mailbox.send(
+        TeamMessage(
+            message_id="work-fails",
+            protocol=MessageProtocol.MESSAGE,
+            sender="lead",
+            target_name="dev",
+            broadcast=False,
+            body="run",
+            summary="run",
+            timestamp=NOW,
+        )
+    )
+
+    asyncio.run(runtime.run_until_idle())
+
+    assert store.load("team-a").members[0].state is MemberState.BLOCKED
+    assert mailbox.receive("lead")[0].protocol is MessageProtocol.STATUS_UPDATE
+
+
 def test_member_runtime_team_member_tool_can_send_status_to_lead_mailbox(tmp_path: Path):
     class Registry:
         def __init__(self):
