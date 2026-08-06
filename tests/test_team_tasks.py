@@ -310,6 +310,18 @@ def test_task_board_requires_structured_result_for_read_only_completion(tmp_path
     assert completed.result.summary == "reviewed"
 
 
+def test_task_board_allows_lead_to_recover_blocked_task(tmp_path: Path):
+    board, _store = make_board(tmp_path)
+    task = board.create(make_task("task-a"))
+    claimed = board.claim(task.task_id, "dev", task.revision)
+    blocked = board.transition(claimed.task_id, claimed.revision, TeamTaskState.BLOCKED, error="worker exited")
+
+    recovered = board.transition(blocked.task_id, blocked.revision, TeamTaskState.RUNNING)
+
+    assert recovered.state is TeamTaskState.RUNNING
+    assert recovered.revision == blocked.revision + 1
+
+
 def test_task_board_claim_rejects_owned_or_non_pending_tasks(tmp_path: Path):
     board, _store = make_board(tmp_path)
     assigned = board.create(make_task("task-a", owner="lead"))

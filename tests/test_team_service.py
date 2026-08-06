@@ -12,6 +12,7 @@ from mycode.team import (
     MemberBackend,
     MemberState,
     MessageProtocol,
+    ResolvedBackend,
     TaskKind,
     TeamError,
     TeamMessage,
@@ -451,6 +452,93 @@ def test_team_service_spawn_member_releases_worktree_when_backend_start_fails(tm
     asyncio.run(scenario())
 
 
+def test_team_service_persists_and_registers_member_before_backend_start(tmp_path: Path):
+    class ObservingBackend(FakeBackend):
+        async def start(self, spec):
+            stored = service.store.load(spec.team_name)
+            member = next(item for item in stored.members if item.member_name == spec.member_name)
+            assert member.state is MemberState.PROVISIONING
+            service._mailbox_or_error().receive(spec.member_name)
+            return await super().start(spec)
+
+    async def scenario():
+        nonlocal service
+        service = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=ObservingBackend(),
+        )
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("ship feature")
+        task = service.task_board.create(
+            TeamTask(
+                task_id="task-1",
+                batch_id=batch.batch_id,
+                title="Build piece",
+                description="Implement the first piece",
+                dependency_ids=(),
+                kind=TaskKind.CODE,
+                state=TeamTaskState.PENDING,
+            )
+        )
+
+        member = await service.spawn_member(
+            member_name="dev",
+            role_name="general",
+            role_revision=7,
+            requested_backend=MemberBackend.IN_PROCESS,
+            task_id=task.task_id,
+            batch_id=batch.batch_id,
+            goal="ship feature",
+            read_only=False,
+            approval_required=False,
+        )
+
+        assert member.state is MemberState.RUNNING
+
+    service = None
+    asyncio.run(scenario())
+
+
+def test_team_service_passes_configured_backend_priority_to_selector(tmp_path: Path):
+    class RecordingSelector:
+        def __init__(self) -> None:
+            self.priority = None
+
+        def select(self, requested_backend, environment, *, priority):
+            self.priority = priority
+            return type(
+                "Selection",
+                (),
+                {
+                    "available": True,
+                    "resolved_backend": ResolvedBackend.IN_PROCESS,
+                    "reason_code": "backend_available",
+                    "reason": "selected in_process",
+                },
+            )()
+
+    async def scenario():
+        selector = RecordingSelector()
+        service = make_service_with_backend(
+            tmp_path,
+            backend_selector=selector,
+            backend=FakeBackend(),
+            config=TeamConfig(
+                backend_priority=(MemberBackend.IN_PROCESS, MemberBackend.TMUX),
+                lock_retry_interval_seconds=0.01,
+                lock_timeout_seconds=0.1,
+                lock_stale_after_seconds=0.2,
+            ),
+        )
+
+        await spawn_service_member(service)
+
+        assert selector.priority == (MemberBackend.IN_PROCESS, MemberBackend.TMUX)
+
+    asyncio.run(scenario())
+
+
 def test_team_service_terminate_waits_for_shutdown_response_before_stopping(tmp_path: Path):
     class ObservingBackend(FakeBackend):
         def __init__(self, observed):
@@ -593,5 +681,86 @@ def test_team_service_archive_rejects_running_work_then_marks_read_only(tmp_path
         assert archived.state is TeamState.ARCHIVED
         with pytest.raises(TeamError, match="archived"):
             await service.start_batch("new work")
+
+    asyncio.run(scenario())
+
+
+def test_team_service_reattach_wakes_persisted_member_without_prior_handle(tmp_path: Path):
+    async def scenario():
+        backend = FakeBackend()
+        first = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=backend,
+        )
+        await spawn_service_member(first)
+
+        second = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=backend,
+        )
+        await first.clear_session()
+        await second.create_or_attach("team-a")
+        assert second._backend_handles == {}
+
+        await second.send_message(
+            TeamMessage(
+                message_id="resume-dev",
+                protocol=MessageProtocol.MESSAGE,
+                sender="lead",
+                target_name="dev",
+                broadcast=False,
+                body="resume work",
+                summary="resume",
+                timestamp=NOW,
+            )
+        )
+
+        assert len(backend.started) == 2
+        assert "dev" in second._backend_handles
+
+    asyncio.run(scenario())
+
+
+def test_team_service_marks_member_blocked_when_persisted_wake_fails(tmp_path: Path):
+    class FailingWakeBackend(FakeBackend):
+        async def start(self, spec):
+            if self.started:
+                raise RuntimeError("worker launch failed")
+            return await super().start(spec)
+
+    async def scenario():
+        backend = FailingWakeBackend()
+        first = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=backend,
+        )
+        await spawn_service_member(first)
+        await first.clear_session()
+
+        second = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=backend,
+        )
+        await second.create_or_attach("team-a")
+        with pytest.raises(RuntimeError, match="launch failed"):
+            await second.send_message(
+                TeamMessage(
+                    message_id="wake-fails",
+                    protocol=MessageProtocol.MESSAGE,
+                    sender="lead",
+                    target_name="dev",
+                    broadcast=False,
+                    body="resume work",
+                    summary="resume",
+                    timestamp=NOW,
+                )
+            )
+
+        assert second.store.load("team-a").members[0].state is MemberState.BLOCKED
+        assert second._backend_handles == {}
 
     asyncio.run(scenario())

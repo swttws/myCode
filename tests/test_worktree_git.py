@@ -524,6 +524,30 @@ def test_integration_helpers_use_local_structured_git_commands(tmp_path: Path):
     ]
 
 
+def test_update_local_ref_accepts_expected_old_value_for_cas(tmp_path: Path):
+    runner = FakeGitRunner([completed_git_process()])
+    gateway = GitWorktreeGateway(
+        config=WorktreeConfig(digest="abc123"),
+        env={},
+        runner=runner,
+    )
+
+    gateway.update_local_ref(
+        tmp_path.resolve(),
+        "main",
+        "c" * 40,
+        expected_old="a" * 40,
+    )
+
+    assert runner.calls[0].command == (
+        "git",
+        "update-ref",
+        "refs/heads/main",
+        "c" * 40,
+        "a" * 40,
+    )
+
+
 def _identity(repository_root: Path, gateway: GitWorktreeGateway) -> WorkspaceTaskIdentity:
     repository_identity = gateway.identify_repository(repository_root)
     base_commit = gateway.capture_head(repository_root)

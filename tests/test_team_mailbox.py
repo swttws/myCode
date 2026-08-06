@@ -235,3 +235,21 @@ def test_mailbox_store_acknowledge_requires_checkpoint_and_marks_read(tmp_path: 
     messages = mailbox.receive("alpha")
     assert messages[0].read is True
     assert mailbox.unread("alpha") == ()
+
+
+def test_mailbox_store_rejects_writes_after_team_is_archived(tmp_path: Path):
+    mailbox, store, _, alpha, _ = make_mailbox(tmp_path)
+    mailbox.send(make_message(message_id="msg-before-archive"))
+    context = JsonConversationMemory(path=store.context_path("team-a", alpha.member_name))
+    context.set_checkpoint({"turn": 1})
+    context.set_applied_message_ids(("msg-before-archive",))
+
+    store.archive("team-a")
+
+    with pytest.raises(TeamError) as sent:
+        mailbox.send(make_message(message_id="msg-after-archive"))
+    with pytest.raises(TeamError) as acked:
+        mailbox.acknowledge(alpha.member_name, "msg-before-archive")
+
+    assert sent.value.code == "team_archived"
+    assert acked.value.code == "team_archived"

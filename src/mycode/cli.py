@@ -53,6 +53,8 @@ from mycode.subagent.service import SubAgentService
 from mycode.subagent.tasks import SubAgentTaskManager
 from mycode.subagent.tool import AgentTool
 from mycode.subagent.tooling import create_task_permission_service
+from mycode.team import ResolvedBackend
+from mycode.team.backends import BackendRouter, InProcessBackend, TmuxBackend, WindowsTerminalBackend
 from mycode.team.config import TeamConfig
 from mycode.team.policy import TeamPermissionInterceptor
 from mycode.team.service import TeamService
@@ -185,6 +187,18 @@ async def _run_application(
             print(f"myCode Worktree 配置错误：{exc}", file=sys.stderr)
             return 1
         shared_workspace = worktree_service.shared_workspace
+        team_backend = BackendRouter(
+            {
+                ResolvedBackend.IN_PROCESS: InProcessBackend(
+                    runtime_factory=lambda spec: team_worker.create_worker_runtime_from_spec(
+                        spec,
+                        home=Path.home(),
+                    )
+                ),
+                ResolvedBackend.TMUX: TmuxBackend(),
+                ResolvedBackend.WINDOWS_TERMINAL: WindowsTerminalBackend(),
+            }
+        )
         team_service = TeamService(
             store=TeamStore(home=Path.home()),
             repository_root=shared_workspace.repository_root,
@@ -193,6 +207,7 @@ async def _run_application(
             lead_owner=f"mycode-cli:{os.getpid()}",
             config=getattr(config, "team", TeamConfig()),
             worktree_service=worktree_service,
+            backend=team_backend,
         )
         hook_runtime = HookRuntime(
             config=hook_config,

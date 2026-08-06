@@ -7,6 +7,7 @@ from mycode.team.models import (
     ApprovalState,
     MemberBackend,
     MessageProtocol,
+    TeamError,
     TaskKind,
     TaskPatch,
     TaskResult,
@@ -14,7 +15,7 @@ from mycode.team.models import (
     TeamTask,
     TeamTaskState,
 )
-from mycode.tool import ToolDefinition, ToolKind, ToolResult, ToolRuntimeScope
+from mycode.tool import ToolDefinition, ToolKind, ToolResult, ToolRuntimeScope, ToolWorkspaceScope
 
 
 class TeamTool:
@@ -87,6 +88,11 @@ class TeamTool:
             kind=ToolKind.WRITE,
             requires_approval=False,
             runtime_scope=ToolRuntimeScope.PARENT_ONLY,
+            workspace_scope=(
+                ToolWorkspaceScope.WORKSPACE_AWARE
+                if self._name == "team_member"
+                else ToolWorkspaceScope.SHARED_ONLY
+            ),
         )
 
     async def execute_async(self, arguments, context=None) -> ToolResult:
@@ -181,6 +187,7 @@ class TeamTool:
             if action == "update_task":
                 if self._name == "team_member":
                     self._resolve_member_name_argument(arguments)
+                    self._ensure_member_task_owner(arguments)
                 task = self._call_task_method(
                     "update_task",
                     _required_string(arguments, "task_id"),
@@ -205,6 +212,9 @@ class TeamTool:
                 )
                 return _success(self._name, _task_content(task))
             if action == "transition_task":
+                if self._name == "team_member":
+                    self._ensure_member_task_owner(arguments)
+                    self._ensure_member_can_run(arguments)
                 task = self._call_task_method(
                     "transition_task",
                     _required_string(arguments, "task_id"),
@@ -215,6 +225,9 @@ class TeamTool:
                 )
                 return _success(self._name, _task_content(task))
             if action == "plan_submit":
+                if self._name == "team_member":
+                    self._resolve_member_name_argument(arguments)
+                    self._ensure_member_task_owner(arguments)
                 task = self._call_task_method(
                     "update_task",
                     _required_string(arguments, "task_id"),
@@ -224,14 +237,29 @@ class TeamTool:
                         approval_state=ApprovalState.PENDING,
                     ),
                 )
+                task = self._call_task_method(
+                    "transition_task",
+                    task.task_id,
+                    task.revision,
+                    TeamTaskState.AWAITING_APPROVAL,
+                )
                 receipt = await self._send_protocol_message(arguments, protocol=MessageProtocol.PLAN_SUBMIT)
                 content = _task_content(task)
                 content["message_id"] = receipt.content["message_id"]
                 return _success(self._name, content)
             if action == "plan_decision":
                 approved = _required_bool(arguments, "approved")
+                plan_revision = _required_int(arguments, "plan_revision")
                 if not approved and _optional_string(arguments.get("reason")) is None:
                     raise ValueError("reason must be present when rejecting a plan")
+                task = self._call_task_method("get_task", _required_string(arguments, "task_id"))
+                if task.plan_revision != plan_revision:
+                    raise TeamError(
+                        code="plan_revision_mismatch",
+                        phase="team",
+                        message="plan revision does not match the current task revision",
+                        task_id=task.task_id,
+                    )
                 task = self._call_task_method(
                     "update_task",
                     _required_string(arguments, "task_id"),
@@ -240,6 +268,13 @@ class TeamTool:
                         approval_state=ApprovalState.APPROVED if approved else ApprovalState.REJECTED,
                     ),
                 )
+                if approved:
+                    task = self._call_task_method(
+                        "transition_task",
+                        task.task_id,
+                        task.revision,
+                        TeamTaskState.RUNNING,
+                    )
                 content = _task_content(task)
                 if "message_id" in arguments:
                     receipt = await self._send_protocol_message(arguments, protocol=MessageProtocol.PLAN_DECISION)
@@ -345,6 +380,48 @@ class TeamTool:
         if self._member_name is not None:
             return self._member_name
         return _required_string(arguments, "member_name")
+
+    def _ensure_member_task_owner(self, arguments: dict[str, object]):
+        if self._name != "team_member" or self._member_name is None:
+            return None
+        task = self._call_task_method("get_task", _required_string(arguments, "task_id"))
+        if getattr(task, "owner", None) != self._member_name:
+            raise TeamError(
+                code="task_owner_mismatch",
+                phase="team",
+                message="task owner does not match bound team member",
+                task_id=task.task_id,
+                member_name=self._member_name,
+            )
+        return task
+
+    def _ensure_member_can_run(self, arguments: dict[str, object]) -> None:
+        if self._name != "team_member" or self._member_name is None:
+            return
+        state = _required_string(arguments, "state")
+        if state != TeamTaskState.RUNNING.value:
+            return
+        task = self._call_task_method("get_task", _required_string(arguments, "task_id"))
+        if task.state is TeamTaskState.BLOCKED:
+            raise TeamError(
+                code="blocked_recovery_requires_lead",
+                phase="team",
+                message="only the team lead can recover a blocked task",
+                task_id=task.task_id,
+                member_name=self._member_name,
+            )
+        requires_approval = getattr(self._service, "member_requires_approval", None)
+        if not callable(requires_approval):
+            return
+        if requires_approval(self._member_name, _required_string(arguments, "task_id")):
+            if task.approval_state is not ApprovalState.APPROVED:
+                raise TeamError(
+                    code="approval_required",
+                    phase="team",
+                    message="approval is required before running this task",
+                    task_id=task.task_id,
+                    member_name=self._member_name,
+                )
 
     def _resolve_sender(self, arguments: dict[str, object]) -> str:
         supplied = _optional_string(arguments.get("sender")) if "sender" in arguments else None
@@ -510,6 +587,7 @@ _ACTION_ARGUMENTS = {
             "task_id",
             "batch_id",
             "expected_revision",
+            "plan_revision",
             "approved",
             "reason",
             "body",

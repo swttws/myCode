@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from mycode.team.models import (
+    BackendHandle,
     BackendEnvironment,
     BackendSelection,
     MemberLaunchSpec,
@@ -111,6 +112,78 @@ def test_backend_selector_auto_falls_back_to_in_process_when_native_backends_are
         ResolvedBackend.WINDOWS_TERMINAL,
         ResolvedBackend.IN_PROCESS,
     )
+
+
+def test_backend_selector_auto_honors_configured_priority(tmp_path: Path):
+    from mycode.team.backends import BackendSelector
+
+    probe = FakeCapabilityProbe(
+        available={
+            ResolvedBackend.TMUX: True,
+            ResolvedBackend.IN_PROCESS: True,
+        },
+        calls=[],
+    )
+    selector = BackendSelector(capability_probe=probe)
+
+    selection = selector.select(
+        MemberBackend.AUTO,
+        make_environment(tmp_path),
+        priority=(MemberBackend.IN_PROCESS, MemberBackend.TMUX),
+    )
+
+    assert probe.calls == [ResolvedBackend.IN_PROCESS]
+    assert selection.resolved_backend is ResolvedBackend.IN_PROCESS
+    assert selection.fallback_chain == (ResolvedBackend.IN_PROCESS,)
+
+
+def test_backend_router_dispatches_by_resolved_backend_and_handle_endpoint(tmp_path: Path):
+    from mycode.team.backends import BackendRouter
+
+    class RecordingBackend:
+        def __init__(self, backend: ResolvedBackend) -> None:
+            self.backend = backend
+            self.started = []
+            self.woken = []
+            self.stopped = []
+
+        async def start(self, spec):
+            self.started.append(spec)
+            return BackendHandle(
+                wake_endpoint=spec.wake_endpoint,
+                process_id=123,
+                started_at=NOW,
+                token=f"{self.backend.value}-token",
+            )
+
+        async def wake(self, handle):
+            self.woken.append(handle)
+
+        async def stop(self, handle, *, force: bool):
+            self.stopped.append((handle, force))
+
+    tmux = RecordingBackend(ResolvedBackend.TMUX)
+    in_process = RecordingBackend(ResolvedBackend.IN_PROCESS)
+    router = BackendRouter(
+        {
+            ResolvedBackend.TMUX: tmux,
+            ResolvedBackend.IN_PROCESS: in_process,
+        }
+    )
+
+    async def scenario():
+        spec = make_launch_spec(tmp_path)
+
+        handle = await router.start(spec)
+        await router.wake(handle)
+        await router.stop(handle, force=True)
+
+        assert in_process.started == [spec]
+        assert in_process.woken == [handle]
+        assert in_process.stopped == [(handle, True)]
+        assert tmux.started == []
+
+    asyncio.run(scenario())
 
 
 def test_backend_selector_explicit_unavailable_backend_fails_closed(tmp_path: Path):
@@ -282,6 +355,32 @@ class FakeProcess:
 
     def kill(self):
         self.killed = True
+
+
+def test_tmux_backend_wake_restarts_exited_worker(tmp_path: Path):
+    from mycode.team.backends import TmuxBackend
+
+    class ExitedProcess(FakeProcess):
+        def poll(self):
+            return 0
+
+    async def scenario():
+        launches = []
+        processes = [ExitedProcess(pid=456), FakeProcess(pid=789)]
+        backend = TmuxBackend(
+            process_factory=lambda argv, cwd, env: launches.append((argv, cwd, env)) or processes.pop(0),
+            clock=lambda: NOW,
+            token_factory=lambda: "tmux-token",
+        )
+        spec = make_launch_spec(tmp_path, backend=ResolvedBackend.TMUX)
+
+        handle = await backend.start(spec)
+        await backend.wake(handle)
+
+        assert len(launches) == 2
+        assert launches[1][0] == launches[0][0]
+
+    asyncio.run(scenario())
 
 
 def test_tmux_backend_launches_worker_without_shell_and_tracks_process(tmp_path: Path):

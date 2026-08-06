@@ -63,6 +63,7 @@ _ALLOWED_TRANSITIONS = {
         TeamTaskState.CANCELLED,
     },
     TeamTaskState.BLOCKED: {
+        TeamTaskState.RUNNING,
         TeamTaskState.FAILED,
         TeamTaskState.CANCELLED,
     },
@@ -370,7 +371,7 @@ class TaskBoard:
                 task_id=current.task_id,
                 revision=current.revision,
             )
-        if _STATE_RANK[state] < _STATE_RANK[current.state]:
+        if not (current.state is TeamTaskState.BLOCKED and state is TeamTaskState.RUNNING) and _STATE_RANK[state] < _STATE_RANK[current.state]:
             raise self._error(
                 code="state_rollback",
                 phase="transition",

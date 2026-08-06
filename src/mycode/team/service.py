@@ -186,7 +186,11 @@ class TeamService:
                 workspace_root=workspace.root,
                 member_name=member_name,
             )
-            selection = self._backend_selector.select(requested_backend, environment)
+            selection = self._backend_selector.select(
+                requested_backend,
+                environment,
+                priority=self._config.backend_priority,
+            )
             if not selection.available or selection.resolved_backend is None:
                 raise TeamError(
                     code=selection.reason_code or "backend_unavailable",
@@ -213,6 +217,7 @@ class TeamService:
                     "MYCODE_TEAM": snapshot.team.team_name,
                     "MYCODE_TEAM_MEMBER": member_name,
                     "MYCODE_TEAM_ROLE": role_name,
+                    "MYCODE_HOME": str(self._store.home),
                 },
                 workspace_root=workspace.root,
                 repository_root=workspace.repository_root,
@@ -228,36 +233,53 @@ class TeamService:
                 read_only=read_only,
                 revision=1,
             )
+            now = self._clock()
+            member = MemberRecord(
+                member_name=member_name,
+                role_name=role_name,
+                role_revision=role_revision,
+                requested_backend=requested_backend,
+                resolved_backend=selection.resolved_backend,
+                state=MemberState.PROVISIONING,
+                approval_required=approval_required,
+                worktree_root=workspace.root,
+                branch_name=spec.branch_name,
+                mailbox_path=spec.mailbox_path,
+                context_path=spec.context_path,
+                wake_endpoint=wake_endpoint,
+                task_id=task_id,
+                batch_id=batch_id,
+                revision=1,
+                created_at=now,
+                updated_at=now,
+                last_seen_at=now,
+            )
+            latest = self._store.load(snapshot.team.team_name)
+            registry = {**dict(latest.registry), member_name: wake_endpoint}
+            self._store.save(replace(latest, members=(*latest.members, member), registry=registry))
+            self._mailbox_or_error().register(member)
             handle = await self._start_backend(spec)
         except Exception:
+            if "member" in locals():
+                self._mark_member_failed(snapshot.team.team_name, member)
             await self._release_member_worktree(lease)
             raise
         endpoint = getattr(handle, "wake_endpoint", wake_endpoint)
-        now = self._clock()
-        member = MemberRecord(
-            member_name=member_name,
-            role_name=role_name,
-            role_revision=role_revision,
-            requested_backend=requested_backend,
-            resolved_backend=selection.resolved_backend,
+        member = replace(
+            member,
             state=MemberState.RUNNING,
-            approval_required=approval_required,
-            worktree_root=workspace.root,
-            branch_name=spec.branch_name,
-            mailbox_path=spec.mailbox_path,
-            context_path=spec.context_path,
             wake_endpoint=endpoint,
-            task_id=task_id,
-            batch_id=batch_id,
-            revision=1,
-            created_at=now,
-            updated_at=now,
+            revision=member.revision + 1,
+            updated_at=self._clock(),
             last_seen_at=now,
         )
         latest = self._store.load(snapshot.team.team_name)
         registry = {**dict(latest.registry), member_name: endpoint}
-        self._store.save(replace(latest, members=(*latest.members, member), registry=registry))
-        self._mailbox_or_error().register(member)
+        members = tuple(
+            member if current.member_name == member.member_name else current
+            for current in latest.members
+        )
+        self._store.save(replace(latest, members=members, registry=registry))
         self._backend_handles[member_name] = handle
         return member
 
@@ -308,11 +330,7 @@ class TeamService:
     async def send_message(self, message):
         receipt = self._mailbox_or_error().send(message)
         for recipient in receipt.recipient_names:
-            handle = self._backend_handles.get(recipient)
-            if handle is not None and self._backend is not None:
-                wake = getattr(self._backend, "wake", None)
-                if callable(wake):
-                    await wake(handle)
+            await self._wake_member(recipient)
         return receipt
 
     def create_task(self, task):
@@ -335,6 +353,11 @@ class TeamService:
 
     def transition_task(self, task_id: str, expected_revision: int, state, result=None, error=None):
         return self.task_board.transition(task_id, expected_revision, state, result, error)
+
+    def member_requires_approval(self, member_name: str, task_id: str) -> bool:
+        snapshot = self._active_snapshot()
+        member = _find_member(snapshot.members, member_name)
+        return member.task_id == task_id and member.approval_required
 
     async def integrate_batch(self, batch_id: str, *, lead_workspace_root: Path | None = None):
         snapshot = self._active_snapshot()
@@ -499,7 +522,13 @@ class TeamService:
 
     async def _start_backend(self, spec: MemberLaunchSpec):
         if self._backend is None:
-            return type("BackendHandle", (), {"wake_endpoint": spec.wake_endpoint, "process_id": os.getpid(), "token": "in-process"})()
+            raise TeamError(
+                code="backend_unavailable",
+                phase="spawn",
+                message="team backend is not configured",
+                team_name=spec.team_name,
+                member_name=spec.member_name,
+            )
         start = getattr(self._backend, "start", None)
         if not callable(start):
             raise TeamError(code="backend_invalid", phase="spawn", message="backend start unavailable")
@@ -507,6 +536,131 @@ class TeamService:
         if asyncio.iscoroutine(result):
             return await result
         return result
+
+    async def _wake_member(self, member_name: str) -> None:
+        if self._backend is None:
+            return
+        handle = self._backend_handles.get(member_name)
+        if handle is not None:
+            wake = getattr(self._backend, "wake", None)
+            if callable(wake):
+                try:
+                    result = wake(handle)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    snapshot = self._active_snapshot()
+                    member = next((item for item in snapshot.members if item.member_name == member_name), None)
+                    if member is not None:
+                        self._mark_member_blocked(snapshot.team.team_name, member)
+                    self._backend_handles.pop(member_name, None)
+                    raise
+            return
+
+        snapshot = self._active_snapshot()
+        member = next((item for item in snapshot.members if item.member_name == member_name), None)
+        if member is None or member.state in {MemberState.STOPPED, MemberState.FAILED}:
+            return
+        spec = self._launch_spec_from_member(snapshot, member)
+        try:
+            self._backend_handles[member_name] = await self._start_backend(spec)
+        except Exception:
+            self._mark_member_blocked(snapshot.team.team_name, member)
+            raise
+
+    def _launch_spec_from_member(self, snapshot: TeamSnapshot, member: MemberRecord) -> MemberLaunchSpec:
+        if (
+            member.resolved_backend is None
+            or member.worktree_root is None
+            or member.branch_name is None
+            or member.mailbox_path is None
+            or member.context_path is None
+            or member.wake_endpoint is None
+            or member.task_id is None
+            or member.batch_id is None
+        ):
+            raise TeamError(
+                code="member_launch_incomplete",
+                phase="wake",
+                message="member record lacks launch metadata",
+                team_name=snapshot.team.team_name,
+                member_name=member.member_name,
+            )
+        batch = next((item for item in snapshot.batches if item.batch_id == member.batch_id), None)
+        if batch is None:
+            raise TeamError(
+                code="missing_batch",
+                phase="wake",
+                message="member batch is missing",
+                team_name=snapshot.team.team_name,
+                member_name=member.member_name,
+                batch_id=member.batch_id,
+            )
+        task = self.task_board.get(member.task_id)
+        return MemberLaunchSpec(
+            team_name=snapshot.team.team_name,
+            member_name=member.member_name,
+            role_name=member.role_name,
+            role_revision=member.role_revision,
+            requested_backend=member.requested_backend,
+            resolved_backend=member.resolved_backend,
+            argv=("mycode", "--team-worker", f"{snapshot.team.team_name}/{member.member_name}"),
+            environment={
+                "MYCODE_TEAM": snapshot.team.team_name,
+                "MYCODE_TEAM_MEMBER": member.member_name,
+                "MYCODE_TEAM_ROLE": member.role_name,
+                "MYCODE_HOME": str(self._store.home),
+            },
+            workspace_root=member.worktree_root,
+            repository_root=snapshot.team.repository_root,
+            repository_id=snapshot.team.repository_id,
+            branch_name=member.branch_name,
+            mailbox_path=member.mailbox_path,
+            context_path=member.context_path,
+            wake_endpoint=member.wake_endpoint,
+            task_id=member.task_id,
+            batch_id=member.batch_id,
+            goal=batch.goal,
+            approval_required=member.approval_required,
+            read_only=task.kind.value == "read_only",
+            revision=member.revision,
+        )
+
+    def _mark_member_failed(self, team_name: str, member: MemberRecord) -> None:
+        try:
+            latest = self._store.load(team_name)
+            failed = replace(
+                member,
+                state=MemberState.FAILED,
+                revision=member.revision + 1,
+                updated_at=self._clock(),
+            )
+            members = tuple(
+                failed if current.member_name == member.member_name else current
+                for current in latest.members
+            )
+            registry = dict(latest.registry)
+            registry.pop(member.member_name, None)
+            self._store.save(replace(latest, members=members, registry=registry))
+        except Exception:
+            return
+
+    def _mark_member_blocked(self, team_name: str, member: MemberRecord) -> None:
+        try:
+            latest = self._store.load(team_name)
+            blocked = replace(
+                member,
+                state=MemberState.BLOCKED,
+                revision=member.revision + 1,
+                updated_at=self._clock(),
+            )
+            members = tuple(
+                blocked if current.member_name == member.member_name else current
+                for current in latest.members
+            )
+            self._store.save(replace(latest, members=members))
+        except Exception:
+            return
 
     async def _stop_in_process_members(self) -> None:
         if self._backend is None:
