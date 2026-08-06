@@ -92,3 +92,28 @@ def test_stage_14_success_path_uses_persistent_team_state_without_push(tmp_path:
         assert store.load("team-a").members[0].member_name == "alpha"
 
     asyncio.run(scenario())
+
+
+def test_team_worker_main_runs_named_member_runtime_factory(tmp_path: Path):
+    from mycode.team.worker import main
+
+    calls = []
+
+    class Runtime:
+        async def resume_from_checkpoint(self):
+            calls.append("resume")
+
+        async def run_until_idle(self):
+            calls.append("run")
+
+    def runtime_factory(request):
+        calls.append((request.team_name, request.member_name, request.home))
+        return Runtime()
+
+    exit_code = main(
+        ["team-a/dev", "--home", str(tmp_path / "home")],
+        runtime_factory=runtime_factory,
+    )
+
+    assert exit_code == 0
+    assert calls == [("team-a", "dev", tmp_path / "home"), "resume", "run"]

@@ -70,6 +70,8 @@ class FakeWorktreeService:
         )()
         self.git = FakeGit()
         self.prepared = []
+        self.prepared_leases = []
+        self.released = []
 
     async def prepare_member(
         self,
@@ -83,7 +85,7 @@ class FakeWorktreeService:
         root.mkdir(parents=True, exist_ok=True)
         branch_name = f"mycode/team/{team_name}/{member_name}"
         self.prepared.append((team_name, member_name, role_name, base_commit))
-        return type(
+        lease = type(
             "Lease",
             (),
             {
@@ -99,6 +101,12 @@ class FakeWorktreeService:
                 )()
             },
         )()
+        self.prepared_leases.append(lease)
+        return lease
+
+    async def release(self, lease):
+        self.released.append(lease)
+        return None
 
 
 class FakeBackend:
@@ -144,6 +152,62 @@ def make_service(tmp_path: Path) -> TeamService:
         backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
         backend=FakeBackend(),
         clock=lambda: NOW,
+    )
+
+
+def make_service_with_backend(
+    tmp_path: Path,
+    *,
+    backend_selector,
+    backend,
+    config: TeamConfig | None = None,
+) -> TeamService:
+    repository_root = tmp_path / "repo"
+    repository_root.mkdir(exist_ok=True)
+    worktree_service = FakeWorktreeService(repository_root)
+    return TeamService(
+        store=TeamStore(home=tmp_path / "home"),
+        repository_root=repository_root,
+        repository_id="repo-123",
+        target_branch="main",
+        lead_owner="lead-1",
+        config=config
+        or TeamConfig(
+            lock_retry_interval_seconds=0.01,
+            lock_timeout_seconds=0.1,
+            lock_stale_after_seconds=0.2,
+        ),
+        worktree_service=worktree_service,
+        backend_selector=backend_selector,
+        backend=backend,
+        clock=lambda: NOW,
+    )
+
+
+async def spawn_service_member(service: TeamService, *, member_name: str = "dev"):
+    await service.create_or_attach("team-a")
+    batch = await service.start_batch("ship feature")
+    task = service.task_board.create(
+        TeamTask(
+            task_id=f"task-{member_name}",
+            batch_id=batch.batch_id,
+            title="Build piece",
+            description="Implement the first piece",
+            dependency_ids=(),
+            kind=TaskKind.CODE,
+            state=TeamTaskState.PENDING,
+        )
+    )
+    return await service.spawn_member(
+        member_name=member_name,
+        role_name="general",
+        role_revision=7,
+        requested_backend=MemberBackend.IN_PROCESS,
+        task_id=task.task_id,
+        batch_id=batch.batch_id,
+        goal="ship feature",
+        read_only=False,
+        approval_required=False,
     )
 
 
@@ -234,6 +298,274 @@ def test_team_service_start_batch_and_spawn_member_persist_registration(tmp_path
         )
 
         assert receipt.recipient_names == ("dev",)
+
+    asyncio.run(scenario())
+
+
+def test_team_service_clear_session_gracefully_stops_only_in_process_members(tmp_path: Path):
+    async def scenario():
+        service = make_service(tmp_path)
+        backend = service._backend
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("ship feature")
+        task = service.task_board.create(
+            TeamTask(
+                task_id="task-1",
+                batch_id=batch.batch_id,
+                title="Build piece",
+                description="Implement the first piece",
+                dependency_ids=(),
+                kind=TaskKind.CODE,
+                state=TeamTaskState.PENDING,
+            )
+        )
+        await service.spawn_member(
+            member_name="dev",
+            role_name="general",
+            role_revision=7,
+            requested_backend=MemberBackend.IN_PROCESS,
+            task_id=task.task_id,
+            batch_id=batch.batch_id,
+            goal="ship feature",
+            read_only=False,
+            approval_required=False,
+        )
+
+        await service.clear_session()
+
+        assert backend.stopped[0][1] is False
+
+        service = make_service(tmp_path)
+        backend = service._backend
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("external feature")
+        task = service.task_board.create(
+            TeamTask(
+                task_id="task-2",
+                batch_id=batch.batch_id,
+                title="Build other piece",
+                description="Implement the second piece",
+                dependency_ids=(),
+                kind=TaskKind.CODE,
+                state=TeamTaskState.PENDING,
+            )
+        )
+        await service.spawn_member(
+            member_name="ops",
+            role_name="general",
+            role_revision=7,
+            requested_backend=MemberBackend.TMUX,
+            task_id=task.task_id,
+            batch_id=batch.batch_id,
+            goal="external feature",
+            read_only=False,
+            approval_required=False,
+        )
+
+        await service.clear_session()
+
+        assert backend.stopped == []
+
+    asyncio.run(scenario())
+
+
+def test_team_service_spawn_member_releases_worktree_when_backend_is_unavailable(tmp_path: Path):
+    async def scenario():
+        service = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: False),
+            backend=FakeBackend(),
+        )
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("ship feature")
+        task = service.task_board.create(
+            TeamTask(
+                task_id="task-1",
+                batch_id=batch.batch_id,
+                title="Build piece",
+                description="Implement the first piece",
+                dependency_ids=(),
+                kind=TaskKind.CODE,
+                state=TeamTaskState.PENDING,
+            )
+        )
+
+        with pytest.raises(TeamError, match="backend"):
+            await service.spawn_member(
+                member_name="dev",
+                role_name="general",
+                role_revision=7,
+                requested_backend=MemberBackend.IN_PROCESS,
+                task_id=task.task_id,
+                batch_id=batch.batch_id,
+                goal="ship feature",
+                read_only=False,
+                approval_required=False,
+            )
+
+        assert service._worktree_service.released == service._worktree_service.prepared_leases
+
+    asyncio.run(scenario())
+
+
+def test_team_service_spawn_member_releases_worktree_when_backend_start_fails(tmp_path: Path):
+    class FailingBackend(FakeBackend):
+        async def start(self, spec):
+            raise RuntimeError("backend start failed")
+
+    async def scenario():
+        service = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=FailingBackend(),
+        )
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("ship feature")
+        task = service.task_board.create(
+            TeamTask(
+                task_id="task-1",
+                batch_id=batch.batch_id,
+                title="Build piece",
+                description="Implement the first piece",
+                dependency_ids=(),
+                kind=TaskKind.CODE,
+                state=TeamTaskState.PENDING,
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="backend start failed"):
+            await service.spawn_member(
+                member_name="dev",
+                role_name="general",
+                role_revision=7,
+                requested_backend=MemberBackend.IN_PROCESS,
+                task_id=task.task_id,
+                batch_id=batch.batch_id,
+                goal="ship feature",
+                read_only=False,
+                approval_required=False,
+            )
+
+        assert service._worktree_service.released == service._worktree_service.prepared_leases
+
+    asyncio.run(scenario())
+
+
+def test_team_service_terminate_waits_for_shutdown_response_before_stopping(tmp_path: Path):
+    class ObservingBackend(FakeBackend):
+        def __init__(self, observed):
+            super().__init__()
+            self.observed = observed
+
+        async def stop(self, handle, *, force: bool):
+            self.observed.append(
+                any(
+                    message.protocol is MessageProtocol.SHUTDOWN_RESPONSE
+                    and message.sender == "dev"
+                    for message in service._mailbox_or_error().receive("lead")
+                )
+            )
+            await super().stop(handle, force=force)
+
+    async def scenario():
+        nonlocal service
+        observed = []
+        backend = ObservingBackend(observed)
+        service = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=backend,
+            config=TeamConfig(
+                lock_retry_interval_seconds=0.005,
+                lock_timeout_seconds=0.05,
+                lock_stale_after_seconds=0.1,
+                graceful_shutdown_timeout_seconds=0.2,
+            ),
+        )
+        await spawn_service_member(service)
+
+        async def respond():
+            await asyncio.sleep(0.03)
+            await service.send_message(
+                TeamMessage(
+                    message_id="shutdown-response-dev",
+                    protocol=MessageProtocol.SHUTDOWN_RESPONSE,
+                    sender="dev",
+                    target_name="lead",
+                    broadcast=False,
+                    body="checkpoint saved",
+                    summary="checkpoint saved",
+                    timestamp=NOW,
+                )
+            )
+
+        response_task = asyncio.create_task(respond())
+        member = await service.terminate_member("dev", force=False)
+        await response_task
+
+        assert member.state is MemberState.STOPPED
+        assert backend.stopped[0][1] is False
+        assert observed == [True]
+
+    service = None
+    asyncio.run(scenario())
+
+
+def test_team_service_terminate_forces_backend_after_shutdown_timeout(tmp_path: Path):
+    async def scenario():
+        backend = FakeBackend()
+        service = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=backend,
+            config=TeamConfig(
+                lock_retry_interval_seconds=0.005,
+                lock_timeout_seconds=0.05,
+                lock_stale_after_seconds=0.1,
+                graceful_shutdown_timeout_seconds=0.01,
+            ),
+        )
+        await spawn_service_member(service)
+
+        member = await service.terminate_member("dev", force=False)
+
+        assert member.state is MemberState.STOPPED
+        assert backend.stopped[0][1] is True
+
+    asyncio.run(scenario())
+
+
+def test_team_service_terminate_ignores_stale_shutdown_response(tmp_path: Path):
+    async def scenario():
+        backend = FakeBackend()
+        service = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=backend,
+            config=TeamConfig(
+                lock_retry_interval_seconds=0.005,
+                lock_timeout_seconds=0.05,
+                lock_stale_after_seconds=0.1,
+                graceful_shutdown_timeout_seconds=0.01,
+            ),
+        )
+        await spawn_service_member(service)
+        await service.send_message(
+            TeamMessage(
+                message_id="old-shutdown-response-dev",
+                protocol=MessageProtocol.SHUTDOWN_RESPONSE,
+                sender="dev",
+                target_name="lead",
+                broadcast=False,
+                body="old checkpoint",
+                summary="old checkpoint",
+                timestamp=NOW,
+            )
+        )
+
+        await service.terminate_member("dev", force=False)
+
+        assert backend.stopped[0][1] is True
 
     asyncio.run(scenario())
 

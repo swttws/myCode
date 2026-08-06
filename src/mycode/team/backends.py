@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import subprocess
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol
 
 from mycode.team.models import (
+    BackendHandle,
     BackendEnvironment,
     BackendSelection,
     MemberBackend,
+    MemberLaunchSpec,
     ResolvedBackend,
+    TeamError,
 )
 
 
@@ -84,6 +94,152 @@ class BackendSelector:
         return available
 
 
+@dataclass
+class _RuntimeState:
+    runtime: object
+    task: asyncio.Task | None
+
+
+class InProcessBackend:
+    def __init__(
+        self,
+        *,
+        runtime_factory=None,
+        clock=None,
+        token_factory=None,
+    ) -> None:
+        self._runtime_factory = runtime_factory or _missing_runtime_factory
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._token_factory = token_factory or (lambda: uuid.uuid4().hex)
+        self._runtimes: dict[str, _RuntimeState] = {}
+
+    async def start(self, spec: MemberLaunchSpec) -> BackendHandle:
+        _require_launch_spec(spec, ResolvedBackend.IN_PROCESS)
+        runtime = self._runtime_factory(spec)
+        token = self._token_factory()
+        handle = BackendHandle(
+            wake_endpoint=spec.wake_endpoint,
+            process_id=os.getpid(),
+            started_at=self._clock(),
+            token=token,
+        )
+        self._runtimes[token] = _RuntimeState(
+            runtime=runtime,
+            task=asyncio.create_task(_run_until_idle(runtime)),
+        )
+        return handle
+
+    async def wake(self, handle: BackendHandle) -> None:
+        state = self._runtime_state(handle)
+        if state.task is None or state.task.done():
+            state.task = asyncio.create_task(_run_until_idle(state.runtime))
+
+    async def stop(self, handle: BackendHandle, *, force: bool) -> None:
+        state = self._runtime_state(handle)
+        if force and state.task is not None and not state.task.done():
+            state.task.cancel()
+            await asyncio.gather(state.task, return_exceptions=True)
+        elif not force:
+            graceful_stop = getattr(state.runtime, "graceful_stop", None)
+            if callable(graceful_stop):
+                result = graceful_stop()
+                if asyncio.iscoroutine(result):
+                    await result
+        self._runtimes.pop(handle.token, None)
+
+    def _runtime_state(self, handle: BackendHandle) -> _RuntimeState:
+        state = self._runtimes.get(handle.token)
+        if state is None:
+            raise TeamError(
+                code="backend_handle_unknown",
+                phase="backend",
+                message="unknown in-process backend handle",
+                member_name=handle.wake_endpoint.member_name,
+            )
+        return state
+
+
+class _ProcessBackend:
+    resolved_backend: ResolvedBackend
+
+    def __init__(
+        self,
+        *,
+        process_factory=None,
+        clock=None,
+        token_factory=None,
+    ) -> None:
+        self._process_factory = process_factory or _default_process_factory
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._token_factory = token_factory or (lambda: uuid.uuid4().hex)
+        self._processes: dict[str, object] = {}
+
+    async def start(self, spec: MemberLaunchSpec) -> BackendHandle:
+        _require_launch_spec(spec, self.resolved_backend)
+        argv = self._build_argv(spec)
+        env = {**os.environ, **dict(spec.environment)}
+        process = self._process_factory(argv, spec.workspace_root, env)
+        process_id = getattr(process, "pid", 0)
+        token = self._token_factory()
+        handle = BackendHandle(
+            wake_endpoint=spec.wake_endpoint,
+            process_id=process_id,
+            started_at=self._clock(),
+            token=token,
+        )
+        self._processes[token] = process
+        return handle
+
+    async def wake(self, handle: BackendHandle) -> None:
+        self._process_or_error(handle)
+
+    async def stop(self, handle: BackendHandle, *, force: bool) -> None:
+        process = self._process_or_error(handle)
+        if getattr(process, "poll", lambda: None)() is None:
+            stopper = getattr(process, "kill" if force else "terminate", None)
+            if callable(stopper):
+                stopper()
+        self._processes.pop(handle.token, None)
+
+    def _build_argv(self, spec: MemberLaunchSpec) -> tuple[str, ...]:
+        raise NotImplementedError
+
+    def _process_or_error(self, handle: BackendHandle) -> object:
+        process = self._processes.get(handle.token)
+        if process is None:
+            raise TeamError(
+                code="backend_handle_unknown",
+                phase="backend",
+                message="unknown process backend handle",
+                member_name=handle.wake_endpoint.member_name,
+            )
+        return process
+
+
+class TmuxBackend(_ProcessBackend):
+    resolved_backend = ResolvedBackend.TMUX
+
+    def _build_argv(self, spec: MemberLaunchSpec) -> tuple[str, ...]:
+        session_name = _safe_session_name(spec.team_name, spec.member_name)
+        return ("tmux", "new-session", "-d", "-s", session_name, *spec.argv)
+
+
+class WindowsTerminalBackend(_ProcessBackend):
+    resolved_backend = ResolvedBackend.WINDOWS_TERMINAL
+
+    def _build_argv(self, spec: MemberLaunchSpec) -> tuple[str, ...]:
+        title = f"{spec.team_name}:{spec.member_name}"
+        return (
+            "wt",
+            "new-tab",
+            "--title",
+            title,
+            "--startingDirectory",
+            str(spec.workspace_root),
+            *spec.argv,
+        )
+
+
 def _candidate_backends(requested_backend: MemberBackend) -> tuple[ResolvedBackend, ...]:
     if requested_backend is MemberBackend.AUTO:
         return AUTO_BACKEND_ORDER
@@ -140,8 +296,60 @@ def _default_capability_probe(
     raise ValueError("unknown backend")
 
 
+async def _run_until_idle(runtime: object) -> None:
+    run_until_idle = getattr(runtime, "run_until_idle", None)
+    if not callable(run_until_idle):
+        raise TeamError(
+            code="runtime_invalid",
+            phase="backend",
+            message="runtime must provide run_until_idle",
+        )
+    result = run_until_idle()
+    if asyncio.iscoroutine(result):
+        await result
+
+
+def _missing_runtime_factory(spec: MemberLaunchSpec):
+    raise TeamError(
+        code="runtime_factory_missing",
+        phase="backend",
+        message="in-process backend requires a runtime factory",
+        team_name=spec.team_name,
+        member_name=spec.member_name,
+    )
+
+
+def _require_launch_spec(spec: MemberLaunchSpec, expected_backend: ResolvedBackend) -> None:
+    if not isinstance(spec, MemberLaunchSpec):
+        raise ValueError("spec must be a MemberLaunchSpec")
+    if spec.resolved_backend is not expected_backend:
+        raise ValueError(f"spec resolved_backend must be {expected_backend.value}")
+
+
+def _default_process_factory(argv: tuple[str, ...], cwd: Path, env: dict[str, str]):
+    return subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        env=env,
+        shell=False,
+    )
+
+
+def _safe_session_name(team_name: str, member_name: str) -> str:
+    safe = []
+    for char in f"mycode-{team_name}-{member_name}":
+        if char.isalnum() or char in {"-", "_", ":"}:
+            safe.append(char)
+        else:
+            safe.append("-")
+    return "".join(safe)
+
+
 __all__ = [
     "AUTO_BACKEND_ORDER",
     "BackendCapabilityProbe",
     "BackendSelector",
+    "InProcessBackend",
+    "TmuxBackend",
+    "WindowsTerminalBackend",
 ]
