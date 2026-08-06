@@ -32,59 +32,8 @@ class TeamTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name=self._name,
-            description=_TOOL_DESCRIPTIONS[self._name],
-            parameters={
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": sorted(_TOOL_ACTIONS[self._name]),
-                    },
-                    "team_name": {"type": "string"},
-                    "goal": {"type": "string"},
-                    "member_name": {"type": "string"},
-                    "role_name": {"type": "string"},
-                    "role_revision": {"type": "integer"},
-                    "requested_backend": {"type": "string"},
-                    "task_id": {"type": "string"},
-                    "batch_id": {"type": "string"},
-                    "read_only": {"type": "boolean"},
-                    "approval_required": {"type": "boolean"},
-                    "force": {"type": "boolean"},
-                    "message_id": {"type": "string"},
-                    "target_name": {"type": "string"},
-                    "body": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "broadcast": {"type": "boolean"},
-                    "sender": {"type": "string"},
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
-                    "dependency_ids": {"type": "array", "items": {"type": "string"}},
-                    "kind": {"type": "string", "enum": ["code", "read_only"]},
-                    "expected_revision": {"type": "integer"},
-                    "state": {
-                        "type": "string",
-                        "enum": [
-                            "pending",
-                            "claimed",
-                            "awaiting_approval",
-                            "running",
-                            "blocked",
-                            "completed",
-                            "failed",
-                            "cancelled",
-                        ],
-                    },
-                    "approved": {"type": "boolean"},
-                    "reason": {"type": "string"},
-                    "error": {"type": "string"},
-                    "plan_revision": {"type": "integer"},
-                    "commit_id": {"type": "string"},
-                    "verification_summary": {"type": "string"},
-                    "details": {"type": "string"},
-                },
-                "required": ["action"],
-            },
+            description=_tool_description(self._name),
+            parameters=_build_parameters(self._name),
             kind=ToolKind.WRITE,
             requires_approval=False,
             runtime_scope=ToolRuntimeScope.PARENT_ONLY,
@@ -103,7 +52,15 @@ class TeamTool:
             return _failure(self._name, "missing_team_action", "team action is required")
         if action not in _TOOL_ACTIONS[self._name]:
             return _failure(self._name, "unknown_team_action", f"unknown team action: {action}")
-        unknown = set(arguments) - _ACTION_ARGUMENTS[action]
+        spec = _ACTION_SPECS[action]
+        missing = set(spec["required"]) - set(arguments)
+        if missing:
+            return _failure(
+                self._name,
+                "missing_team_argument",
+                f"missing required argument: {sorted(missing)[0]}",
+            )
+        unknown = set(arguments) - set(spec["allowed"])
         if unknown:
             return _failure(
                 self._name,
@@ -435,9 +392,9 @@ class TeamTool:
 
 
 _TOOL_DESCRIPTIONS = {
-    "team": "Create, inspect, and coordinate a persistent local team.",
-    "team_lead": "Coordinate team batches, members, tasks, messages, approvals, and local integration.",
-    "team_member": "Claim team tasks, submit plans, report status, and exchange team messages.",
+    "team": "创建、接管、查看和协调持久化本地团队。",
+    "team_lead": "编排团队批次、成员、任务、消息、审批和本地集成。",
+    "team_member": "领取团队任务、提交计划、报告状态并交换团队消息。",
 }
 
 
@@ -490,146 +447,128 @@ _TOOL_ACTIONS = {
 }
 
 
-_ACTION_ARGUMENTS = {
-    "create": frozenset({"action", "team_name", "goal"}),
-    "attach": frozenset({"action", "team_name", "goal"}),
-    "status": frozenset({"action"}),
-    "start_batch": frozenset({"action", "goal"}),
-    "spawn_member": frozenset(
-        {
-            "action",
-            "member_name",
-            "role_name",
-            "role_revision",
-            "requested_backend",
-            "task_id",
-            "batch_id",
-            "goal",
-            "read_only",
-            "approval_required",
-        }
-    ),
-    "terminate_member": frozenset({"action", "member_name", "force"}),
-    "send_message": frozenset(
-        {
-            "action",
-            "message_id",
-            "target_name",
-            "task_id",
-            "batch_id",
-            "body",
-            "summary",
-            "broadcast",
-            "sender",
-        }
-    ),
-    "create_task": frozenset(
-        {
-            "action",
-            "task_id",
-            "batch_id",
-            "title",
-            "description",
-            "dependency_ids",
-            "kind",
-        }
-    ),
-    "list_tasks": frozenset({"action", "batch_id"}),
-    "get_task": frozenset({"action", "task_id"}),
-    "update_task": frozenset(
-        {
-            "action",
-            "task_id",
-            "expected_revision",
-            "title",
-            "description",
-            "dependency_ids",
-            "kind",
-            "member_name",
-            "plan_revision",
-        }
-    ),
-    "delete_task": frozenset({"action", "task_id", "expected_revision"}),
-    "claim_task": frozenset({"action", "task_id", "member_name", "expected_revision"}),
-    "transition_task": frozenset(
-        {
-            "action",
-            "task_id",
-            "expected_revision",
-            "state",
-            "summary",
-            "commit_id",
-            "verification_summary",
-            "details",
-            "reason",
-            "error",
-        }
-    ),
-    "plan_submit": frozenset(
-        {
-            "action",
-            "message_id",
-            "task_id",
-            "batch_id",
-            "target_name",
-            "expected_revision",
-            "plan_revision",
-            "body",
-            "summary",
-            "sender",
-        }
-    ),
-    "plan_decision": frozenset(
-        {
-            "action",
-            "message_id",
-            "target_name",
-            "task_id",
-            "batch_id",
-            "expected_revision",
-            "plan_revision",
-            "approved",
-            "reason",
-            "body",
-            "summary",
-            "sender",
-        }
-    ),
-    "status_update": frozenset(
-        {
-            "action",
-            "message_id",
-            "target_name",
-            "task_id",
-            "batch_id",
-            "body",
-            "summary",
-            "sender",
-        }
-    ),
-    "shutdown_request": frozenset(
-        {
-            "action",
-            "message_id",
-            "target_name",
-            "body",
-            "summary",
-            "sender",
-        }
-    ),
-    "shutdown_response": frozenset(
-        {
-            "action",
-            "message_id",
-            "target_name",
-            "body",
-            "summary",
-            "sender",
-        }
-    ),
-    "integrate": frozenset({"action", "batch_id"}),
-    "archive": frozenset({"action"}),
+_FIELD_SPECS = {
+    "action": {"type": "string", "description": "要执行的团队动作，必须选择当前工具支持的动作。"},
+    "team_name": {"type": "string", "description": "团队名称，创建或接管团队时使用，必须是非空字符串。"},
+    "goal": {"type": "string", "description": "团队或批次的总体目标，启动批次时必填。"},
+    "member_name": {"type": "string", "description": "团队成员名称；启动、终止或指定任务负责人时使用。"},
+    "role_name": {"type": "string", "description": "成员使用的角色名称，启动成员时必填。"},
+    "role_revision": {"type": "integer", "description": "角色定义版本号，必须使用最近读取到的版本。"},
+    "requested_backend": {
+        "type": "string",
+        "enum": ["auto", "tmux", "terminal", "in_process"],
+        "description": "成员启动方式；auto 表示自动选择可用后端。",
+    },
+    "task_id": {"type": "string", "description": "任务标识；操作已有任务时使用，必须是非空字符串。"},
+    "batch_id": {"type": "string", "description": "批次标识；将任务或成员关联到批次时使用。"},
+    "read_only": {"type": "boolean", "description": "成员是否只能读取工作区；启动成员时必填。"},
+    "approval_required": {"type": "boolean", "description": "成员执行写入操作前是否需要审批；启动成员时必填。"},
+    "force": {"type": "boolean", "description": "终止成员时是否强制执行，默认为 false。"},
+    "message_id": {"type": "string", "description": "消息唯一标识，发送团队消息时必填。"},
+    "target_name": {"type": "string", "description": "消息接收成员名称；广播消息时不使用，成员工具默认发送给 lead。"},
+    "body": {"type": "string", "description": "消息正文或计划内容，发送消息时必填。"},
+    "summary": {"type": "string", "description": "消息或任务结果摘要，可选；未提供时使用正文。"},
+    "broadcast": {"type": "boolean", "description": "是否广播给所有成员；为 true 时不需要 target_name。"},
+    "sender": {"type": "string", "description": "消息发送者名称；成员工具必须与绑定成员一致。"},
+    "title": {"type": "string", "description": "任务标题，创建任务时必填。"},
+    "description": {"type": "string", "description": "任务详细说明，创建任务时必填。"},
+    "dependency_ids": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "任务依赖的任务标识列表，可为空。",
+    },
+    "kind": {
+        "type": "string",
+        "enum": ["code", "read_only"],
+        "description": "任务类型：code 表示编码任务，read_only 表示只读分析任务。",
+    },
+    "expected_revision": {"type": "integer", "description": "并发更新保护版本号，必须使用最近一次读取到的 revision。"},
+    "state": {
+        "type": "string",
+        "enum": ["pending", "claimed", "awaiting_approval", "running", "blocked", "completed", "failed", "cancelled"],
+        "description": "任务目标状态，必须使用列出的状态值。",
+    },
+    "approved": {"type": "boolean", "description": "是否批准计划；拒绝时必须同时提供 reason。"},
+    "reason": {"type": "string", "description": "拒绝计划或说明任务原因；拒绝计划时必填。"},
+    "error": {"type": "string", "description": "任务失败或阻塞时的错误信息，可选。"},
+    "plan_revision": {"type": "integer", "description": "计划版本号，必须与当前任务计划版本匹配。"},
+    "commit_id": {"type": "string", "description": "任务结果对应的提交标识，可选。"},
+    "verification_summary": {"type": "string", "description": "任务结果的验证摘要，可选。"},
+    "details": {"type": "string", "description": "任务结果的补充详情，可选。"},
 }
+
+
+def _action_spec(action: str, description: str, required: tuple[str, ...], allowed: tuple[str, ...]) -> dict[str, object]:
+    fields = ("action",) + tuple(name for name in allowed if name != "action")
+    properties = {name: dict(_FIELD_SPECS[name]) for name in fields}
+    properties["action"]["enum"] = [action]
+    return {"description": description, "required": required, "allowed": frozenset(allowed), "properties": properties}
+
+
+_ACTION_SPECS = {
+    "create": _action_spec("create", "创建或连接一个团队。", ("action", "team_name"), ("action", "team_name", "goal")),
+    "attach": _action_spec("attach", "接管一个已有团队。", ("action", "team_name"), ("action", "team_name", "goal")),
+    "status": _action_spec("status", "查看团队当前状态。", ("action",), ("action",)),
+    "start_batch": _action_spec("start_batch", "启动一个团队批次。", ("action", "goal"), ("action", "goal")),
+    "spawn_member": _action_spec(
+        "spawn_member",
+        "启动一个团队成员。",
+        ("action", "member_name", "role_name", "role_revision", "requested_backend", "task_id", "batch_id", "goal", "read_only", "approval_required"),
+        ("action", "member_name", "role_name", "role_revision", "requested_backend", "task_id", "batch_id", "goal", "read_only", "approval_required"),
+    ),
+    "terminate_member": _action_spec("terminate_member", "终止一个团队成员。", ("action", "member_name"), ("action", "member_name", "force")),
+    "send_message": _action_spec("send_message", "向团队成员发送消息。", ("action", "message_id", "body"), ("action", "message_id", "target_name", "task_id", "batch_id", "body", "summary", "broadcast", "sender")),
+    "create_task": _action_spec("create_task", "创建一个团队任务。", ("action", "task_id", "batch_id", "title", "description", "kind"), ("action", "task_id", "batch_id", "title", "description", "dependency_ids", "kind")),
+    "list_tasks": _action_spec("list_tasks", "列出团队任务。", ("action",), ("action", "batch_id")),
+    "get_task": _action_spec("get_task", "读取一个团队任务。", ("action", "task_id"), ("action", "task_id")),
+    "update_task": _action_spec("update_task", "更新团队任务。", ("action", "task_id", "expected_revision"), ("action", "task_id", "expected_revision", "title", "description", "dependency_ids", "kind", "member_name", "plan_revision")),
+    "delete_task": _action_spec("delete_task", "删除一个团队任务。", ("action", "task_id", "expected_revision"), ("action", "task_id", "expected_revision")),
+    "claim_task": _action_spec("claim_task", "领取一个团队任务。", ("action", "task_id", "expected_revision"), ("action", "task_id", "member_name", "expected_revision")),
+    "transition_task": _action_spec("transition_task", "转换团队任务状态。", ("action", "task_id", "expected_revision", "state"), ("action", "task_id", "expected_revision", "state", "summary", "commit_id", "verification_summary", "details", "reason", "error")),
+    "plan_submit": _action_spec("plan_submit", "提交任务计划并请求审批。", ("action", "message_id", "task_id", "expected_revision", "plan_revision", "body"), ("action", "message_id", "task_id", "batch_id", "target_name", "expected_revision", "plan_revision", "body", "summary", "sender")),
+    "plan_decision": _action_spec("plan_decision", "批准或拒绝任务计划。", ("action", "task_id", "expected_revision", "plan_revision", "approved"), ("action", "message_id", "target_name", "task_id", "batch_id", "expected_revision", "plan_revision", "approved", "reason", "body", "summary", "sender")),
+    "status_update": _action_spec("status_update", "发送成员状态更新。", ("action", "message_id", "body"), ("action", "message_id", "target_name", "task_id", "batch_id", "body", "summary", "sender")),
+    "shutdown_request": _action_spec("shutdown_request", "请求成员完成后停止。", ("action", "message_id", "body"), ("action", "message_id", "target_name", "body", "summary", "sender")),
+    "shutdown_response": _action_spec("shutdown_response", "响应成员停止请求。", ("action", "message_id", "body"), ("action", "message_id", "target_name", "body", "summary", "sender")),
+    "integrate": _action_spec("integrate", "集成一个已完成批次。", ("action", "batch_id"), ("action", "batch_id")),
+    "archive": _action_spec("archive", "归档当前团队。", ("action",), ("action",)),
+}
+
+# 兼容旧的内部引用；允许字段集合始终从动作规格派生。
+_ACTION_ARGUMENTS = {action: spec["allowed"] for action, spec in _ACTION_SPECS.items()}
+
+
+def _build_parameters(tool_name: str) -> dict[str, object]:
+    actions = sorted(_TOOL_ACTIONS[tool_name])
+    properties = {name: dict(spec) for name, spec in _FIELD_SPECS.items()}
+    properties["action"]["enum"] = actions
+    branches = []
+    for action in actions:
+        spec = _ACTION_SPECS[action]
+        branches.append(
+            {
+                "type": "object",
+                "description": spec["description"],
+                "properties": spec["properties"],
+                "required": list(spec["required"]),
+                "additionalProperties": False,
+            }
+        )
+    return {
+        "type": "object",
+        "description": "必须提供 action。不同 action 使用不同参数；请只提供对应动作允许的字段。",
+        "properties": properties,
+        "required": ["action"],
+        "oneOf": branches,
+    }
+
+
+def _tool_description(tool_name: str) -> str:
+    action_lines = "；".join(
+        f"{action}：{_ACTION_SPECS[action]['description']}必填 {', '.join(_ACTION_SPECS[action]['required'][1:]) or '无额外参数'}"
+        for action in sorted(_TOOL_ACTIONS[tool_name])
+    )
+    return f"{_TOOL_DESCRIPTIONS[tool_name]}必须提供 action。不同 action 使用不同参数：{action_lines}"
 
 
 def _success(tool_name: str, content: dict[str, Any]) -> ToolResult:
