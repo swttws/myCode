@@ -319,11 +319,13 @@ Stage 13 does not automatically merge worktree branches, does not automatically 
 
 ## Stage 14 Team coordination
 
-Stage 14 adds a local, persistent team coordinator. The parent runtime exposes a `team` tool that can create or attach to a team under `~/.mycode/teams/<team-name>/`, start batches, spawn members in controlled `mycode/team/...` worktrees, send mailbox messages, integrate completed local commits, and archive quiet teams.
+Stage 14 adds a local, persistent team coordinator. Stage 15 exposes atomic team tools under `~/.mycode/teams/<team-name>/`: `team_create`, `team_attach`, `team_status`, `team_archive`, `team_batch_start`, `team_batch_integrate`, `team_member_spawn`, `team_member_terminate`, `team_task_create`, `team_task_list`, `team_task_get`, `team_task_update`, `team_task_delete`, `team_task_claim`, `team_task_transition`, `team_plan_submit`, `team_plan_decide`, `team_message_send`, `team_status_update`, `team_shutdown_request`, and `team_shutdown_response`.
 
 Team state is file-backed and guarded by local leases. Member mailboxes are JSONL files with checkpoint-before-ack semantics, and member context is stored separately so replayed messages can be deduplicated after restart. Integration is local-only: completed code task commits are merged in dependency order into an integration worktree and the target branch ref is updated locally; Stage 14 never pushes or rewrites remotes.
 
 The optional `team` config section controls member limits, backend priority, coordinator mode, and graceful shutdown timing. See `examples/mycode.team.yaml` for a complete starter config.
+
+主会话未激活时只显示创建、接管和状态工具；Lead 显示批次、成员、任务、计划决策、消息、关停请求和归档工具；Member 只显示任务、计划提交、消息、状态更新和关停响应工具。工具参数和用户可见错误使用中文。旧的 `team`、`team_lead`、`team_member` 名称已移除，配置或 Skill 仍引用这些名称时会在加载阶段报迁移错误。
 
 ## 核心工具
 

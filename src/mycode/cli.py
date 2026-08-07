@@ -59,7 +59,7 @@ from mycode.team.config import TeamConfig
 from mycode.team.policy import TeamPermissionInterceptor
 from mycode.team.service import TeamService
 from mycode.team.storage import TeamStore
-from mycode.team.tool import TeamTool
+from mycode.team.tools import register_parent_team_tools
 from mycode.team import worker as team_worker
 from mycode.tool import ToolExecutor, create_default_tool_registry
 from mycode.tui import ChatTUI
@@ -220,9 +220,7 @@ async def _run_application(
             workspace_root,
             path_guard=permissions.path_guard,
         )
-        tool_registry.register(TeamTool(service=team_service))
-        tool_registry.register(TeamTool(service=team_service, name="team_lead"))
-        tool_registry.register(TeamTool(service=team_service, name="team_member"))
+        register_parent_team_tools(tool_registry, team_service)
         agent_config = AgentConfig()
         try:
             context_manager = create_context_manager(

@@ -10,7 +10,7 @@ from mycode.team.mailbox import MailboxStore
 from mycode.team.models import MemberState, MessageProtocol, TeamMessage, TeamTaskState
 from mycode.team.storage import TeamStore
 from mycode.team.tasks import TaskBoard
-from mycode.team.tool import TeamTool
+from mycode.team.tools import register_member_team_tools
 
 
 class TeamMemberRuntime:
@@ -36,18 +36,20 @@ class TeamMemberRuntime:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._mailbox.register_lead()
         if tool_registry is not None:
-            tool = member_tool or TeamTool(
-                service=_MemberRuntimeToolService(
-                    team_name=team_name,
+            if member_tool is not None:
+                tool_registry.register(member_tool)
+            else:
+                register_member_team_tools(
+                    tool_registry,
+                    _MemberRuntimeToolService(
+                        team_name=team_name,
+                        member_name=member_name,
+                        store=store,
+                        mailbox=mailbox,
+                        config=getattr(mailbox, "_config", None),
+                    ),
                     member_name=member_name,
-                    store=store,
-                    mailbox=mailbox,
-                    config=getattr(mailbox, "_config", None),
-                ),
-                name="team_member",
-                member_name=member_name,
-            )
-            tool_registry.register(tool)
+                )
 
     async def run_until_idle(self) -> None:
         self._memory.reload()

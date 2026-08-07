@@ -22,6 +22,7 @@ from mycode.permission.models import (
     PermissionSessionState,
     RuleSource,
 )
+from mycode.team.tool_names import LEGACY_TEAM_TOOL_NAMES
 
 
 _RULE_FIELDS = {"id", "effect", "tool", "arguments"}
@@ -97,6 +98,8 @@ def _parse_rule(item: object, index: int, path: Path, source: RuleSource) -> Per
         raise _error(path, f"{location}.id 必须是非空字符串")
     if not isinstance(tool, str) or not tool.strip():
         raise _error(path, f"{location}.tool 必须是非空字符串")
+    if tool in LEGACY_TEAM_TOOL_NAMES:
+        raise _error(path, f"{location}.tool 使用了已移除的旧团队工具 {tool}，请改用新的 team_* 工具名")
     if tool != "*" and any(character in tool for character in _GLOB_TOOL_CHARACTERS):
         raise _error(path, f"{location}.tool 只允许精确名称或单独的 *")
 
