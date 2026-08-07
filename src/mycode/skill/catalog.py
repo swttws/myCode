@@ -13,6 +13,7 @@ from mycode.skill.models import (
     SkillSource,
     SkillStartupError,
 )
+from mycode.team.tool_names import LEGACY_TEAM_TOOL_NAMES
 
 
 class SkillCatalog:
@@ -123,12 +124,18 @@ class SkillCatalog:
         for definition in definitions:
             unknown_tools = sorted(set(definition.metadata.allowed_tools) - available_tools)
             if unknown_tools:
+                legacy = sorted(set(unknown_tools) & LEGACY_TEAM_TOOL_NAMES)
+                message = (
+                    f"已移除旧团队工具：{', '.join(legacy)}，请改用新的 team_* 工具名"
+                    if legacy
+                    else f"未知工具：{', '.join(unknown_tools)}"
+                )
                 diagnostics.append(
                     SkillDiagnostic(
                         code="unknown_tool",
                         source=definition.source,
                         path=str(definition.entry_path),
-                        message=f"未知工具：{', '.join(unknown_tools)}",
+                        message=message,
                         skill_name=definition.metadata.name,
                     )
                 )

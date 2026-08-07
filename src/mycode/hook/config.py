@@ -17,6 +17,7 @@ from mycode.hook.models import (
     HookRule,
 )
 from mycode.hook.matcher import parse_matcher
+from mycode.team.tool_names import LEGACY_TEAM_TOOL_NAMES
 
 
 _TOP_LEVEL_FIELDS = {"version", "hooks"}
@@ -130,13 +131,17 @@ def _parse_condition(raw: object, *, location: str) -> HookCondition | None:
     if not isinstance(predicates_raw, Mapping) or not predicates_raw:
         raise HookConfigError(f"{location}.{mode} 必须是非空 mapping")
     predicates = tuple(
-        HookPredicate(
-            field=_parse_field_name(field, location=f"{location}.{mode}"),
-            matcher=parse_matcher(value, location=f"{location}.{mode}.{field}"),
-        )
+        _parse_predicate(field, value, location=f"{location}.{mode}")
         for field, value in predicates_raw.items()
     )
     return HookCondition(mode=mode, predicates=predicates)
+
+
+def _parse_predicate(field: object, value: object, *, location: str) -> HookPredicate:
+    field_name = _parse_field_name(field, location=location)
+    if field_name == "tool" and isinstance(value, str) and value in LEGACY_TEAM_TOOL_NAMES:
+        raise HookConfigError(f"{location}.tool 使用了已移除的旧团队工具 {value}，请改用新的 team_* 工具名")
+    return HookPredicate(field=field_name, matcher=parse_matcher(value, location=f"{location}.{field_name}"))
 
 
 def _parse_action(raw: object, *, event: HookEvent, location: str) -> HookAction:

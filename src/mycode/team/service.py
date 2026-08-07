@@ -34,6 +34,7 @@ from mycode.team.models import (
     WakeEndpoint,
 )
 from mycode.team.policy import TeamRuntimeRole, TeamToolPolicy
+from mycode.team.tool_names import LEAD_TEAM_TOOL_NAMES, PARENT_TEAM_TOOL_NAMES
 from mycode.team.storage import TeamStore
 from mycode.team.tasks import TaskBoard
 
@@ -80,7 +81,21 @@ class TeamService:
             raise TeamError(code="team_inactive", phase="task_board", message="team is not active")
         return self._task_board
 
+    async def create_team(self, team_name: str, *, goal: str | None = None) -> TeamSnapshot:
+        if (self._store.team_root(team_name) / "team.json").exists():
+            raise TeamError(code="team_exists", phase="create", message="团队已存在", team_name=team_name)
+        return await self._activate_team(team_name, goal=goal, create=True)
+
+    async def attach_team(self, team_name: str) -> TeamSnapshot:
+        if not (self._store.team_root(team_name) / "team.json").exists():
+            raise TeamError(code="team_not_found", phase="attach", message="团队不存在", team_name=team_name)
+        return await self._activate_team(team_name, goal=None, create=False)
+
     async def create_or_attach(self, team_name: str, *, goal: str | None = None) -> TeamSnapshot:
+        """Compatibility entry retained for Stage 14 callers; new tools use explicit entrances."""
+        return await self._activate_team(team_name, goal=goal, create=not (self._store.team_root(team_name) / "team.json").exists())
+
+    async def _activate_team(self, team_name: str, *, goal: str | None, create: bool) -> TeamSnapshot:
         if self._team_name == team_name and self._lead_lease is not None:
             return self._with_lease(self._load_and_register(team_name))
         file_lease = await FileLease.acquire(
@@ -100,7 +115,7 @@ class TeamService:
             expires_at=file_lease.acquired_at + timedelta(seconds=self._config.lock_stale_after_seconds),
         )
         self._team_name = team_name
-        if not (self._store.team_root(team_name) / "team.json").exists():
+        if create:
             now = self._clock()
             snapshot = self._store.create(
                 TeamRecord(
@@ -431,10 +446,10 @@ class TeamService:
 
     def visible_team_tools(self, candidates: frozenset[str] | None = None) -> frozenset[str]:
         if candidates is None:
-            candidates = frozenset({"team", "team_lead", "team_member", "read_file", "write_file", "edit_file", "run_command", "Agent"})
+            candidates = LEAD_TEAM_TOOL_NAMES | PARENT_TEAM_TOOL_NAMES | frozenset({"read_file", "write_file", "edit_file", "run_command", "Agent"})
         policy = self.current_policy()
         if policy is None:
-            return frozenset(name for name in candidates if name not in {"team_lead", "team_member"})
+            return frozenset(name for name in candidates if name in PARENT_TEAM_TOOL_NAMES or name in {"read_file", "write_file", "edit_file", "run_command", "Agent"})
         return policy.visible_names(candidates)
 
     def _load_and_register(self, team_name: str) -> TeamSnapshot:

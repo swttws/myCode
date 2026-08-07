@@ -17,6 +17,7 @@ from mycode.subagent.models import (
     AgentRoleMetadata,
     AgentRoleSource,
 )
+from mycode.team.tool_names import LEGACY_TEAM_TOOL_NAMES
 
 
 MAX_ROLE_FILE_BYTES = 128 * 1024
@@ -243,6 +244,9 @@ class AgentRoleLoader:
             return self._diagnostic(role_name, source, path, "invalid_denied_tools")
         unknown = [value for value in values if value != "*" and value not in self._known_tool_names]
         if unknown:
+            legacy = sorted(set(unknown) & LEGACY_TEAM_TOOL_NAMES)
+            if legacy:
+                return self._diagnostic(role_name, source, path, "legacy_team_tool")
             return self._diagnostic(role_name, source, path, "unknown_tool")
         return tuple(values)
 
@@ -310,10 +314,13 @@ class AgentRoleLoader:
         path: Path,
         code: str,
     ) -> AgentRoleDiagnostic:
+        message = f"角色 {role_name} 无效：{code}"
+        if code == "legacy_team_tool":
+            message = f"角色 {role_name} 引用了已移除的旧团队工具，请改用新的 team_* 工具名"
         return AgentRoleDiagnostic(
             code=code,
             source=source,
             path=str(path),
-            message=f"角色 {role_name} 无效：{code}",
+            message=message,
             role_name=role_name,
         )

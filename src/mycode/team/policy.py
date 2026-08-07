@@ -8,6 +8,7 @@ from types import MappingProxyType
 
 from mycode.permission.models import PermissionDecision, PermissionEffect, PermissionMode
 from mycode.tool import ToolCall, ToolDefinition, ToolKind, ToolResult
+from mycode.team.tool_names import LEAD_TEAM_TOOL_NAMES, MEMBER_TEAM_TOOL_NAMES, PARENT_TEAM_TOOL_NAMES
 
 
 class TeamRuntimeRole(str, Enum):
@@ -16,13 +17,13 @@ class TeamRuntimeRole(str, Enum):
     MEMBER = "member"
 
 
-_PARENT_TOOLS = frozenset({"team"})
-_LEAD_CONTROL_TOOLS = frozenset({"team", "team_lead"})
-_MEMBER_CONTROL_TOOLS = frozenset({"team_member"})
+_PARENT_TOOLS = PARENT_TEAM_TOOL_NAMES
+_LEAD_CONTROL_TOOLS = LEAD_TEAM_TOOL_NAMES
+_MEMBER_CONTROL_TOOLS = MEMBER_TEAM_TOOL_NAMES
 _LOCAL_EDIT_TOOLS = frozenset({"read_file", "write_file", "edit_file", "run_command"})
 _LEAD_EXTRA_TOOLS = frozenset({"Agent", "find_files", "search_code"})
-_COORDINATOR_TOOLS = frozenset({"team", "team_lead", "read_file", "run_command"})
-_COORDINATOR_WRITE_TOOLS = frozenset({"team", "team_lead"})
+_COORDINATOR_TOOLS = LEAD_TEAM_TOOL_NAMES | frozenset({"read_file", "run_command"})
+_COORDINATOR_WRITE_TOOLS = LEAD_TEAM_TOOL_NAMES
 _LOCAL_GIT_READ_COMMANDS = frozenset(
     {
         "branch",
@@ -72,20 +73,20 @@ class TeamToolPolicy:
         if call.name != definition.name:
             return self._deny(
                 "team_tool_mismatch",
-                "tool call does not match definition",
+                "工具调用与定义不匹配",
                 self.mode,
                 MappingProxyType({}),
             )
         if (
             self.role is TeamRuntimeRole.MEMBER
-            and call.name != "team_member"
+            and call.name not in _MEMBER_CONTROL_TOOLS
             and definition.kind is ToolKind.WRITE
             and self.member_write_allowed_provider is not None
             and not self.member_write_allowed_provider()
         ):
             return self._deny(
                 "member_approval_required",
-                "member plan approval is required before workspace writes",
+                "成员在写入工作区前需要计划审批",
                 self.mode,
                 _display_arguments(call.arguments),
             )
@@ -93,7 +94,7 @@ class TeamToolPolicy:
             if call.name == "Agent":
                 return self._deny(
                     "coordinator_agent_forbidden",
-                    "coordinator mode cannot launch sub-agents",
+                "协调器模式不能启动子 Agent",
                     self.mode,
                     _display_arguments(call.arguments),
                 )
@@ -103,7 +104,7 @@ class TeamToolPolicy:
                     return self._allow(_display_arguments(call.arguments))
                 return self._deny(
                     "coordinator_shell_forbidden",
-                    "coordinator mode only allows local git inspection commands",
+                    "协调器模式只允许本地 Git 检查命令",
                     self.mode,
                     _display_arguments(call.arguments),
                 )
@@ -112,14 +113,14 @@ class TeamToolPolicy:
             if definition.kind is ToolKind.WRITE:
                 return self._deny(
                     "coordinator_write_forbidden",
-                    "coordinator mode cannot use write tools",
+                    "协调器模式不能使用该写入工具",
                     self.mode,
                     _display_arguments(call.arguments),
                 )
         if call.name not in self.visible_names(frozenset({call.name})):
             return self._deny(
                 "team_tool_hidden",
-                "tool is hidden for this team runtime role",
+                "该工具对当前团队角色不可见",
                 self.mode,
                 _display_arguments(call.arguments),
             )
@@ -142,7 +143,7 @@ class TeamToolPolicy:
         return PermissionDecision(
             effect=PermissionEffect.ALLOW,
             reason_code="team_tool_allowed",
-            message_zh="team tool allowed.",
+            message_zh="团队工具允许执行。",
             mode=self.mode,
             display_arguments=display_arguments,
         )
@@ -150,7 +151,7 @@ class TeamToolPolicy:
     def _deny(
         self,
         reason_code: str,
-        message: str,
+            message: str,
         mode: PermissionMode,
         display_arguments: Mapping[str, object],
     ) -> PermissionDecision:

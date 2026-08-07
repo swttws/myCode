@@ -16,6 +16,7 @@ from mycode.subagent.models import (
     AgentModelTier,
     SubAgentConfig,
 )
+from mycode.team.tool_names import LEGACY_TEAM_TOOL_NAMES
 
 
 _REQUIRED_MODEL_TIERS = (AgentModelTier.HAIKU, AgentModelTier.SONNET, AgentModelTier.OPUS)
@@ -73,6 +74,13 @@ def validate_subagent_tool_names(config: SubAgentConfig, available_tool_names: s
         if tool_name not in available_tool_names
     ]
     if unknown:
+        legacy = sorted(set(unknown) & LEGACY_TEAM_TOOL_NAMES)
+        if legacy:
+            raise ConfigError(
+                "sub_agent.background_allowed_tools 包含已移除的旧团队工具："
+                + ", ".join(legacy)
+                + "；请改用新的 team_* 工具名"
+            )
         raise ConfigError(
             "sub_agent.background_allowed_tools contains unknown tool: "
             + ", ".join(sorted(unknown))
