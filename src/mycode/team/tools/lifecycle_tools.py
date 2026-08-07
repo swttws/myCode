@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 from mycode.tool import ToolDefinition, ToolKind, ToolRuntimeScope
-from mycode.team.tool_helpers import error_result, field, failure_result, maybe_await, optional_string, required_string, schema, success_result, validate_object_arguments
+from mycode.team.tool_helpers import (
+    error_result,
+    field,
+    failure_result,
+    maybe_await,
+    optional_string,
+    required_string,
+    schema,
+    success_result,
+    validate_object_arguments,
+)
 
 
 class _LifecycleTool:
@@ -16,7 +26,14 @@ class _LifecycleTool:
 
     @property
     def definition(self) -> ToolDefinition:
-        return ToolDefinition(self.tool_name, self.description, schema(self.properties, self.required), self.kind, requires_approval=False, runtime_scope=ToolRuntimeScope.PARENT_ONLY)
+        return ToolDefinition(
+            self.tool_name,
+            self.description,
+            schema(self.properties, self.required),
+            self.kind,
+            requires_approval=False,
+            runtime_scope=ToolRuntimeScope.PARENT_ONLY,
+        )
 
     async def execute_async(self, arguments, context=None):
         invalid = validate_object_arguments(arguments, self.properties, self.tool_name)
@@ -25,7 +42,12 @@ class _LifecycleTool:
         arguments = arguments or {}
         missing = [name for name in self.required if name not in arguments]
         if missing:
-            return failure_result(self.tool_name, "missing_argument", f"缺少必填参数：{missing[0]}", missing[0])
+            return failure_result(
+                self.tool_name,
+                "missing_argument",
+                f"缺少必填参数：{missing[0]}",
+                missing[0],
+            )
         try:
             return await self._execute(arguments)
         except Exception as exc:
@@ -35,16 +57,28 @@ class _LifecycleTool:
 class TeamCreateTool(_LifecycleTool):
     tool_name = "team_create"
     description = "创建一个新的持久化团队。"
-    properties = {"team_name": field("团队名称，必须是非空字符串。"), "goal": field("团队总体目标，可选。")}
+    properties = {
+        "team_name": field("团队名称，必须是非空字符串。"),
+        "goal": field("团队总体目标，可选。"),
+    }
     required = ("team_name",)
 
     async def _execute(self, arguments):
         name = required_string(arguments, "team_name", self.tool_name)
-        if not isinstance(name, str): return name
+        if not isinstance(name, str):
+            return name
         goal = optional_string(arguments, "goal", self.tool_name)
-        if not isinstance(goal, (str, type(None))): return goal
+        if not isinstance(goal, (str, type(None))):
+            return goal
         snapshot = await maybe_await(self._service.create_team(name, goal=goal))
-        return success_result(self.tool_name, {"team_name": snapshot.team.team_name, "state": snapshot.team.state.value, "activated": True})
+        return success_result(
+            self.tool_name,
+            {
+                "team_name": snapshot.team.team_name,
+                "state": snapshot.team.state.value,
+                "activated": True,
+            },
+        )
 
 
 class TeamAttachTool(_LifecycleTool):
@@ -55,9 +89,17 @@ class TeamAttachTool(_LifecycleTool):
 
     async def _execute(self, arguments):
         name = required_string(arguments, "team_name", self.tool_name)
-        if not isinstance(name, str): return name
+        if not isinstance(name, str):
+            return name
         snapshot = await maybe_await(self._service.attach_team(name))
-        return success_result(self.tool_name, {"team_name": snapshot.team.team_name, "state": snapshot.team.state.value, "activated": True})
+        return success_result(
+            self.tool_name,
+            {
+                "team_name": snapshot.team.team_name,
+                "state": snapshot.team.state.value,
+                "activated": True,
+            },
+        )
 
 
 class TeamStatusTool(_LifecycleTool):
@@ -67,7 +109,15 @@ class TeamStatusTool(_LifecycleTool):
 
     async def _execute(self, arguments):
         snapshot = await maybe_await(self._service.status())
-        return success_result(self.tool_name, {"team_name": snapshot.team.team_name, "state": snapshot.team.state.value, "member_count": len(snapshot.members), "batch_count": len(snapshot.batches)})
+        return success_result(
+            self.tool_name,
+            {
+                "team_name": snapshot.team.team_name,
+                "state": snapshot.team.state.value,
+                "member_count": len(snapshot.members),
+                "batch_count": len(snapshot.batches),
+            },
+        )
 
 
 class TeamArchiveTool(_LifecycleTool):
@@ -76,7 +126,14 @@ class TeamArchiveTool(_LifecycleTool):
 
     async def _execute(self, arguments):
         team = await maybe_await(self._service.archive())
-        return success_result(self.tool_name, {"team_name": team.team_name, "state": team.state.value, "archived": team.state.value == "archived"})
+        return success_result(
+            self.tool_name,
+            {
+                "team_name": team.team_name,
+                "state": team.state.value,
+                "archived": team.state.value == "archived",
+            },
+        )
 
 
 __all__ = ["TeamCreateTool", "TeamAttachTool", "TeamStatusTool", "TeamArchiveTool"]
