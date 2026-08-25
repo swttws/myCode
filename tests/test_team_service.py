@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,10 +21,11 @@ from mycode.team import (
     TeamTask,
     TeamTaskState,
 )
-from mycode.team.backends import BackendSelector
-from mycode.team.config import TeamConfig
-from mycode.team.service import TeamService
-from mycode.team.storage import TeamStore
+from mycode.team.execution.backends import BackendSelector
+from mycode.team.infrastructure.config import TeamConfig
+from mycode.team.application.service import TeamService
+from mycode.team.domain.state import TeamPhase, TeamRuntimeRole
+from mycode.team.infrastructure.storage import TeamStore
 
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -219,6 +221,49 @@ def test_team_service_visible_tools_keep_normal_cli_before_team_activation(tmp_p
     assert service.visible_team_tools(candidates) == frozenset({"team", "read_file", "edit_file", "run_command"})
 
 
+def test_team_service_promotes_root_to_coordinator_lead_and_updates_manifest(tmp_path: Path):
+    async def scenario() -> None:
+        service = make_service(tmp_path)
+
+        assert service.runtime_state().phase is TeamPhase.INACTIVE
+
+        await service.create_or_attach("team-a", goal="ship feature")
+        ready = service.runtime_state()
+        assert ready.role is TeamRuntimeRole.LEAD
+        assert ready.phase is TeamPhase.LEAD_READY
+        assert ready.coordinator_mode is True
+        assert ready.ordinary_agent_allowed is False
+        assert ready.local_write_allowed is False
+        assert "唯一 Team Lead" in service.prompt_context()
+        assert "Agent" not in service.visible_team_tools()
+        assert "write_file" not in service.visible_team_tools()
+
+        batch = await service.start_batch("ship feature")
+        planning = service.runtime_state()
+        assert planning.phase is TeamPhase.TASK_PLANNING
+        assert planning.batch_id == batch.batch_id
+        assert planning.manifest_epoch > ready.manifest_epoch
+        assert "team_task_create" in service.visible_team_tools()
+        assert "team_member_spawn" not in service.visible_team_tools()
+
+        task = service.create_task(
+            TeamTask(
+                task_id="task-1",
+                batch_id=batch.batch_id,
+                title="Build piece",
+                description="Implement the first piece",
+                dependency_ids=(),
+                kind=TaskKind.CODE,
+            )
+        )
+        dispatch = service.runtime_state()
+        assert task.batch_id == batch.batch_id
+        assert dispatch.phase is TeamPhase.DISPATCH_READY
+        assert "team_member_spawn" in service.visible_team_tools()
+
+    asyncio.run(scenario())
+
+
 def test_team_service_create_attach_and_release_lead_lease(tmp_path: Path):
     async def scenario():
         service = make_service(tmp_path)
@@ -243,6 +288,100 @@ def test_team_service_create_attach_and_release_lead_lease(tmp_path: Path):
         assert reattached.lead_lease is not None
 
     asyncio.run(scenario())
+
+
+def test_team_service_activate_registers_lead_event_subscription(tmp_path: Path):
+    async def scenario():
+        service = make_service(tmp_path)
+
+        await service.create_or_attach("team-a", goal="ship feature")
+
+        assert service.event_store.registered_roles() == ("lead",)
+        assert service.event_notifier.queue_for("lead") is not None
+        assert service._events is not None
+
+    asyncio.run(scenario())
+
+
+def test_team_service_attach_restores_lead_and_member_event_subscriptions(tmp_path: Path):
+    async def scenario():
+        service = make_service(tmp_path)
+        await spawn_service_member(service, member_name="dev")
+        await service.send_message(
+            TeamMessage(
+                message_id="pending-dev",
+                protocol=MessageProtocol.MESSAGE,
+                sender="lead",
+                target_name="dev",
+                broadcast=False,
+                body="continue",
+                summary="continue",
+                timestamp=NOW,
+            )
+        )
+        await service.clear_session()
+
+        attached = make_service(tmp_path)
+        await attached.create_or_attach("team-a")
+
+        assert set(attached.event_store.registered_roles()) == {"lead", "dev"}
+        assert attached.event_notifier.queue_for("lead") is not None
+        assert attached.event_notifier.queue_for("dev") is not None
+        assert attached.event_store.next_event("dev") is not None
+        assert attached.event_notifier.queue_for("dev").qsize() == 1
+
+    asyncio.run(scenario())
+
+
+def test_team_service_cleans_up_activation_state_after_create_failure(tmp_path: Path):
+    async def scenario():
+        service = make_service(tmp_path)
+        original_create = service._store.create
+
+        def fail_create(record):
+            raise RuntimeError("create failed")
+
+        service._store.create = fail_create  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="create failed"):
+            await service.create_or_attach("team-a")
+
+        assert service._team_name is None
+        assert service._lead_lease is None
+        assert service._lead_file_lease is None
+        assert service._events is None
+        assert service._task_board is None
+        assert service._backend_handles == {}
+        assert not service._store.lead_lock_path("team-a").exists()
+
+        service._store.create = original_create  # type: ignore[method-assign]
+        snapshot = await service.create_or_attach("team-a")
+        assert snapshot.team.team_name == "team-a"
+        await service.clear_session()
+
+    asyncio.run(scenario())
+
+
+def test_team_service_logs_activation_status_archive_and_session_lifecycle(tmp_path: Path, caplog):
+    async def scenario():
+        service = make_service(tmp_path)
+        with caplog.at_level(logging.INFO, logger="mycode.team.service"):
+            await service.create_or_attach("team-a", goal="initial goal")
+            await service.status()
+            await service.archive()
+            await service.clear_session()
+
+    asyncio.run(scenario())
+
+    messages = [record.message for record in caplog.records if record.name == "mycode.team.service"]
+    assert "team.activate.started" in messages
+    assert "team.activate.completed" in messages
+    assert "team.status.started" in messages
+    assert "team.status.completed" in messages
+    assert "team.archive.started" in messages
+    assert "team.archive.completed" in messages
+    assert "team.session.cleared" in messages
+    assert any(record.team_name == "team-a" for record in caplog.records if record.name == "mycode.team.service")
 
 
 def test_team_service_start_batch_and_spawn_member_persist_registration(tmp_path: Path):
@@ -277,7 +416,6 @@ def test_team_service_start_batch_and_spawn_member_persist_registration(tmp_path
         assert member.member_name == "dev"
         assert member.role_revision == 7
         assert member.state is MemberState.RUNNING
-        assert member.mailbox_path is not None
         assert member.context_path is not None
         assert member.wake_endpoint is not None
         assert service.store.load("team-a").members == (member,)
@@ -301,6 +439,150 @@ def test_team_service_start_batch_and_spawn_member_persist_registration(tmp_path
         assert receipt.recipient_names == ("dev",)
 
     asyncio.run(scenario())
+
+
+def test_team_service_spawn_member_derives_minimal_lead_parameters(tmp_path: Path):
+    async def scenario():
+        backend = FakeBackend()
+        service = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=backend,
+        )
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("ship feature")
+        task = service.create_task(
+            TeamTask(
+                task_id="task-1",
+                batch_id=batch.batch_id,
+                title="Build piece",
+                description="Implement the first piece",
+                dependency_ids=(),
+                kind=TaskKind.CODE,
+            )
+        )
+
+        member = await service.spawn_member(
+            member_name="dev",
+            role_name="builder",
+            task_id=task.task_id,
+            goal="ship feature",
+        )
+
+        assert member.batch_id == batch.batch_id
+        assert member.role_revision == 0
+        assert member.requested_backend is MemberBackend.AUTO
+        assert member.approval_required is True
+        assert backend.started[0].read_only is False
+        assert backend.started[0].approval_required is True
+
+    asyncio.run(scenario())
+
+
+def test_team_service_spawn_member_delivers_assignment_and_wakes_member(tmp_path: Path):
+    async def scenario():
+        backend = FakeBackend()
+        service = make_service_with_backend(
+            tmp_path,
+            backend_selector=BackendSelector(capability_probe=lambda backend, env: True),
+            backend=backend,
+        )
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("ship feature")
+        task = service.create_task(
+            TeamTask(
+                task_id="task-1",
+                batch_id=batch.batch_id,
+                title="Build piece",
+                description="Implement the first piece",
+                dependency_ids=(),
+                kind=TaskKind.CODE,
+            )
+        )
+
+        await service.spawn_member(
+            member_name="dev",
+            role_name="builder",
+            task_id=task.task_id,
+            goal="Implement the first piece",
+        )
+
+        event = service.event_store.next_event("dev")
+        assert event is not None
+        assert event.message.protocol is MessageProtocol.TASK_ASSIGNMENT
+        assert event.message.task_id == task.task_id
+        assert event.message.batch_id == batch.batch_id
+        assert "Implement the first piece" in event.message.body
+        assert service.event_notifier.queue_for("dev") is not None
+        assert backend.woken
+
+    asyncio.run(scenario())
+
+
+def test_team_service_logs_batch_member_message_and_wake_lifecycle(tmp_path: Path, caplog):
+    async def scenario():
+        service = make_service(tmp_path)
+        with caplog.at_level(logging.INFO, logger="mycode.team.service"):
+            await spawn_service_member(service)
+            await service.send_message(
+                TeamMessage(
+                    message_id="msg-1",
+                    protocol=MessageProtocol.MESSAGE,
+                    sender="lead",
+                    target_name="dev",
+                    broadcast=False,
+                    body="continue",
+                    summary="continue",
+                    timestamp=NOW,
+                )
+            )
+            await service.terminate_member("dev", force=True)
+
+    asyncio.run(scenario())
+
+    messages = [record.message for record in caplog.records if record.name == "mycode.team.service"]
+    assert "team.batch.started" in messages
+    assert "team.member.spawn.started" in messages
+    assert "team.member.spawn.completed" in messages
+    assert "team.member.wake.started" in messages
+    assert "team.message.sent" in messages
+    assert "team.member.terminate.completed" in messages
+    assert any(getattr(record, "member_name", None) == "dev" for record in caplog.records if record.name == "mycode.team.service")
+
+
+def test_team_service_logs_batch_integration(tmp_path: Path, caplog, monkeypatch):
+    class FakeIntegrationService:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def integrate(self, batch_id, *, lead_workspace_root):
+            return type(
+                "Report",
+                (),
+                {
+                    "batch_id": batch_id,
+                    "state": BatchState.COMPLETED,
+                    "result_commit_id": COMMIT,
+                    "conflict_task_id": None,
+                    "integrated_member_names": (),
+                },
+            )()
+
+    monkeypatch.setattr("mycode.team.application.service.IntegrationService", FakeIntegrationService)
+
+    async def scenario():
+        service = make_service(tmp_path)
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("ship feature")
+        with caplog.at_level(logging.INFO, logger="mycode.team.service"):
+            report = await service.integrate_batch(batch.batch_id)
+        assert report.batch_id == batch.batch_id
+
+    asyncio.run(scenario())
+
+    messages = [record.message for record in caplog.records if record.name == "mycode.team.service"]
+    assert "team.batch.integrate.started" in messages
+    assert "team.batch.integrate.completed" in messages
 
 
 def test_team_service_clear_session_gracefully_stops_only_in_process_members(tmp_path: Path):
@@ -365,7 +647,12 @@ def test_team_service_clear_session_gracefully_stops_only_in_process_members(tmp
 
         await service.clear_session()
 
-        assert backend.stopped == []
+        # Reattach restores the persisted in-process dev runtime. Clearing the
+        # new session stops that recovered runtime, while the external TMUX
+        # member remains untouched.
+        assert len(backend.stopped) == 1
+        assert backend.stopped[0][0].wake_endpoint.backend is ResolvedBackend.IN_PROCESS
+        assert backend.stopped[0][1] is False
 
     asyncio.run(scenario())
 
@@ -458,7 +745,7 @@ def test_team_service_persists_and_registers_member_before_backend_start(tmp_pat
             stored = service.store.load(spec.team_name)
             member = next(item for item in stored.members if item.member_name == spec.member_name)
             assert member.state is MemberState.PROVISIONING
-            service._mailbox_or_error().receive(spec.member_name)
+            assert service.event_store is not None
             return await super().start(spec)
 
     async def scenario():
@@ -548,9 +835,9 @@ def test_team_service_terminate_waits_for_shutdown_response_before_stopping(tmp_
         async def stop(self, handle, *, force: bool):
             self.observed.append(
                 any(
-                    message.protocol is MessageProtocol.SHUTDOWN_RESPONSE
-                    and message.sender == "dev"
-                    for message in service._mailbox_or_error().receive("lead")
+                    event.message.protocol is MessageProtocol.SHUTDOWN_RESPONSE
+                    and event.message.sender == "dev"
+                    for event in service.event_store.events_for_role("lead")
                 )
             )
             await super().stop(handle, force=force)
@@ -702,7 +989,8 @@ def test_team_service_reattach_wakes_persisted_member_without_prior_handle(tmp_p
         )
         await first.clear_session()
         await second.create_or_attach("team-a")
-        assert second._backend_handles == {}
+        assert "dev" in second._backend_handles
+        assert len(backend.started) == 2
 
         await second.send_message(
             TeamMessage(
@@ -762,5 +1050,130 @@ def test_team_service_marks_member_blocked_when_persisted_wake_fails(tmp_path: P
 
         assert second.store.load("team-a").members[0].state is MemberState.BLOCKED
         assert second._backend_handles == {}
+
+    asyncio.run(scenario())
+
+
+def test_send_message_rejects_tmux_target(tmp_path: Path):
+    """Directed message to tmux member raises unsupported_backend error."""
+
+    async def scenario():
+        service = make_service(tmp_path)
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("ship feature")
+        task = service.task_board.create(
+            TeamTask(
+                task_id="task-ops",
+                batch_id=batch.batch_id,
+                title="Build piece",
+                description="Implement",
+                dependency_ids=(),
+                kind=TaskKind.CODE,
+                state=TeamTaskState.PENDING,
+            )
+        )
+        await service.spawn_member(
+            member_name="ops",
+            role_name="general",
+            role_revision=7,
+            requested_backend=MemberBackend.TMUX,
+            task_id=task.task_id,
+            batch_id=batch.batch_id,
+            goal="ship feature",
+            read_only=False,
+            approval_required=False,
+        )
+
+        with pytest.raises(TeamError) as exc_info:
+            await service.send_message(
+                TeamMessage(
+                    message_id="msg-1",
+                    protocol=MessageProtocol.MESSAGE,
+                    sender="lead",
+                    target_name="ops",
+                    broadcast=False,
+                    body="hello",
+                    summary="hello",
+                    timestamp=NOW,
+                )
+            )
+        assert exc_info.value.code == "unsupported_backend"
+        assert exc_info.value.phase == "send"
+
+    asyncio.run(scenario())
+
+
+def test_send_message_broadcast_skips_tmux_members(tmp_path: Path):
+    """Broadcast message skips tmux members, only delivers to in_process."""
+
+    async def scenario():
+        service = make_service(tmp_path)
+        await service.create_or_attach("team-a")
+        batch = await service.start_batch("ship feature")
+        for member_name in ("dev", "ops"):
+            task = service.task_board.create(
+                TeamTask(
+                    task_id=f"task-{member_name}",
+                    batch_id=batch.batch_id,
+                    title="Build piece",
+                    description="Implement",
+                    dependency_ids=(),
+                    kind=TaskKind.CODE,
+                    state=TeamTaskState.PENDING,
+                )
+            )
+            await service.spawn_member(
+                member_name=member_name,
+                role_name="general",
+                role_revision=7,
+                requested_backend=MemberBackend.IN_PROCESS if member_name == "dev" else MemberBackend.TMUX,
+                task_id=task.task_id,
+                batch_id=batch.batch_id,
+                goal="ship feature",
+                read_only=False,
+                approval_required=False,
+            )
+
+        receipt = await service.send_message(
+            TeamMessage(
+                message_id="broadcast-1",
+                protocol=MessageProtocol.MESSAGE,
+                sender="lead",
+                target_name=None,
+                broadcast=True,
+                body="announcement",
+                summary="announcement",
+                timestamp=NOW,
+            )
+        )
+        assert "lead" not in receipt.recipient_names
+        assert "dev" in receipt.recipient_names
+        assert "ops" not in receipt.recipient_names
+
+    asyncio.run(scenario())
+
+
+def test_send_message_rejects_unknown_target(tmp_path: Path):
+    """Directed message to unknown member raises unknown_member error."""
+
+    async def scenario():
+        service = make_service(tmp_path)
+        await service.create_or_attach("team-a")
+
+        with pytest.raises(TeamError) as exc_info:
+            await service.send_message(
+                TeamMessage(
+                    message_id="msg-1",
+                    protocol=MessageProtocol.MESSAGE,
+                    sender="lead",
+                    target_name="nonexistent",
+                    broadcast=False,
+                    body="hello",
+                    summary="hello",
+                    timestamp=NOW,
+                )
+            )
+        assert exc_info.value.code == "unknown_member"
+        assert exc_info.value.phase == "send"
 
     asyncio.run(scenario())

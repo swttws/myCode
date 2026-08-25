@@ -17,9 +17,9 @@ from mycode.team import (
     TeamTask,
     TeamTaskState,
 )
-from mycode.team.config import TeamConfig
-from mycode.team.storage import TeamStore
-from mycode.team.tasks import TaskBoard
+from mycode.team.infrastructure.config import TeamConfig
+from mycode.team.infrastructure.storage import TeamStore
+from mycode.team.application.tasks import TaskBoard
 
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"

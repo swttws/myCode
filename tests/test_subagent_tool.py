@@ -20,6 +20,7 @@ from mycode.subagent.models import (
 )
 from mycode.subagent.service import SubAgentRunResponse
 from mycode.subagent.tool import AgentTool
+from mycode.team.domain.state import TeamPhase, TeamRuntimeRole, TeamRuntimeState
 from mycode.tool import ToolDefinition, ToolKind, ToolRuntimeScope
 from mycode.workspace import WorkspacePreparation
 from mycode.worktree.models import WorktreeDisposition, WorktreeDispositionResult
@@ -121,11 +122,24 @@ class FakeService:
         return self.details[task_id]
 
 
-def make_tool(*, service=None, store=None):
+def active_team_state():
+    return TeamRuntimeState(
+        role=TeamRuntimeRole.LEAD,
+        phase=TeamPhase.LEAD_READY,
+        team_name="team-a",
+        coordinator_mode=True,
+        ordinary_agent_allowed=False,
+        local_write_allowed=False,
+        command_allowed=False,
+    )
+
+
+def make_tool(*, service=None, store=None, team_state_provider=None):
     return AgentTool(
         service=service or FakeService(),
         snapshot_store=store or parent_snapshot_store(),
         config=config(),
+        team_state_provider=team_state_provider,
     )
 
 
@@ -203,6 +217,37 @@ def test_agent_tool_run_defined_and_fork_convert_to_launch_requests():
     assert service.run_calls[1].kind is SubAgentKind.FORK
     assert service.run_calls[1].role_name is None
     assert service.run_calls[1].requested_background is True
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"action": "run", "type": "defined", "task": "t", "role": "general"},
+        {"action": "run", "type": "defined", "task": "t", "role": "lead"},
+        {"action": "run", "type": "defined", "task": "t", "role": "team-lead"},
+        {"action": "run", "type": "fork", "task": "t"},
+    ],
+)
+def test_agent_tool_rejects_run_while_team_is_active_without_starting_subagent(arguments):
+    service = FakeService()
+    tool = make_tool(service=service, team_state_provider=active_team_state)
+
+    result = run_tool(tool, arguments)
+
+    assert result.ok is False
+    assert result.content["reason_code"] == "team_lead_is_parent"
+    assert "team_member_spawn" in result.error
+    assert service.run_calls == []
+
+
+def test_agent_tool_team_guard_keeps_list_and_get_available():
+    tool = make_tool(team_state_provider=active_team_state)
+
+    list_result = run_tool(tool, {"action": "list"})
+    get_result = run_tool(tool, {"action": "get", "task_id": "task-000001"})
+
+    assert list_result.ok is True
+    assert get_result.ok is True
 
 
 def test_agent_tool_run_requires_parent_snapshot_but_list_and_get_do_not():

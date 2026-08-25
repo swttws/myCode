@@ -11,7 +11,7 @@ from pathlib import Path
 
 from mycode.agent import AgentConfig, AgentLoop
 from mycode.compact import create_context_manager
-from mycode.config import ConfigError, load_config
+from mycode.config import ConfigError, load_config, resolve_config_path
 from mycode.dev_logging import configure_dev_logging_from_env
 from mycode.hook.config import load_hook_config
 from mycode.hook.context import build_event_hook_context
@@ -41,6 +41,7 @@ from mycode.slash import (
     SlashCommandCompleter,
     SlashCommandDispatcher,
     SlashCommandRegistrationError,
+    SlashCommandRegistry,
     create_default_slash_registry,
 )
 from mycode.subagent.catalog import AgentCatalog
@@ -54,13 +55,16 @@ from mycode.subagent.tasks import SubAgentTaskManager
 from mycode.subagent.tool import AgentTool
 from mycode.subagent.tooling import create_task_permission_service
 from mycode.team import ResolvedBackend
-from mycode.team.backends import BackendRouter, InProcessBackend, TmuxBackend, WindowsTerminalBackend
-from mycode.team.config import TeamConfig
-from mycode.team.policy import TeamPermissionInterceptor
-from mycode.team.service import TeamService
-from mycode.team.storage import TeamStore
-from mycode.team.tools import register_parent_team_tools
-from mycode.team import worker as team_worker
+from mycode.team.execution.backends import BackendRouter, InProcessBackend, TmuxBackend, WindowsTerminalBackend
+from mycode.team.infrastructure.config import TeamConfig
+from mycode.team.tooling.policy import TeamPermissionInterceptor
+from mycode.team.application.service import TeamService
+from mycode.team.tooling.tool import TeamTool
+from mycode.team.infrastructure.storage import TeamStore
+from mycode.team.execution.notifier import TeamEventNotifier
+from mycode.team.tooling.lead_tools import register_lead_team_tools
+from mycode.team.execution.supervisor import LeadSupervisor
+from mycode.team.execution import worker as team_worker
 from mycode.tool import ToolExecutor, create_default_tool_registry
 from mycode.tui import ChatTUI
 from mycode.worktree import (
@@ -98,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--home",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -105,7 +115,12 @@ def main(argv: list[str] | None = None) -> int:
     configure_dev_logging_from_env()
     args = build_parser().parse_args(argv)
     if args.team_worker is not None:
-        return team_worker.main([args.team_worker])
+        worker_args = [args.team_worker]
+        if args.config is not None:
+            worker_args.extend(["--config", str(args.config)])
+        if args.home is not None:
+            worker_args.extend(["--home", str(args.home)])
+        return team_worker.main(worker_args)
     workspace_root = Path.cwd()
     logger.info(
         "启动 myCode CLI，配置文件：%s，MCP 配置：%s，工作目录：%s",
@@ -115,6 +130,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         config = load_config(args.config)
+        config_path = (
+            Path(args.config).resolve(strict=False)
+            if args.config is not None
+            else resolve_config_path()
+        )
         mcp_config, mcp_config_diagnostics = load_mcp_config(args.mcp_config)
         hook_config = load_hook_config(
             workspace_root=workspace_root,
@@ -156,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
             hook_config=hook_config,
             workspace_root=workspace_root,
             registry=registry,
+            config_path=config_path,
         )
     )
     logger.info("myCode CLI 退出，退出码：%s", exit_code)
@@ -172,6 +193,7 @@ async def _run_application(
     hook_config: HookConfig,
     workspace_root: Path,
     registry,
+    config_path: Path | None = None,
 ) -> int:
     pool = MCPServerPool(mcp_config)
     context_manager = None
@@ -187,13 +209,16 @@ async def _run_application(
             print(f"myCode Worktree 配置错误：{exc}", file=sys.stderr)
             return 1
         shared_workspace = worktree_service.shared_workspace
+        team_notifier = TeamEventNotifier()
         team_backend = BackendRouter(
             {
                 ResolvedBackend.IN_PROCESS: InProcessBackend(
                     runtime_factory=lambda spec: team_worker.create_worker_runtime_from_spec(
                         spec,
                         home=Path.home(),
-                    )
+                        notifier=team_notifier,
+                    ),
+                    notifier=team_notifier,
                 ),
                 ResolvedBackend.TMUX: TmuxBackend(),
                 ResolvedBackend.WINDOWS_TERMINAL: WindowsTerminalBackend(),
@@ -206,8 +231,10 @@ async def _run_application(
             target_branch=_current_branch(worktree_service),
             lead_owner=f"mycode-cli:{os.getpid()}",
             config=getattr(config, "team", TeamConfig()),
+            config_path=config_path,
             worktree_service=worktree_service,
             backend=team_backend,
+            event_notifier=team_notifier,
         )
         hook_runtime = HookRuntime(
             config=hook_config,
@@ -220,7 +247,8 @@ async def _run_application(
             workspace_root,
             path_guard=permissions.path_guard,
         )
-        register_parent_team_tools(tool_registry, team_service)
+        register_lead_team_tools(tool_registry, team_service)
+        _register_legacy_team_tool_views(tool_registry, team_service)
         agent_config = AgentConfig()
         try:
             context_manager = create_context_manager(
@@ -254,7 +282,10 @@ async def _run_application(
         _report_mcp_diagnostics(mcp_config_diagnostics + connection_diagnostics)
 
         register_mcp_tools(pool, tool_registry)
-        tool_executor = ToolExecutor(tool_registry)
+        tool_executor = ToolExecutor(
+            tool_registry,
+            timeout_seconds=getattr(config, "tool_timeout_seconds", 10.0),
+        )
         permission_interceptor = TeamPermissionInterceptor(
             policy_provider=team_service.current_policy,
             permission=PermissionInterceptor(permissions),
@@ -315,6 +346,7 @@ async def _run_application(
                 service=subagent_service,
                 snapshot_store=snapshot_store,
                 config=config.sub_agent,
+                team_state_provider=team_service.runtime_state,
             )
         )
         agent = AgentLoop(
@@ -338,6 +370,7 @@ async def _run_application(
                 lambda: (PermissionMode.DEFAULT, None),
             ),
             visible_tool_names_provider=team_service.visible_team_tools,
+            framework_context_provider=team_service.prompt_context,
         )
         session = ChatSession(
             agent=agent,
@@ -348,6 +381,7 @@ async def _run_application(
             workspace_root=workspace_root,
             subagent_service=subagent_service,
             team_service=team_service,
+            team_supervisor=LeadSupervisor(team_service, agent),
         )
         tui = ChatTUI(
             session=session,
@@ -476,6 +510,12 @@ def _create_task_permission_interceptor(workspace_root: Path, mode: PermissionMo
     return PermissionInterceptor(service)
 
 
+def _register_legacy_team_tool_views(tool_registry, team_service) -> None:
+    tool_registry.register(TeamTool(service=team_service, name="team"))
+    tool_registry.register(TeamTool(service=team_service, name="team_lead"))
+    tool_registry.register(TeamTool(service=team_service, name="team_member"))
+
+
 def _current_branch(worktree_service: WorktreeService) -> str:
     try:
         return worktree_service.git.current_branch(worktree_service.shared_workspace.repository_root)
@@ -488,10 +528,13 @@ def _tool_names(registry) -> frozenset[str]:
 
 
 def _reserved_slash_names(registry) -> frozenset[str]:
-    commands = getattr(registry, "_static_commands", None)
-    if commands is None:
-        public_commands = getattr(registry, "public_commands", None)
-        commands = public_commands() if callable(public_commands) else ()
+    if isinstance(registry, SlashCommandRegistry):
+        commands = registry.public_commands()
+    else:
+        try:
+            commands = registry._static_commands
+        except AttributeError:
+            commands = ()
     names: set[str] = set()
     for command in commands:
         names.add(command.name)

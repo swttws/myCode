@@ -2,7 +2,7 @@ import pytest
 
 from mycode.config import ConfigError
 from mycode.team import MemberBackend
-from mycode.team.config import TeamConfig, coordinator_enabled_from_env, parse_team_config
+from mycode.team.infrastructure.config import TeamConfig, coordinator_enabled_from_env, parse_team_config
 
 
 def test_parse_team_config_uses_safe_defaults():
@@ -14,13 +14,11 @@ def test_parse_team_config_uses_safe_defaults():
     assert config.lock_retry_interval_seconds == 0.1
     assert config.lock_timeout_seconds == 5.0
     assert config.lock_stale_after_seconds == 30.0
-    assert config.mailbox_message_max_bytes == 64 * 1024
-    assert config.mailbox_summary_max_bytes == 4 * 1024
     assert config.context_max_bytes == 4 * 1024 * 1024
     assert config.backend_priority == (
+        MemberBackend.IN_PROCESS,
         MemberBackend.TMUX,
         MemberBackend.TERMINAL,
-        MemberBackend.IN_PROCESS,
     )
     assert config.coordinator_capability_enabled is False
     assert config.graceful_shutdown_timeout_seconds == 10.0
@@ -34,8 +32,6 @@ def test_parse_team_config_accepts_explicit_values():
             "lock_retry_interval_seconds": 0.25,
             "lock_timeout_seconds": 3.0,
             "lock_stale_after_seconds": 12.0,
-            "mailbox_message_max_bytes": 32 * 1024,
-            "mailbox_summary_max_bytes": 2 * 1024,
             "context_max_bytes": 2 * 1024 * 1024,
             "backend_priority": ["in_process", "tmux"],
             "coordinator_capability_enabled": True,
@@ -82,12 +78,6 @@ def test_coordinator_env_requires_config_and_exact_environment_lock(value):
             {"lock_timeout_seconds": 31.0, "lock_stale_after_seconds": 30.0},
             "lock_stale_after_seconds",
         ),
-        ({"mailbox_message_max_bytes": 0}, "mailbox_message_max_bytes"),
-        ({"mailbox_summary_max_bytes": 0}, "mailbox_summary_max_bytes"),
-        (
-            {"mailbox_message_max_bytes": 1024, "mailbox_summary_max_bytes": 2048},
-            "mailbox_summary_max_bytes",
-        ),
         ({"context_max_bytes": 0}, "context_max_bytes"),
         ({"backend_priority": []}, "backend_priority"),
         ({"backend_priority": ["tmux", "bogus"]}, "backend_priority"),
@@ -103,3 +93,28 @@ def test_parse_team_config_rejects_invalid_values(raw, field_name):
 def test_direct_team_config_construction_validates_invariants():
     with pytest.raises(ValueError, match="max_active_members"):
         TeamConfig(max_members=2, max_active_members=3)
+
+
+# ── T16: Event-driven backend priority tests ──────────────────────────
+
+
+def test_default_backend_priority_puts_in_process_first():
+    """Default priority ensures in_process is tried before tmux/terminal."""
+    config = TeamConfig()
+    assert config.backend_priority[0] == MemberBackend.IN_PROCESS
+    assert MemberBackend.IN_PROCESS in config.backend_priority
+    # tmux and terminal are present as fallback extensions only
+    assert MemberBackend.TMUX in config.backend_priority
+    assert MemberBackend.TERMINAL in config.backend_priority
+
+
+def test_parse_team_config_allows_in_process_only_backend_priority():
+    """Users can configure in_process-only backend_priority for event-driven mode."""
+    config = parse_team_config({"backend_priority": ["in_process"]})
+    assert config.backend_priority == (MemberBackend.IN_PROCESS,)
+
+
+def test_parse_team_config_allows_in_process_tmux_backend_priority():
+    """Users can configure in_process + tmux as explicit fallback."""
+    config = parse_team_config({"backend_priority": ["in_process", "tmux"]})
+    assert config.backend_priority == (MemberBackend.IN_PROCESS, MemberBackend.TMUX)

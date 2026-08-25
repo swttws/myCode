@@ -308,13 +308,13 @@ def test_default_tool_registry_uses_chinese_tool_definitions(tmp_path):
     assert definitions["run_command"].parameters["properties"]["command"]["description"] == "要执行的 shell 命令。"
     assert definitions["run_command"].parameters["properties"]["timeout_seconds"]["description"] == "命令超时时间（秒）。"
 
-    assert definitions["find_files"].description == "按 glob 模式在工作区内查找文件。"
-    assert definitions["find_files"].parameters["properties"]["pattern"]["description"] == "用于匹配文件名的 glob 模式。"
-    assert definitions["find_files"].parameters["properties"]["root"]["description"] == "查找起始目录，相对于工作区根目录。"
+    assert definitions["find_files"].description == "按 glob、模糊匹配和常见同义词在工作区内查找文件。"
+    assert definitions["find_files"].parameters["properties"]["pattern"]["description"] == "文件名、相对路径或 glob 查询，也支持错别字和常见同义词。"
+    assert definitions["find_files"].parameters["properties"]["root"]["description"] == "可选搜索起始目录；省略或留空时递归搜索整个工作区。"
 
-    assert definitions["search_code"].description == "在工作区内的 UTF-8 文本文件中搜索字面量内容。"
-    assert definitions["search_code"].parameters["properties"]["query"]["description"] == "要搜索的字面量内容。"
-    assert definitions["search_code"].parameters["properties"]["root"]["description"] == "搜索起始目录，相对于工作区根目录。"
+    assert definitions["search_code"].description == "在工作区内 UTF-8 文本文件中搜索字面量、模糊内容和常见同义词。"
+    assert definitions["search_code"].parameters["properties"]["query"]["description"] == "要搜索的内容，也支持错别字、大小写差异和常见同义词。"
+    assert definitions["search_code"].parameters["properties"]["root"]["description"] == "可选搜索起始目录；省略或留空时递归搜索整个工作区。"
 
 
 def test_tool_package_exports_public_tool_system_entrypoints():

@@ -636,6 +636,7 @@ def create_subagent_runtime(
         home=home,
         skill_catalog_factory=skill_catalog_factory,
         mcp_pool=mcp_pool,
+        executor_timeout_seconds=getattr(llm_config, "tool_timeout_seconds", 10.0),
     )
     agent_loop = AgentLoop(
         llm=llm,

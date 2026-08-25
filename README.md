@@ -68,6 +68,7 @@ protocol: openai_responses
 model: your-openai-model
 base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
+tool_timeout_seconds: 120.0
 compact:
   context_window_tokens: 128000
 sub_agent:
@@ -321,11 +322,17 @@ Stage 13 does not automatically merge worktree branches, does not automatically 
 
 Stage 14 adds a local, persistent team coordinator. Stage 15 exposes atomic team tools under `~/.mycode/teams/<team-name>/`: `team_create`, `team_attach`, `team_status`, `team_archive`, `team_batch_start`, `team_batch_integrate`, `team_member_spawn`, `team_member_terminate`, `team_task_create`, `team_task_list`, `team_task_get`, `team_task_update`, `team_task_delete`, `team_task_claim`, `team_task_transition`, `team_plan_submit`, `team_plan_decide`, `team_message_send`, `team_status_update`, `team_shutdown_request`, and `team_shutdown_response`.
 
-Team state is file-backed and guarded by local leases. Member mailboxes are JSONL files with checkpoint-before-ack semantics, and member context is stored separately so replayed messages can be deduplicated after restart. Integration is local-only: completed code task commits are merged in dependency order into an integration worktree and the target branch ref is updated locally; Stage 14 never pushes or rewrites remotes.
+Team state is file-backed and guarded by local leases. Role events are persisted with per-role checkpoints, and member context is stored separately so replayed messages can be deduplicated after restart. Integration is local-only: completed code task commits are merged in dependency order into an integration worktree and the target branch ref is updated locally; Stage 14 never pushes or rewrites remotes.
 
 The optional `team` config section controls member limits, backend priority, coordinator mode, and graceful shutdown timing. See `examples/mycode.team.yaml` for a complete starter config.
 
-主会话未激活时只显示创建、接管和状态工具；Lead 显示批次、成员、任务、计划决策、消息、关停请求和归档工具；Member 只显示任务、计划提交、消息、状态更新和关停响应工具。工具参数和用户可见错误使用中文。旧的 `team`、`team_lead`、`team_member` 名称已移除，配置或 Skill 仍引用这些名称时会在加载阶段报迁移错误。
+主会话默认是 Team Lead 的唯一载体：创建或接管成功后，本轮剩余工具会被跳过，下一轮重新注入 Lead 身份、中文团队上下文和按阶段可见的工具集。无 batch 时只显示批次启动、状态和归档；批次规划后显示任务工具；存在可派发任务后才显示 `team_member_spawn`；任务全部完成后才显示本地整合。Lead 默认处于协调者模式，只能读取、编排、审批、受控 Git 检查和本地整合；业务代码修改必须交给 `team_member_spawn` 创建的成员完成。`team_member_spawn` 只公开 `member_name`、`role_name`、`task_id` 和 `goal`，batch、角色 revision、backend、审批和只读策略由服务端推导。日志和用户可见说明使用中文摘要，只记录团队、批次、任务、成员、阶段、耗时、tool/message 上下文；不会完整记录提示词、任务正文、环境变量或密钥。旧的 `team`、`team_lead`、`team_member` 名称保留为兼容视图，推荐使用 `team_create` / `team_attach`、Lead 工具和 Member 工具。
+
+### Stage 17 Lead supervision
+
+Lead execution runs in the background until the active batch reaches a terminal state. Lead can dispatch members, inspect and resolve member requests, and continue the chain without asking the user for tool names. Members persist clarification and tool-approval requests, enter `awaiting_input`, checkpoint before acknowledging the current message, and resume when Lead responds. Only unresolved business decisions create a pending user request; non-recoverable member failures are reported as structured Lead events and marked `failed`.
+
+The request tools are `team_request_list`, `team_clarification_respond`, `team_tool_approval_respond`, and `team_user_decision_request`; members use `team_clarification_request`.
 
 ## 核心工具
 
@@ -335,8 +342,8 @@ Stage 03 内置六个工具，工具相关代码集中在 `src/mycode/tool` 包�
 - `write_file`：写入工作目录内的 UTF-8 文本文件，并创建父目录。
 - `edit_file`：只在原文唯一匹配时替换文本，零匹配或多匹配都会返回结构化错误。
 - `run_command`：在工作目录内执行 shell 命令，返回退出码、stdout、stderr 和超时状态。
-- `find_files`：按 glob 风格模式查找工作目录内文件。
-- `search_code`：在 UTF-8 文本文件中搜索代码内容，返回路径、行号和行内容。
+- `find_files`：在工作目录内按 glob、文件名/路径模糊匹配和常见中英文同义词查找文件；未指定 `root` 或 `root` 为空时递归搜索整个工作区。
+- `search_code`：在 UTF-8 文本文件中搜索代码内容，支持字面量、大小写归一化、错别字和常见中英文同义词，返回路径、行号和行内容；未指定 `root` 或 `root` 为空时递归搜索整个工作区。
 
 读文件、写文件和改文件共用一层带锁文本缓存，避免同一进程内读写状态串扰。
 

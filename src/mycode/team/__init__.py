@@ -1,4 +1,4 @@
-from .models import (
+from .domain.models import (
     ApprovalState,
     BackendEnvironment,
     BackendHandle,
@@ -6,6 +6,8 @@ from .models import (
     BatchRecord,
     BatchState,
     DeliveryReceipt,
+    EventFailure,
+    EventRecipientType,
     IntegrationReport,
     LeadLease,
     MemberBackend,
@@ -19,14 +21,18 @@ from .models import (
     TaskPatch,
     TaskResult,
     TeamError,
+    TeamEvent,
+    TeamEventState,
     TeamMessage,
     TeamRecord,
     TeamSnapshot,
     TeamState,
     TeamTask,
     TeamTaskState,
+    RoleEventCursor,
     WakeEndpoint,
 )
+from .infrastructure.requests import TeamRequest, TeamRequestKind, TeamRequestState, TeamRequestStore
 
 __all__ = [
     "ApprovalState",
@@ -36,6 +42,8 @@ __all__ = [
     "BatchRecord",
     "BatchState",
     "DeliveryReceipt",
+    "EventFailure",
+    "EventRecipientType",
     "IntegrationReport",
     "LeadLease",
     "MemberBackend",
@@ -49,11 +57,18 @@ __all__ = [
     "TaskPatch",
     "TaskResult",
     "TeamError",
+    "TeamEvent",
+    "TeamEventState",
     "TeamMessage",
     "TeamRecord",
     "TeamSnapshot",
     "TeamState",
     "TeamTask",
     "TeamTaskState",
+    "RoleEventCursor",
     "WakeEndpoint",
+    "TeamRequest",
+    "TeamRequestKind",
+    "TeamRequestState",
+    "TeamRequestStore",
 ]

@@ -10,6 +10,7 @@ from mycode.agent.events import AgentEvent, AgentEventType, AgentErrorCode
 from mycode.hook.context import build_event_hook_context
 from mycode.hook.models import HookEvent
 from mycode.hook.runtime import NullHookRuntime
+from mycode.log_context import use_log_identity
 from mycode.permission.models import PermissionMode, RuleSource
 from mycode.permission.service import PermissionService
 from mycode.skill.models import SkillMode, SkillRunContext
@@ -32,6 +33,7 @@ class ChatSession:
         workspace_root: Path | None = None,
         subagent_service=None,
         team_service=None,
+        team_supervisor=None,
     ) -> None:
         self._agent = agent
         self._permissions = permissions
@@ -42,6 +44,7 @@ class ChatSession:
         self._workspace_root = workspace_root or Path.cwd()
         self._subagent_service = subagent_service
         self._team_service = team_service
+        self._team_supervisor = team_supervisor
         self._started = False
         self._closed = False
 
@@ -52,12 +55,20 @@ class ChatSession:
         approval_provider: ApprovalProvider | None = None,
     ):
         await self.start()
-        async for event in self._agent.run(
-            user_text,
-            mode=self._mode,
-            approval_provider=approval_provider,
-        ):
-            yield event
+        if self._team_supervisor is not None and self._team_is_active():
+            await self._team_supervisor.submit_user_goal(user_text)
+            async for event in self._team_supervisor.events():
+                yield event
+                if event.type in {AgentEventType.FINAL_RESPONSE, AgentEventType.ERROR, AgentEventType.CANCELLED}:
+                    break
+            return
+        with self._log_identity():
+            async for event in self._agent.run(
+                user_text,
+                mode=self._mode,
+                approval_provider=approval_provider,
+            ):
+                yield event
 
     async def render(
         self,
@@ -69,21 +80,29 @@ class ChatSession:
         isolated_depth: int = 0,
     ):
         await self.start()
+        if self._team_supervisor is not None and self._team_is_active():
+            await self._team_supervisor.submit_user_goal(user_text)
+            async for event in self._team_supervisor.events():
+                yield event
+                if event.type in {AgentEventType.FINAL_RESPONSE, AgentEventType.ERROR, AgentEventType.CANCELLED}:
+                    break
+            return
         bus = RenderEventBus()
         task: asyncio.Task | None = None
 
         async def produce_parent() -> None:
             try:
-                async for event in self._agent.run(
-                    user_text,
-                    **self._agent_run_kwargs(
-                        approval_provider=approval_provider,
-                        initial_skill_scope=initial_skill_scope,
-                        initial_framework_blocks=initial_framework_blocks,
-                        isolated_depth=isolated_depth,
-                    ),
-                ):
-                    await bus.publish(event)
+                with self._log_identity():
+                    async for event in self._agent.run(
+                        user_text,
+                        **self._agent_run_kwargs(
+                            approval_provider=approval_provider,
+                            initial_skill_scope=initial_skill_scope,
+                            initial_framework_blocks=initial_framework_blocks,
+                            isolated_depth=isolated_depth,
+                        ),
+                    ):
+                        await bus.publish(event)
             finally:
                 await bus.mark_producer_done()
 
@@ -98,6 +117,25 @@ class ChatSession:
             if task is not None and not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+
+    def _log_identity(self):
+        role = "parent"
+        team_name = None
+        batch_id = None
+        if self._team_service is not None:
+            try:
+                state = self._team_service.runtime_state()
+            except Exception:
+                state = None
+            if state is not None:
+                role = getattr(getattr(state, "role", None), "value", None) or role
+                team_name = getattr(state, "team_name", None)
+                batch_id = getattr(state, "batch_id", None)
+        return use_log_identity(
+            agent_role=role,
+            team_name=team_name,
+            batch_id=batch_id,
+        )
 
     def _agent_run_kwargs(
         self,
@@ -200,6 +238,11 @@ class ChatSession:
                 error_code=AgentErrorCode.TOOL_ERROR,
             )
 
+    async def resolve_team_request(self, request_id: str, resolution: str) -> None:
+        if self._team_supervisor is None:
+            raise RuntimeError("team_supervisor_unavailable")
+        await self._team_supervisor.resolve_user_request(request_id, resolution)
+
     async def compact(self):
         async for event in self._agent.compact(mode=self._mode):
             yield event
@@ -230,6 +273,8 @@ class ChatSession:
             return
         self._started = True
         self._closed = False
+        if self._team_supervisor is not None:
+            await self._team_supervisor.start()
         await self._trigger_session_hook(HookEvent.SESSION_START)
 
     async def close(self) -> None:
@@ -237,6 +282,7 @@ class ChatSession:
             return
         self._closed = True
         await self._close_subagent_service()
+        await self._stop_team_supervisor()
         await self._close_team_service()
         await self._trigger_session_hook(HookEvent.SESSION_END)
 
@@ -251,6 +297,7 @@ class ChatSession:
     async def clear_async(self) -> None:
         await self._trigger_session_hook(HookEvent.SESSION_CLEAR)
         await self._clear_subagent_service()
+        await self._stop_team_supervisor()
         await self._clear_team_service()
         self._clear_state()
 
@@ -329,6 +376,17 @@ class ChatSession:
                 str(exc) or exc.__class__.__name__,
             )
 
+    async def _stop_team_supervisor(self) -> None:
+        if self._team_supervisor is None:
+            return
+        try:
+            await self._team_supervisor.stop()
+        except Exception as exc:
+            logger.warning(
+                "Team supervisor stop failed: %s",
+                str(exc) or exc.__class__.__name__,
+            )
+
     async def _close_team_service(self) -> None:
         if self._team_service is None:
             return
@@ -339,3 +397,12 @@ class ChatSession:
                 "Team service close failed: %s",
                 str(exc) or exc.__class__.__name__,
             )
+
+    def _team_is_active(self) -> bool:
+        if self._team_service is None:
+            return False
+        try:
+            state = self._team_service.runtime_state()
+        except Exception:
+            return False
+        return getattr(getattr(state, "phase", None), "value", None) not in {None, "inactive"}

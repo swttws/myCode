@@ -49,7 +49,7 @@ class ArchiveSession:
         self._remove_stale_sessions()
 
         self.session_dir = self.context_dir / self.session_id
-        self.session_dir.mkdir(parents=True, exist_ok=False)
+        _mkdir(self.session_dir, parents=True, exist_ok=False)
         self._write_registration()
         self._lock = _ActivityLock(self.session_dir / "session.lock")
         if not self._lock.acquire():
@@ -57,14 +57,14 @@ class ArchiveSession:
 
     def close(self) -> None:
         self._lock.release()
-        shutil.rmtree(self.session_dir, ignore_errors=True)
+        _rmtree(self.session_dir, ignore_errors=True)
         self._allowed_artifacts.clear()
 
     def reset_session(self) -> None:
         self.close()
         self.session_id = str(uuid.uuid4())
         self.session_dir = self.context_dir / self.session_id
-        self.session_dir.mkdir(parents=True, exist_ok=False)
+        _mkdir(self.session_dir, parents=True, exist_ok=False)
         self._write_registration()
         self._lock = _ActivityLock(self.session_dir / "session.lock")
         if not self._lock.acquire():
@@ -128,7 +128,7 @@ class ArchiveSession:
             lock = _ActivityLock(session_dir / "session.lock")
             if lock.acquire():
                 lock.release()
-                shutil.rmtree(session_dir)
+                _rmtree(session_dir)
 
     def _is_stale(self, session_dir: Path) -> bool:
         return self._clock() - self._registered_at(session_dir) > self._stale_after_seconds
@@ -146,14 +146,11 @@ class ArchiveSession:
 
     def _write_registration(self) -> None:
         registration = {"created_at": self._clock(), "session_id": self.session_id}
-        (self.session_dir / "session.json").write_text(
-            json.dumps(registration, sort_keys=True),
-            encoding="utf-8",
-        )
+        _write_text(self.session_dir / "session.json", json.dumps(registration, sort_keys=True))
 
     def _register_paths(self, artifacts: tuple[ArchivedArtifact, ...]) -> None:
         self._allowed_artifacts.update(
-            (Path(artifact.path).resolve(strict=True), artifact.sha256)
+            (_resolve_existing(Path(artifact.path)), artifact.sha256)
             for artifact in artifacts
         )
 
@@ -224,8 +221,8 @@ class ArchiveTransaction:
         committed: list[_PendingArtifact] = []
         try:
             for pending in self._pending:
-                pending.final_path.parent.mkdir(parents=True, exist_ok=True)
-                pending.temp_path.replace(pending.final_path)
+                _mkdir(pending.final_path.parent, parents=True, exist_ok=True)
+                _replace(pending.temp_path, pending.final_path)
                 committed.append(pending)
         except Exception:
             for pending in committed:
@@ -249,8 +246,8 @@ class ArchiveTransaction:
 
     @staticmethod
     def _write_envelope(temp_path: Path, envelope: dict[str, object]) -> None:
-        temp_path.parent.mkdir(parents=True, exist_ok=True)
-        with temp_path.open("w", encoding="utf-8") as file:
+        _mkdir(temp_path.parent, parents=True, exist_ok=True)
+        with _open_text(temp_path, "w") as file:
             json.dump(envelope, file, ensure_ascii=False, sort_keys=True)
             file.flush()
             os.fsync(file.fileno())
@@ -337,9 +334,9 @@ class _ActivityLock:
         self._file: IO[bytes] | None = None
 
     def acquire(self) -> bool:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        _mkdir(self._path.parent, parents=True, exist_ok=True)
         try:
-            file = self._path.open("a+b")
+            file = _open_binary(self._path, "a+b")
         except OSError:
             return False
         try:
@@ -410,7 +407,7 @@ def _resolve_registered_artifact(
     if candidate.is_symlink():
         raise ValueError("归档读取拒绝符号链接路径")
     try:
-        resolved = candidate.resolve(strict=True)
+        resolved = _resolve_existing(candidate)
     except OSError as exc:
         raise ValueError("归档路径未登记或不存在") from exc
     expected_sha256 = allowed_artifacts.get(resolved)
@@ -424,7 +421,7 @@ def _resolve_registered_artifact(
 
 def _read_verified_text(path: Path, *, registered_sha256: str) -> str:
     try:
-        envelope = json.loads(path.read_text(encoding="utf-8"))
+        envelope = json.loads(_read_text(path))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("归档读取失败") from exc
     if not isinstance(envelope, dict):
@@ -476,6 +473,65 @@ def _required_str(arguments: ToolArguments, name: str) -> str:
 
 def _unlink_if_exists(path: Path) -> None:
     try:
-        path.unlink()
+        _unlink(path)
     except FileNotFoundError:
         return
+
+
+def _open_text(path: Path, mode: str) -> IO[str]:
+    return _fs_path(path).open(mode, encoding="utf-8")
+
+
+def _open_binary(path: Path, mode: str) -> IO[bytes]:
+    return _fs_path(path).open(mode)
+
+
+def _read_text(path: Path) -> str:
+    return _fs_path(path).read_text(encoding="utf-8")
+
+
+def _write_text(path: Path, text: str) -> None:
+    _fs_path(path).write_text(text, encoding="utf-8")
+
+
+def _mkdir(path: Path, *, parents: bool = False, exist_ok: bool = False) -> None:
+    _fs_path(path).mkdir(parents=parents, exist_ok=exist_ok)
+
+
+def _replace(source: Path, target: Path) -> None:
+    _fs_path(source).replace(_fs_path(target))
+
+
+def _unlink(path: Path) -> None:
+    _fs_path(path).unlink()
+
+
+def _rmtree(path: Path, *, ignore_errors: bool = False) -> None:
+    shutil.rmtree(_fs_path(path), ignore_errors=ignore_errors)
+
+
+def _fs_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    resolved = path.resolve(strict=False)
+    text = str(resolved)
+    if text.startswith("\\\\?\\"):
+        return Path(text)
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC" + text[1:])
+    return Path("\\\\?\\" + text)
+
+
+def _resolve_existing(path: Path) -> Path:
+    if os.name != "nt":
+        return path.resolve(strict=True)
+    return _strip_windows_extended_prefix(_fs_path(path).resolve(strict=True))
+
+
+def _strip_windows_extended_prefix(path: Path) -> Path:
+    text = str(path)
+    if text.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + text[8:])
+    if text.startswith("\\\\?\\"):
+        return Path(text[4:])
+    return path

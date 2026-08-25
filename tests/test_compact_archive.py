@@ -128,6 +128,24 @@ def test_transaction_commits_utf8_json_envelope_and_registers_path(tmp_path):
     session.close()
 
 
+def test_transaction_supports_long_cache_paths_on_windows(tmp_path):
+    workspace = tmp_path / ("workspace-" + "w" * 32)
+    home = tmp_path / ("home-" + "h" * 48) / ("cache-" + "c" * 48)
+    workspace.mkdir()
+    session = ArchiveSession(workspace, home=home, session_id="session")
+    try:
+        transaction = session.begin()
+        artifact = transaction.archive_text(kind="tool_result", text="recoverable detail")
+
+        transaction.commit()
+
+        artifact_slice = session.read(artifact.path)
+        assert artifact_slice.text == "recoverable detail"
+        assert artifact_slice.eof is True
+    finally:
+        session.close()
+
+
 def test_transaction_rollback_removes_temporary_files_and_keeps_paths_unregistered(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

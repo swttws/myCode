@@ -5,7 +5,7 @@ import pytest
 from mycode.compact.models import CompactConfig
 from mycode.config import ConfigError, load_config
 from mycode.team import MemberBackend
-from mycode.team.config import TeamConfig
+from mycode.team.infrastructure.config import TeamConfig
 
 
 VALID_SUB_AGENT_CONFIG = """
@@ -327,8 +327,6 @@ team:
   lock_retry_interval_seconds: 0.2
   lock_timeout_seconds: 2.0
   lock_stale_after_seconds: 8.0
-  mailbox_message_max_bytes: 32768
-  mailbox_summary_max_bytes: 2048
   context_max_bytes: 2097152
   backend_priority:
     - in_process
@@ -344,6 +342,46 @@ team:
     assert config.team.backend_priority == (MemberBackend.IN_PROCESS,)
     assert config.team.coordinator_capability_enabled is True
     assert config.team.graceful_shutdown_timeout_seconds == 4.0
+
+
+def test_load_config_parses_tool_timeout_seconds(tmp_path):
+    config_path = tmp_path / "mycode.yaml"
+    write_config(
+        config_path,
+        """
+protocol: anthropic
+model: claude-test
+base_url: https://api.anthropic.com
+api_key: sk-test
+tool_timeout_seconds: 120
+compact:
+  context_window_tokens: 128000
+""",
+    )
+
+    config = load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})
+
+    assert config.tool_timeout_seconds == 120.0
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, '"120"', '"nan"'])
+def test_load_config_rejects_invalid_tool_timeout_seconds(tmp_path, value):
+    config_path = tmp_path / "mycode.yaml"
+    write_config(
+        config_path,
+        f"""
+protocol: anthropic
+model: claude-test
+base_url: https://api.anthropic.com
+api_key: sk-test
+tool_timeout_seconds: {value}
+compact:
+  context_window_tokens: 128000
+""",
+    )
+
+    with pytest.raises(ConfigError, match="tool_timeout_seconds"):
+        load_config(config_path, cwd=tmp_path, home=tmp_path, environ={})
 
 
 def test_load_config_requires_sub_agent_model_mapping(tmp_path):

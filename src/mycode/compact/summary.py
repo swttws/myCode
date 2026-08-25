@@ -304,9 +304,7 @@ async def collect_summary(
         raise _summary_error(CompactFailureCode.LLM_ERROR, "摘要模型调用失败。") from exc
     finally:
         if stream is not None:
-            close = getattr(stream, "aclose", None)
-            if close is not None:
-                await close()
+            await stream.aclose()
 
 
 async def summarize_oversized_message(

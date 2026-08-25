@@ -66,6 +66,7 @@ class _RunState:
     run_deadline: float | None
     framework_context: FrameworkContext
     base_framework_blocks: tuple[Any, ...]
+    team_framework_blocks: tuple[PromptContextBlock, ...]
     turn_context: Any
     current_user_message: ChatMessage
     hook_finished: bool = False
@@ -134,6 +135,7 @@ class AgentLoop:
         main_model_id: str | None = None,
         permission_mode_provider: Any | None = None,
         visible_tool_names_provider: Any | None = None,
+        framework_context_provider: Any | None = None,
         workspace: WorkspaceContext | None = None,
     ) -> None:
         self._workspace = workspace or _legacy_shared_workspace()
@@ -157,6 +159,7 @@ class AgentLoop:
         self._main_model_id = main_model_id
         self._permission_mode_provider = permission_mode_provider
         self._visible_tool_names_provider = visible_tool_names_provider
+        self._framework_context_provider = framework_context_provider
         self._next_turn_id = 0
         self._latest_framework_context = _empty_framework_context()
 
@@ -171,7 +174,9 @@ class AgentLoop:
         turn_context = self._prompt_builder.begin_turn(
             turn_id=self._next_turn_id + 1,
             plan_only=mode.plan_only,
-            framework_blocks=self._framework_blocks(getattr(self._latest_framework_context, "blocks", ())),
+            framework_blocks=self._framework_blocks(
+                getattr(self._latest_framework_context, "blocks", ()) + self._team_framework_blocks()
+            ),
         )
 
         def build_request(history):
@@ -188,7 +193,9 @@ class AgentLoop:
             )
             round_turn_context = _replace_turn_context(
                 round_turn_context,
-                framework_blocks=self._framework_blocks(getattr(self._latest_framework_context, "blocks", ())),
+                framework_blocks=self._framework_blocks(
+                    getattr(self._latest_framework_context, "blocks", ()) + self._team_framework_blocks()
+                ),
             )
             return self._prompt_builder.build(
                 history=history,
@@ -390,7 +397,23 @@ class AgentLoop:
                     )
                     return
 
+                round_stopped_by_tool = False
                 for batch in batches:
+                    if round_stopped_by_tool:
+                        for call in batch.calls:
+                            async for event in self._record_tool_result(
+                                state,
+                                call,
+                                _stale_team_context_result(call),
+                                round_index=round_index,
+                                definition=self._tool_registry.get(call.name).definition
+                                if self._tool_registry.get(call.name) is not None
+                                else None,
+                                trigger_result_message=self._tool_registry.get(call.name) is not None,
+                            ):
+                                yield event
+                        continue
+
                     for call in batch.calls:
                         yield AgentEvent(
                             AgentEventType.TOOL_CALL_STARTED,
@@ -453,6 +476,9 @@ class AgentLoop:
                             apply_skill_scope=True,
                         ):
                             yield event
+                        control = result.control
+                        if control is not None and control.stop_current_round:
+                            round_stopped_by_tool = True
 
             yield self._max_rounds_exceeded_event()
             self._clear_skill_current_scope()
@@ -497,10 +523,11 @@ class AgentLoop:
             )
 
         base_framework_blocks = tuple(getattr(framework_context, "blocks", ())) + tuple(initial_framework_blocks)
+        team_framework_blocks = self._team_framework_blocks()
         turn_context = self._prompt_builder.begin_turn(
             turn_id=self._next_turn_id,
             plan_only=mode.plan_only,
-            framework_blocks=self._framework_blocks(base_framework_blocks),
+            framework_blocks=self._framework_blocks(base_framework_blocks + team_framework_blocks),
         )
         if self._skill_runtime is not None:
             if initial_skill_scope is not None:
@@ -545,6 +572,7 @@ class AgentLoop:
                 run_deadline=run_deadline,
                 framework_context=framework_context,
                 base_framework_blocks=base_framework_blocks,
+                team_framework_blocks=team_framework_blocks,
                 turn_context=turn_context,
                 current_user_message=current_user_message,
             )
@@ -591,7 +619,9 @@ class AgentLoop:
                 self._deferred_summaries()
             )
             # 每轮通知预留只存在于本轮局部变量里；构建失败释放，构建成功提交，避免重复注入或污染基础 framework blocks。
-            round_framework_blocks = state.base_framework_blocks + (
+            if round_index > 1:
+                state.team_framework_blocks = self._team_framework_blocks()
+            round_framework_blocks = state.base_framework_blocks + state.team_framework_blocks + (
                 (notification_reservation.block,)
                 if notification_reservation is not None
                 else ()
@@ -1115,6 +1145,48 @@ class AgentLoop:
         )
         return converted + skill_blocks + tuple(self._hook_runtime.prompt_blocks())
 
+    def _team_framework_blocks(self) -> tuple[PromptContextBlock, ...]:
+        provider = self._framework_context_provider
+        if provider is None:
+            return ()
+        context = provider()
+        if context is None:
+            return ()
+        if isinstance(context, PromptContextBlock):
+            return (context,)
+        if isinstance(context, str):
+            content = context.strip()
+            if not content:
+                return ()
+            return (
+                PromptContextBlock(
+                    id="team.runtime.context",
+                    kind="team",
+                    priority=0,
+                    content=content,
+                ),
+            )
+        try:
+            items = tuple(context)
+        except TypeError:
+            return ()
+        blocks: list[PromptContextBlock] = []
+        for item in items:
+            if isinstance(item, PromptContextBlock):
+                blocks.append(item)
+            elif isinstance(item, str):
+                content = item.strip()
+                if content:
+                    blocks.append(
+                        PromptContextBlock(
+                            id="team.runtime.context",
+                            kind="team",
+                            priority=0,
+                            content=content,
+                        )
+                    )
+        return tuple(blocks)
+
     async def _trigger_hook(self, context) -> None:
         await self._hook_runtime.trigger(context)
 
@@ -1223,6 +1295,19 @@ def _minimum_timeout(*values: float | None) -> float | None:
     if not finite_values:
         return None
     return min(finite_values)
+
+
+def _stale_team_context_result(call: ToolCall) -> ToolResult:
+    message = "团队状态已更新，本轮剩余工具调用已跳过；下一轮会使用新的身份和工具集重新规划。"
+    return ToolResult(
+        ok=False,
+        tool_name=call.name,
+        content={
+            "reason_code": "stale_team_context",
+            "message": message,
+        },
+        error=message,
+    )
 
 
 def _replace_turn_context(turn_context, **changes):

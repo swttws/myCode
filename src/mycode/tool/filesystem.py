@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import fnmatch
+import re
+import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +18,26 @@ from mycode.tool.base import (
     ToolWorkspaceScope,
 )
 from mycode.tool.cache import FileTextCache
+
+
+_SYNONYM_GROUPS = (
+    ("service", "svc", "服务"),
+    ("config", "configuration", "settings", "setting", "配置", "设置"),
+    ("user", "account", "member", "用户", "账号", "账户"),
+    ("auth", "authentication", "authorization", "login", "认证", "授权", "登录"),
+    ("repository", "repo", "storage", "仓库", "存储"),
+    ("controller", "handler", "endpoint", "控制器", "处理器"),
+    ("test", "tests", "spec", "测试"),
+    ("document", "docs", "documentation", "文档"),
+    ("error", "exception", "failure", "错误", "异常"),
+)
+_SYNONYM_CANONICAL = {
+    alias: group[0]
+    for group in _SYNONYM_GROUPS
+    for alias in group
+}
+_SEARCH_FUZZY_THRESHOLD = 0.72
+_SEARCH_TOKEN_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+")
 
 
 class ReadFileTool:
@@ -188,18 +211,18 @@ class FindFilesTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="find_files",
-            description="按 glob 模式在工作区内查找文件。",
+            description="按 glob、模糊匹配和常见同义词在工作区内查找文件。",
             parameters={
                 "type": "object",
                 "description": "查找文件所需参数。",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "用于匹配文件名的 glob 模式。",
+                        "description": "文件名、相对路径或 glob 查询，也支持错别字和常见同义词。",
                     },
                     "root": {
                         "type": "string",
-                        "description": "查找起始目录，相对于工作区根目录。",
+                        "description": "可选搜索起始目录；省略或留空时递归搜索整个工作区。",
                     },
                 },
                 "required": ["pattern"],
@@ -218,15 +241,32 @@ class FindFilesTool:
         try:
             _ensure_invocation_workspace(self._path_guard.workspace_root, context)
             pattern = _required_str(arguments, "pattern")
-            root = self._path_guard.resolve(str(arguments.get("root", ".")))
-            matches = []
+            root = _resolve_search_root(self._path_guard, arguments)
+            exact_matches = []
+            fuzzy_candidates = []
             for candidate in sorted(root.rglob("*")):
                 # 遍历结果可能在检查后被替换成链接，每个候选都要重新确认真实边界。
                 path = self._path_guard.inspect(str(candidate)).resolved
-                if path.is_file() and _matches_file_pattern(
-                    self._path_guard.workspace_root, path, pattern
-                ):
-                    matches.append(_relative_path(self._path_guard.workspace_root, path))
+                if not path.is_file():
+                    continue
+                relative = _relative_path(self._path_guard.workspace_root, path)
+                if _matches_file_pattern(self._path_guard.workspace_root, path, pattern):
+                    exact_matches.append(relative)
+                else:
+                    score = _search_match_score(relative, pattern)
+                    if score >= _SEARCH_FUZZY_THRESHOLD:
+                        fuzzy_candidates.append((score, relative))
+            matches = (
+                exact_matches
+                if exact_matches
+                else [
+                    relative
+                    for _score, relative in sorted(
+                        fuzzy_candidates,
+                        key=lambda item: (-item[0], item[1]),
+                    )
+                ]
+            )
             return ToolResult(ok=True, tool_name=self.definition.name, content={"matches": matches})
         except Exception as exc:
             return _failure(self.definition.name, exc, {"pattern": arguments.get("pattern")})
@@ -240,18 +280,18 @@ class SearchCodeTool:
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="search_code",
-            description="在工作区内的 UTF-8 文本文件中搜索字面量内容。",
+            description="在工作区内 UTF-8 文本文件中搜索字面量、模糊内容和常见同义词。",
             parameters={
                 "type": "object",
                 "description": "搜索代码所需参数。",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "要搜索的字面量内容。",
+                        "description": "要搜索的内容，也支持错别字、大小写差异和常见同义词。",
                     },
                     "root": {
                         "type": "string",
-                        "description": "搜索起始目录，相对于工作区根目录。",
+                        "description": "可选搜索起始目录；省略或留空时递归搜索整个工作区。",
                     },
                 },
                 "required": ["query"],
@@ -270,14 +310,18 @@ class SearchCodeTool:
         try:
             _ensure_invocation_workspace(self._path_guard.workspace_root, context)
             query = _required_str(arguments, "query")
-            root = self._path_guard.resolve(str(arguments.get("root", ".")))
-            matches: list[dict[str, object]] = []
+            root = _resolve_search_root(self._path_guard, arguments)
+            exact_matches: list[dict[str, object]] = []
+            fuzzy_matches: list[dict[str, object]] = []
             for candidate in sorted(root.rglob("*")):
                 # 搜索在读取正文前复检候选，边界不确定时整次调用失败而不是静默跳过。
                 path = self._path_guard.inspect(str(candidate)).resolved
                 if not path.is_file():
                     continue
-                matches.extend(_search_file(self._path_guard.workspace_root, path, query))
+                exact, fuzzy = _search_file(self._path_guard.workspace_root, path, query)
+                exact_matches.extend(exact)
+                fuzzy_matches.extend(fuzzy)
+            matches = exact_matches if exact_matches else fuzzy_matches
             return ToolResult(ok=True, tool_name=self.definition.name, content={"matches": matches})
         except Exception as exc:
             return _failure(self.definition.name, exc, {"query": arguments.get("query")})
@@ -304,6 +348,15 @@ def _relative_path(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def _resolve_search_root(path_guard: PathGuard, arguments: ToolArguments) -> Path:
+    value = arguments.get("root", ".")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = "."
+    if not isinstance(value, str):
+        raise ValueError("root must be a string")
+    return path_guard.resolve(value)
+
+
 def _matches_file_pattern(workspace_root: Path, path: Path, pattern: str) -> bool:
     relative_path = _relative_path(workspace_root, path)
     if fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(relative_path, pattern):
@@ -321,13 +374,74 @@ def _failure(tool_name: str, exc: Exception, content: dict[str, Any]) -> ToolRes
     return ToolResult(ok=False, tool_name=tool_name, content=content, error=str(exc))
 
 
-def _search_file(root: Path, path: Path, query: str) -> list[dict[str, object]]:
+def _normalize_search_text(value: str) -> str:
+    text = unicodedata.normalize("NFKC", value)
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+    text = text.casefold().replace("\\", "/")
+    for alias in sorted(_SYNONYM_CANONICAL, key=len, reverse=True):
+        canonical = _SYNONYM_CANONICAL[alias]
+        if alias == canonical:
+            continue
+        if re.fullmatch(r"[a-z0-9]+", alias):
+            text = re.sub(
+                rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])",
+                f" {canonical} ",
+                text,
+            )
+        else:
+            text = text.replace(alias, f" {canonical} ")
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text)
+    return " ".join(text.split())
+
+
+def _search_tokens(value: str) -> list[str]:
+    return _SEARCH_TOKEN_PATTERN.findall(_normalize_search_text(value))
+
+
+def _token_similarity(query_token: str, candidate_token: str) -> float:
+    if query_token == candidate_token:
+        return 1.0
+    if len(query_token) <= 2 or len(candidate_token) <= 2:
+        return 0.0
+    if query_token in candidate_token or candidate_token in query_token:
+        return min(len(query_token), len(candidate_token)) / max(
+            len(query_token), len(candidate_token)
+        )
+    return SequenceMatcher(None, query_token, candidate_token).ratio()
+
+
+def _search_match_score(candidate: str, query: str) -> float:
+    normalized_query = _normalize_search_text(query)
+    normalized_candidate = _normalize_search_text(candidate)
+    if not normalized_query or not normalized_candidate:
+        return 0.0
+    if normalized_query in normalized_candidate:
+        return 1.0
+
+    query_tokens = _search_tokens(query)
+    candidate_tokens = _search_tokens(candidate)
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    scores = [
+        max(_token_similarity(query_token, candidate_token) for candidate_token in candidate_tokens)
+        for query_token in query_tokens
+    ]
+    if any(score < _SEARCH_FUZZY_THRESHOLD for score in scores):
+        return 0.0
+    return sum(scores) / len(scores)
+
+
+def _search_file(
+    root: Path,
+    path: Path,
+    query: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except UnicodeDecodeError:
-        return []
+        return [], []
 
-    return [
+    exact_matches = [
         {
             "path": _relative_path(root, path),
             "line_number": index,
@@ -336,3 +450,13 @@ def _search_file(root: Path, path: Path, query: str) -> list[dict[str, object]]:
         for index, line in enumerate(lines, start=1)
         if query in line
     ]
+    fuzzy_matches = [
+        {
+            "path": _relative_path(root, path),
+            "line_number": index,
+            "line": line,
+        }
+        for index, line in enumerate(lines, start=1)
+        if _search_match_score(line, query) >= _SEARCH_FUZZY_THRESHOLD
+    ]
+    return exact_matches, fuzzy_matches

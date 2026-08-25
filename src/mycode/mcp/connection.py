@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Mapping
+from typing import Protocol, runtime_checkable
 
 from mycode.mcp.jsonrpc import (
     JSONRPCMessageKind,
@@ -17,12 +18,19 @@ from mycode.mcp.jsonrpc import (
     parse_message,
 )
 from mycode.mcp.models import RemoteTool
+from mycode.mcp.streamable_http import StreamableHTTPTransport
 from mycode.mcp.transport import MCPTransport, MCPTransportError
 from mycode.tool import ToolKind
 
 
 logger = logging.getLogger(__name__)
 SUPPORTED_PROTOCOL_VERSION = "2025-11-25"
+
+
+@runtime_checkable
+class _ProtocolVersionTransport(Protocol):
+    def set_protocol_version(self, version: str) -> None:
+        raise NotImplementedError
 
 
 class MCPConnectionError(RuntimeError):
@@ -102,9 +110,8 @@ class MCPConnection:
             self._apply_initialization_result(result)
             await self.notify("notifications/initialized", {})
             # Streamable HTTP 的独立 GET 流要等握手完成后再启动，以携带协商后的版本和会话。
-            start_event_stream = getattr(self._transport, "start_event_stream", None)
-            if callable(start_event_stream):
-                start_event_stream()
+            if isinstance(self._transport, StreamableHTTPTransport):
+                self._transport.start_event_stream()
             self._tools = await self._list_tools()
             self._initialized = True
             return self._tools
@@ -262,9 +269,8 @@ class MCPConnection:
         self.protocol_version = version
         self.capabilities = dict(capabilities)
         self.server_info = dict(server_info)
-        set_protocol_version = getattr(self._transport, "set_protocol_version", None)
-        if callable(set_protocol_version):
-            set_protocol_version(version)
+        if isinstance(self._transport, _ProtocolVersionTransport):
+            self._transport.set_protocol_version(version)
 
     def _parse_tools(self, result: Mapping[str, object]) -> tuple[RemoteTool, ...]:
         raw_tools = result.get("tools")

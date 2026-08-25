@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from mycode.mcp.models import RemoteTool
 from mycode.tool import (
@@ -18,6 +18,16 @@ if TYPE_CHECKING:
 
 
 TOOL_SEARCH_NAME = "tool_search"
+
+
+@runtime_checkable
+class _ToolSearchPool(Protocol):
+    @property
+    def server_names(self) -> tuple[str, ...]:
+        raise NotImplementedError
+
+    def has_tool(self, server_name: str, remote_name: str) -> bool:
+        raise NotImplementedError
 
 
 class MCPToolWrapper:
@@ -131,13 +141,12 @@ class ToolSearch:
         server_name, separator, remote_name = public_name.partition("__")
         if not separator or not remote_name:
             return None
-        server_names = getattr(self._pool, "server_names", ())
+        server_names = self._pool.server_names
         return server_name if server_name in server_names else None
 
     def _tool_is_current(self, wrapper: MCPToolWrapper) -> bool:
-        has_tool = getattr(self._pool, "has_tool", None)
-        if callable(has_tool):
-            return has_tool(wrapper.server_name, wrapper.remote_name)
+        if isinstance(self._pool, _ToolSearchPool):
+            return self._pool.has_tool(wrapper.server_name, wrapper.remote_name)
         return any(
             tool.public_name == wrapper.definition.name for tool in self._pool.tools
         )

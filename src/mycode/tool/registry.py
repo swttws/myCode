@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mycode.tool.base import DeferredToolSummary, Tool, ToolDefinition, ToolKind
+from mycode.tool.base import DeferredTool, DeferredToolSummary, Tool, ToolDefinition, ToolKind
 
 
 class ToolRegistry:
@@ -93,5 +93,4 @@ class ToolRegistry:
 
 
 def _is_deferred(tool: Tool) -> bool:
-    should_defer = getattr(tool, "should_defer", None)
-    return callable(should_defer) and should_defer() is True
+    return isinstance(tool, DeferredTool) and tool.should_defer() is True

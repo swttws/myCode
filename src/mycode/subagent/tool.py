@@ -17,6 +17,10 @@ from mycode.tool import ToolDefinition, ToolKind, ToolResult, ToolRuntimeScope
 
 
 AGENT_TOOL_NAME = "Agent"
+TEAM_LEAD_IS_PARENT_MESSAGE = (
+    "当前根 Agent 已经是唯一 Team Lead；请使用 team_member_spawn 创建团队成员，"
+    "不要再启动普通 Agent 或 lead 子 Agent。"
+)
 
 
 @dataclass(frozen=True)
@@ -36,10 +40,12 @@ class AgentTool:
         service,
         snapshot_store,
         config: SubAgentConfig,
+        team_state_provider=None,
     ) -> None:
         self._service = service
         self._snapshot_store = snapshot_store
         self._config = config
+        self._team_state_provider = team_state_provider
 
     @property
     def definition(self) -> ToolDefinition:
@@ -82,6 +88,9 @@ class AgentTool:
                     "task": _snapshot_to_dict(snapshot),
                 },
             )
+
+        if _team_blocks_agent_run(self._team_state_provider):
+            return _error_result("team_lead_is_parent", TEAM_LEAD_IS_PARENT_MESSAGE)
 
         try:
             parent = self._snapshot_store.current()
@@ -164,6 +173,19 @@ def _reject_extra(arguments: dict[str, Any], allowed: set[str]) -> None:
     extra = sorted(set(arguments) - allowed)
     if extra:
         raise ValueError("Agent 工具包含未知或不允许的参数：" + ", ".join(extra))
+
+
+def _team_blocks_agent_run(team_state_provider) -> bool:
+    if team_state_provider is None:
+        return False
+    state = team_state_provider()
+    if state is None:
+        return False
+    if getattr(state, "ordinary_agent_allowed", True) is False:
+        return True
+    phase = getattr(state, "phase", None)
+    phase_value = getattr(phase, "value", phase)
+    return phase_value not in (None, "inactive")
 
 
 def _agent_parameters() -> dict[str, Any]:

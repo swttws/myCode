@@ -195,6 +195,29 @@ def test_find_files_tool_matches_relative_path_without_leading_directory(tmp_pat
     assert result.content == {"matches": ["doc/stage/spec.md"]}
 
 
+def test_find_files_tool_fuzzy_matches_typo_without_explicit_root(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "user_service.py").write_text("service", encoding="utf-8")
+    (tmp_path / "src" / "billing.py").write_text("billing", encoding="utf-8")
+    tool = FindFilesTool(PathGuard(tmp_path))
+
+    result = tool.execute({"pattern": "user servce"})
+
+    assert result.ok is True
+    assert result.content == {"matches": ["src/user_service.py"]}
+
+
+def test_find_files_tool_matches_builtin_synonyms_and_empty_root(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "settings.py").write_text("settings", encoding="utf-8")
+    tool = FindFilesTool(PathGuard(tmp_path))
+
+    result = tool.execute({"pattern": "配置", "root": ""})
+
+    assert result.ok is True
+    assert result.content == {"matches": ["config/settings.py"]}
+
+
 def test_find_files_tool_rejects_root_outside_workspace(tmp_path):
     tool = FindFilesTool(PathGuard(tmp_path))
 
@@ -232,6 +255,39 @@ def test_search_code_tool_skips_non_utf8_files(tmp_path):
     assert result.ok is True
     assert result.content == {
         "matches": [{"path": "good.txt", "line_number": 1, "line": "needle"}]
+    }
+
+
+def test_search_code_tool_fuzzy_matches_typo_without_explicit_root(tmp_path):
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "service.py").write_text(
+        "def user_service():\n    return True\n", encoding="utf-8"
+    )
+    tool = SearchCodeTool(PathGuard(tmp_path))
+
+    result = tool.execute({"query": "user servce"})
+
+    assert result.ok is True
+    assert result.content == {
+        "matches": [
+            {"path": "nested/service.py", "line_number": 1, "line": "def user_service():"}
+        ]
+    }
+
+
+def test_search_code_tool_matches_builtin_synonyms(tmp_path):
+    (tmp_path / "service.py").write_text(
+        "def user_service():\n    return True\n", encoding="utf-8"
+    )
+    tool = SearchCodeTool(PathGuard(tmp_path))
+
+    result = tool.execute({"query": "用户服务"})
+
+    assert result.ok is True
+    assert result.content == {
+        "matches": [
+            {"path": "service.py", "line_number": 1, "line": "def user_service():"}
+        ]
     }
 
 

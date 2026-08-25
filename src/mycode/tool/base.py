@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from mycode.workspace import WorkspaceContext
 
@@ -83,11 +83,24 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ToolExecutionControl:
+    stop_current_round: bool = False
+    replan_next_round: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.stop_current_round) is not bool:
+            raise ValueError("stop_current_round must be a bool")
+        if type(self.replan_next_round) is not bool:
+            raise ValueError("replan_next_round must be a bool")
+
+
+@dataclass(frozen=True)
 class ToolResult:
     ok: bool
     tool_name: str
     content: dict[str, Any]
     error: str | None = None
+    control: ToolExecutionControl | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +122,7 @@ class Tool(Protocol):
         raise NotImplementedError
 
 
+@runtime_checkable
 class AsyncTool(Protocol):
     async def execute_async(
         self,
@@ -118,6 +132,7 @@ class AsyncTool(Protocol):
         raise NotImplementedError
 
 
+@runtime_checkable
 class DeferredTool(Protocol):
     def should_defer(self) -> bool:
         raise NotImplementedError

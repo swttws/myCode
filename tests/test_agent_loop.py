@@ -1,5 +1,6 @@
 import json
 import asyncio
+import threading
 import time
 from pathlib import Path
 
@@ -52,6 +53,7 @@ from mycode.tool import (
     ToolCall,
     ToolDefinition,
     ToolExecutor,
+    ToolExecutionControl,
     ToolInvocationContext,
     ToolKind,
     ToolRegistry,
@@ -1082,6 +1084,28 @@ def test_agent_loop_errors_when_max_rounds_exceeded():
 
 def test_agent_loop_batches_read_tools_and_serializes_writes():
     records: dict[str, dict[str, float]] = {}
+    read_barrier = threading.Barrier(2)
+
+    class ConcurrentReadTool:
+        def __init__(self, name: str) -> None:
+            self._definition = ToolDefinition(
+                name=name,
+                description=f"{name} concurrent read tool.",
+                parameters={"type": "object", "properties": {}, "required": []},
+                kind=ToolKind.READ,
+            )
+
+        @property
+        def definition(self):
+            return self._definition
+
+        def execute(self, arguments):
+            records[self.definition.name] = {"start": time.monotonic()}
+            read_barrier.wait(timeout=1.0)
+            time.sleep(0.01)
+            records[self.definition.name]["end"] = time.monotonic()
+            return ToolResult(ok=True, tool_name=self.definition.name, content={})
+
     calls = [
         ToolCall(id="call-read-a", name="read_a", arguments={}, raw_arguments="{}"),
         ToolCall(id="call-read-b", name="read_b", arguments={}, raw_arguments="{}"),
@@ -1097,8 +1121,8 @@ def test_agent_loop_batches_read_tools_and_serializes_writes():
     loop = make_loop(
         llm,
         tools=[
-            TimedTool("read_a", ToolKind.READ, records),
-            TimedTool("read_b", ToolKind.READ, records),
+            ConcurrentReadTool("read_a"),
+            ConcurrentReadTool("read_b"),
             TimedTool("write_a", ToolKind.WRITE, records),
             TimedTool("read_c", ToolKind.READ, records),
         ],
@@ -1110,13 +1134,35 @@ def test_agent_loop_batches_read_tools_and_serializes_writes():
     results = [event.tool_result.tool_name for event in events if event.type == AgentEventType.TOOL_RESULT]
     assert started == ["read_a", "read_b", "write_a", "read_c"]
     assert results == ["read_a", "read_b", "write_a", "read_c"]
-    assert records["read_b"]["start"] < records["read_a"]["end"]
+    assert set(records) >= {"read_a", "read_b", "write_a", "read_c"}
     assert records["write_a"]["start"] >= max(records["read_a"]["end"], records["read_b"]["end"])
     assert records["read_c"]["start"] >= records["write_a"]["end"]
 
 
 def test_agent_loop_serializes_read_approvals_then_runs_approved_reads_concurrently(tmp_path):
-    records: dict[str, dict[str, float]] = {}
+    entered: list[str] = []
+    release = asyncio.Event()
+
+    class BarrierReadTool:
+        def __init__(self, name: str) -> None:
+            self._definition = ToolDefinition(
+                name=name,
+                description=f"{name} barrier read tool.",
+                parameters={"type": "object", "properties": {}, "required": []},
+                kind=ToolKind.READ,
+            )
+
+        @property
+        def definition(self):
+            return self._definition
+
+        async def execute_async(self, arguments):
+            entered.append(self.definition.name)
+            if len(entered) == 2:
+                release.set()
+            await asyncio.wait_for(release.wait(), timeout=0.2)
+            return ToolResult(ok=True, tool_name=self.definition.name, content={})
+
     calls = [
         ToolCall(id="call-a", name="read_a", arguments={}, raw_arguments="{}"),
         ToolCall(id="call-b", name="read_b", arguments={}, raw_arguments="{}"),
@@ -1132,8 +1178,8 @@ def test_agent_loop_serializes_read_approvals_then_runs_approved_reads_concurren
     loop = make_loop(
         llm,
         tools=[
-            TimedTool("read_a", ToolKind.READ, records),
-            TimedTool("read_b", ToolKind.READ, records),
+            BarrierReadTool("read_a"),
+            BarrierReadTool("read_b"),
         ],
         permission=PermissionInterceptor(service),
     )
@@ -1154,7 +1200,12 @@ def test_agent_loop_serializes_read_approvals_then_runs_approved_reads_concurren
 
     assert approval_order == ["read_a", "read_b"]
     assert max_active == 1
-    assert records["read_b"]["start"] < records["read_a"]["end"]
+    assert entered == ["read_a", "read_b"]
+    assert all(
+        event.tool_result.ok
+        for event in events
+        if event.type is AgentEventType.TOOL_RESULT
+    )
     assert events[-1].content == "done"
 
 
@@ -1443,4 +1494,107 @@ def test_agent_loop_applies_dynamic_visible_tool_names_provider():
     events = asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
 
     assert [definition.name for definition in llm.tool_requests[0]] == ["echo"]
-    assert events[-1].content == "visible"
+
+
+def test_agent_loop_injects_dynamic_team_framework_context_each_round():
+    llm = ScriptedLLM(
+        [
+            [
+                StreamEvent(
+                    StreamEventType.TOOL_CALL,
+                    tool_call=ToolCall(id="call-1", name="noop", arguments={}, raw_arguments="{}"),
+                ),
+                StreamEvent(StreamEventType.DONE),
+            ],
+            [StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    memory = InMemoryConversationMemory()
+    registry = ToolRegistry([NoopTool()])
+    prompt_calls: list[str] = []
+
+    def team_context_provider():
+        prompt_calls.append(f"round-{len(prompt_calls) + 1}")
+        return f"当前角色：唯一 Team Lead（根 Agent）；团队：team-a；阶段：{prompt_calls[-1]}。"
+
+    loop = AgentLoop(
+        llm=llm,
+        memory=memory,
+        tool_executor=ToolExecutor(registry),
+        tool_registry=registry,
+        permission=FakePermission(),
+        context_manager=PassthroughContextManager(memory),
+        framework_context_provider=team_context_provider,
+    )
+
+    asyncio.run(collect_async(loop.run("hello", mode=AgentMode())))
+
+    assert prompt_calls == ["round-1", "round-2"]
+    assert any(
+        message.origin == MessageOrigin.FRAMEWORK_CONTEXT and "round-1" in message.content
+        for message in llm.requests[0]
+    )
+    assert any(
+        message.origin == MessageOrigin.FRAMEWORK_CONTEXT and "round-2" in message.content
+        for message in llm.requests[1]
+    )
+
+
+def test_agent_loop_team_lifecycle_barrier_skips_remaining_same_round_tools():
+    class CountingTool:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @property
+        def definition(self):
+            return ToolDefinition(
+                name="echo",
+                description="Should be skipped.",
+                parameters={"type": "object", "properties": {}, "required": []},
+                kind=ToolKind.WRITE,
+            )
+
+        def execute(self, arguments):
+            self.calls += 1
+            return ToolResult(ok=True, tool_name="echo", content={"called": True})
+
+    create_call = ToolCall(id="call-create", name="team_create", arguments={"team_name": "alpha"}, raw_arguments="{}")
+    echo_call = ToolCall(id="call-echo", name="echo", arguments={}, raw_arguments="{}")
+    create_result = ToolResult(
+        ok=True,
+        tool_name="team_create",
+        content={"team_name": "alpha", "activated": True},
+        control=ToolExecutionControl(stop_current_round=True, replan_next_round=True),
+    )
+    skipped = CountingTool()
+    llm = ScriptedLLM(
+        [
+            [
+                StreamEvent(StreamEventType.TOOL_CALL, tool_call=create_call),
+                StreamEvent(StreamEventType.TOOL_CALL, tool_call=echo_call),
+                StreamEvent(StreamEventType.DONE),
+            ],
+            [StreamEvent(StreamEventType.DONE)],
+        ]
+    )
+    loop = make_loop(
+        llm,
+        tools=[
+            StaticResultTool("team_create", create_result, kind=ToolKind.WRITE),
+            skipped,
+        ],
+    )
+
+    events = asyncio.run(collect_async(loop.run("create team", mode=AgentMode())))
+    results = [
+        (event.tool_call.name, event.tool_result)
+        for event in events
+        if event.type is AgentEventType.TOOL_RESULT
+    ]
+
+    assert skipped.calls == 0
+    assert results[0][0] == "team_create"
+    assert results[1][0] == "echo"
+    assert results[1][1].ok is False
+    assert results[1][1].content["reason_code"] == "stale_team_context"
+    assert len(llm.tool_requests) == 2

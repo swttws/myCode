@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "workspace": {
+    "name": "codeAgent",
+    "createdAt": 1787044075704,
+    "preset": "starter"
+  },
+  "authorizedRoots": [
+    "C:\\work-python\\codeAgent"
+  ],
+  "reload": null
+}

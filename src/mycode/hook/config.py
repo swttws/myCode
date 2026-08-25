@@ -17,7 +17,7 @@ from mycode.hook.models import (
     HookRule,
 )
 from mycode.hook.matcher import parse_matcher
-from mycode.team.tool_names import LEGACY_TEAM_TOOL_NAMES
+from mycode.team.tooling.tool_names import LEGACY_TEAM_TOOL_NAMES
 
 
 _TOP_LEVEL_FIELDS = {"version", "hooks"}

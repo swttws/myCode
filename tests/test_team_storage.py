@@ -21,7 +21,7 @@ from mycode.team import (
     TeamTaskState,
     WakeEndpoint,
 )
-from mycode.team.storage import TeamStore
+from mycode.team.infrastructure.storage import TeamStore
 
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -63,7 +63,6 @@ def make_member(store: TeamStore, root: Path) -> MemberRecord:
         approval_required=False,
         worktree_root=root / "worktrees" / "dev",
         branch_name="mycode/team-a/dev",
-        mailbox_path=store.mailbox_path("team-a", "dev"),
         context_path=store.context_path("team-a", "dev"),
         wake_endpoint=wake,
         task_id="task-1",
@@ -117,9 +116,11 @@ def test_team_store_creates_expected_layout_and_round_trips_records(tmp_path: Pa
     assert snapshot.team == team
     assert (root / "team.json").exists()
     assert (root / "registry.json").exists()
-    assert store.mailbox_path("team-a", "dev") == root / "members" / "dev" / "mailbox.jsonl"
     assert store.context_path("team-a", "dev") == root / "members" / "dev" / "context.json"
     assert store.lead_lock_path("team-a") == root / "lead.lock"
+    assert store.event_log_path("team-a") == root / "events.jsonl"
+    assert store.event_cursors_path("team-a") == root / "event-cursors.json"
+    assert store.event_failures_path("team-a") == root / "event-failures.jsonl"
 
     member = make_member(store, tmp_path)
     batch = make_batch()

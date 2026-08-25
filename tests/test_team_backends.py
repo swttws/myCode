@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from mycode.team.models import (
+from mycode.team.domain.models import (
     BackendHandle,
     BackendEnvironment,
     BackendSelection,
@@ -53,8 +55,8 @@ def make_environment(
     )
 
 
-def test_backend_selector_auto_tries_tmux_then_terminal_then_in_process(tmp_path: Path):
-    from mycode.team.backends import BackendSelector
+def test_backend_selector_auto_tries_in_process_before_external_backends(tmp_path: Path):
+    from mycode.team.execution.backends import BackendSelector
 
     probe = FakeCapabilityProbe(
         available={
@@ -68,25 +70,22 @@ def test_backend_selector_auto_tries_tmux_then_terminal_then_in_process(tmp_path
 
     selection = selector.select(MemberBackend.AUTO, make_environment(tmp_path))
 
-    assert probe.calls == [
-        ResolvedBackend.TMUX,
-        ResolvedBackend.WINDOWS_TERMINAL,
-    ]
+    assert probe.calls == [ResolvedBackend.IN_PROCESS]
     assert selection == BackendSelection(
         requested_backend=MemberBackend.AUTO,
-        resolved_backend=ResolvedBackend.WINDOWS_TERMINAL,
+        resolved_backend=ResolvedBackend.IN_PROCESS,
         available=True,
         reason_code="backend_available",
-        reason="selected windows_terminal after tmux was unavailable",
+        reason="selected in_process",
         environment=make_environment(tmp_path),
-        fallback_chain=(ResolvedBackend.TMUX, ResolvedBackend.WINDOWS_TERMINAL),
+        fallback_chain=(ResolvedBackend.IN_PROCESS,),
     )
 
 
 def test_backend_selector_auto_falls_back_to_in_process_when_native_backends_are_unavailable(
     tmp_path: Path,
 ):
-    from mycode.team.backends import BackendSelector
+    from mycode.team.execution.backends import BackendSelector
 
     probe = FakeCapabilityProbe(
         available={
@@ -100,22 +99,16 @@ def test_backend_selector_auto_falls_back_to_in_process_when_native_backends_are
 
     selection = selector.select(MemberBackend.AUTO, make_environment(tmp_path))
 
-    assert probe.calls == [
-        ResolvedBackend.TMUX,
-        ResolvedBackend.WINDOWS_TERMINAL,
-        ResolvedBackend.IN_PROCESS,
-    ]
+    assert probe.calls == [ResolvedBackend.IN_PROCESS]
     assert selection.resolved_backend is ResolvedBackend.IN_PROCESS
     assert selection.available is True
     assert selection.fallback_chain == (
-        ResolvedBackend.TMUX,
-        ResolvedBackend.WINDOWS_TERMINAL,
         ResolvedBackend.IN_PROCESS,
     )
 
 
 def test_backend_selector_auto_honors_configured_priority(tmp_path: Path):
-    from mycode.team.backends import BackendSelector
+    from mycode.team.execution.backends import BackendSelector
 
     probe = FakeCapabilityProbe(
         available={
@@ -138,7 +131,7 @@ def test_backend_selector_auto_honors_configured_priority(tmp_path: Path):
 
 
 def test_backend_router_dispatches_by_resolved_backend_and_handle_endpoint(tmp_path: Path):
-    from mycode.team.backends import BackendRouter
+    from mycode.team.execution.backends import BackendRouter
 
     class RecordingBackend:
         def __init__(self, backend: ResolvedBackend) -> None:
@@ -187,7 +180,7 @@ def test_backend_router_dispatches_by_resolved_backend_and_handle_endpoint(tmp_p
 
 
 def test_backend_selector_explicit_unavailable_backend_fails_closed(tmp_path: Path):
-    from mycode.team.backends import BackendSelector
+    from mycode.team.execution.backends import BackendSelector
 
     probe = FakeCapabilityProbe(
         available={
@@ -219,7 +212,7 @@ def test_backend_selector_explicit_unavailable_backend_fails_closed(tmp_path: Pa
 def test_backend_selector_explicit_available_backend_does_not_probe_fallbacks(
     tmp_path: Path,
 ):
-    from mycode.team.backends import BackendSelector
+    from mycode.team.execution.backends import BackendSelector
 
     probe = FakeCapabilityProbe(
         available={
@@ -255,7 +248,7 @@ def test_backend_selector_explicit_available_backend_does_not_probe_fallbacks(
 
 
 def test_backend_selector_rejects_invalid_probe_result(tmp_path: Path):
-    from mycode.team.backends import BackendSelector
+    from mycode.team.execution.backends import BackendSelector
 
     class BrokenProbe:
         def __call__(self, backend: ResolvedBackend, environment: BackendEnvironment) -> bool:
@@ -283,13 +276,16 @@ def make_launch_spec(root: Path, *, backend: ResolvedBackend = ResolvedBackend.I
         role_revision=1,
         requested_backend=MemberBackend.IN_PROCESS,
         resolved_backend=backend,
-        argv=("mycode", "--team-worker", "team-a/dev"),
-        environment={"MYCODE_TEAM": "team-a", "MYCODE_TEAM_MEMBER": "dev"},
+        argv=(sys.executable, "-m", "mycode", "--team-worker", "team-a/dev"),
+        environment={
+            "MYCODE_TEAM": "team-a",
+            "MYCODE_TEAM_MEMBER": "dev",
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+        },
         workspace_root=workspace,
         repository_root=workspace,
         repository_id="repo-123",
         branch_name="mycode/team/team-a/dev",
-        mailbox_path=root / "mailbox.jsonl",
         context_path=root / "context.json",
         wake_endpoint=endpoint,
         task_id="task-1",
@@ -305,16 +301,42 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.run_count = 0
         self.stop_count = 0
+        self._stop = asyncio.Event()
 
-    async def run_until_idle(self):
+    async def run_event_consumer(self):
         self.run_count += 1
+        await self._stop.wait()
 
-    async def graceful_stop(self):
+    async def stop_consumer(self):
         self.stop_count += 1
+        self._stop.set()
+
+
+class BlockingRuntime:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.run_count = 0
+        self.active = 0
+        self.max_active = 0
+        self._stop = asyncio.Event()
+
+    async def run_event_consumer(self):
+        self.run_count += 1
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        self.started.set()
+        await self.release.wait()
+        self.active -= 1
+        await self._stop.wait()
+
+    async def stop_consumer(self):
+        self.release.set()
+        self._stop.set()
 
 
 def test_in_process_backend_runs_member_runtime_and_wakes_existing_handle(tmp_path: Path):
-    from mycode.team.backends import InProcessBackend
+    from mycode.team.execution.backends import InProcessBackend
 
     async def scenario():
         runtime = FakeRuntime()
@@ -335,7 +357,7 @@ def test_in_process_backend_runs_member_runtime_and_wakes_existing_handle(tmp_pa
         assert handle.process_id > 0
         assert handle.started_at == NOW
         assert handle.token == "token-1"
-        assert runtime.run_count == 2
+        assert runtime.run_count == 1
         assert runtime.stop_count == 1
 
     asyncio.run(scenario())
@@ -357,54 +379,111 @@ class FakeProcess:
         self.killed = True
 
 
-def test_tmux_backend_wake_restarts_exited_worker(tmp_path: Path):
-    from mycode.team.backends import TmuxBackend
-
-    class ExitedProcess(FakeProcess):
-        def poll(self):
-            return 0
+def test_tmux_backend_reports_event_driven_unsupported(tmp_path: Path):
+    """tmux backend start raises event_driven_unsupported error."""
+    from mycode.team.execution.backends import TmuxBackend
+    from mycode.team.domain.models import TeamError
 
     async def scenario():
-        launches = []
-        processes = [ExitedProcess(pid=456), FakeProcess(pid=789)]
         backend = TmuxBackend(
-            process_factory=lambda argv, cwd, env: launches.append((argv, cwd, env)) or processes.pop(0),
             clock=lambda: NOW,
             token_factory=lambda: "tmux-token",
         )
         spec = make_launch_spec(tmp_path, backend=ResolvedBackend.TMUX)
 
-        handle = await backend.start(spec)
-        await backend.wake(handle)
-
-        assert len(launches) == 2
-        assert launches[1][0] == launches[0][0]
+        with pytest.raises(TeamError) as exc_info:
+            await backend.start(spec)
+        assert exc_info.value.code == "event_driven_unsupported"
 
     asyncio.run(scenario())
 
 
-def test_tmux_backend_launches_worker_without_shell_and_tracks_process(tmp_path: Path):
-    from mycode.team.backends import TmuxBackend
+def test_terminal_backend_reports_event_driven_unsupported(tmp_path: Path):
+    """windows terminal backend start raises event_driven_unsupported error."""
+    from mycode.team.execution.backends import WindowsTerminalBackend
+    from mycode.team.domain.models import TeamError
 
     async def scenario():
-        launches = []
-        process = FakeProcess(pid=456)
-        backend = TmuxBackend(
-            process_factory=lambda argv, cwd, env: launches.append((argv, cwd, env)) or process,
+        backend = WindowsTerminalBackend(
             clock=lambda: NOW,
-            token_factory=lambda: "tmux-token",
+            token_factory=lambda: "terminal-token",
         )
-        spec = make_launch_spec(tmp_path, backend=ResolvedBackend.TMUX)
+        spec = make_launch_spec(tmp_path, backend=ResolvedBackend.WINDOWS_TERMINAL)
+
+        with pytest.raises(TeamError) as exc_info:
+            await backend.start(spec)
+        assert exc_info.value.code == "event_driven_unsupported"
+
+    asyncio.run(scenario())
+
+
+def test_in_process_backend_does_not_drop_wake_during_runtime(tmp_path: Path):
+    from mycode.team.execution.backends import InProcessBackend
+
+    async def scenario():
+        runtime = BlockingRuntime()
+        backend = InProcessBackend(runtime_factory=lambda spec: runtime, token_factory=lambda: "token-1")
+        spec = make_launch_spec(tmp_path)
 
         handle = await backend.start(spec)
-        await backend.stop(handle, force=False)
+        await runtime.started.wait()
+        await backend.wake(handle)
+        runtime.release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
 
-        argv, cwd, env = launches[0]
-        assert argv[:4] == ("tmux", "new-session", "-d", "-s")
-        assert argv[-3:] == spec.argv
-        assert cwd == spec.workspace_root
-        assert env["MYCODE_TEAM"] == "team-a"
-        assert handle.process_id == 456
-        assert process.terminated is True
+        assert runtime.run_count == 1
+        assert runtime.max_active == 1
+        await backend.stop(handle, force=True)
+
+    asyncio.run(scenario())
+
+
+def test_in_process_backend_coalesces_wakes_without_concurrent_runtime(tmp_path: Path):
+    from mycode.team.execution.backends import InProcessBackend
+
+    async def scenario():
+        runtime = BlockingRuntime()
+        backend = InProcessBackend(runtime_factory=lambda spec: runtime, token_factory=lambda: "token-1")
+        spec = make_launch_spec(tmp_path)
+
+        handle = await backend.start(spec)
+        await runtime.started.wait()
+        await asyncio.gather(*(backend.wake(handle) for _ in range(5)))
+        runtime.release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert runtime.run_count == 1
+        assert runtime.max_active == 1
+        await backend.stop(handle, force=True)
+
+    asyncio.run(scenario())
+
+
+def test_in_process_backend_wake_notifies_injected_notifier(tmp_path: Path):
+    """wake delivers a deduplicated signal to the injected notifier queue."""
+    from mycode.team.execution.backends import InProcessBackend
+    from mycode.team.execution.notifier import TeamEventNotifier
+
+    async def scenario():
+        runtime = BlockingRuntime()
+        notifier = TeamEventNotifier()
+        backend = InProcessBackend(
+            runtime_factory=lambda spec: runtime,
+            notifier=notifier,
+            token_factory=lambda: "token-1",
+        )
+        spec = make_launch_spec(tmp_path)
+        queue = notifier.register_queue(spec.wake_endpoint.member_name)
+
+        handle = await backend.start(spec)
+        await runtime.started.wait()
+        await backend.wake(handle)
+        assert queue.qsize() == 1
+        await backend.wake(handle)
+        assert queue.qsize() == 1
+        runtime.release.set()
+        await backend.stop(handle, force=True)
 
     asyncio.run(scenario())

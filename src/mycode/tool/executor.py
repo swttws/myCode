@@ -5,6 +5,7 @@ import inspect
 import logging
 
 from mycode.tool.base import (
+    AsyncTool,
     ToolCall,
     ToolDefinition,
     ToolInvocationContext,
@@ -77,10 +78,9 @@ class ToolExecutor:
 
         try:
             logger.info("开始执行工具：%s", call.name)
-            execute_async = getattr(tool, "execute_async", None)
             operation = (
-                _invoke_async_tool(execute_async, call.arguments, context)
-                if callable(execute_async)
+                _invoke_async_tool(tool.execute_async, call.arguments, context)
+                if isinstance(tool, AsyncTool)
                 else asyncio.to_thread(
                     _invoke_sync_tool,
                     tool.execute,

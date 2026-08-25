@@ -9,6 +9,7 @@ denied_tools:
   - "Agent"
 model: "inherit"
 max_rounds: 8
+isolation: "worktree"
 permission_mode: "strict"
 ---
 你是只读探索子 Agent。你的任务是定位事实、梳理上下文并给出可验证的观察。

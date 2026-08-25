@@ -49,6 +49,7 @@ def test_team_enums_use_stable_wire_values():
     assert MemberState.RUNNING.value == "running"
     assert MemberState.IDLE.value == "idle"
     assert MemberState.AWAITING_APPROVAL.value == "awaiting_approval"
+    assert MemberState.AWAITING_INPUT.value == "awaiting_input"
     assert MemberState.BLOCKED.value == "blocked"
     assert MemberState.STOPPING.value == "stopping"
     assert MemberState.STOPPED.value == "stopped"
@@ -69,6 +70,7 @@ def test_team_enums_use_stable_wire_values():
     assert TeamTaskState.PENDING.value == "pending"
     assert TeamTaskState.CLAIMED.value == "claimed"
     assert TeamTaskState.AWAITING_APPROVAL.value == "awaiting_approval"
+    assert TeamTaskState.AWAITING_INPUT.value == "awaiting_input"
     assert TeamTaskState.RUNNING.value == "running"
     assert TeamTaskState.BLOCKED.value == "blocked"
     assert TeamTaskState.COMPLETED.value == "completed"
@@ -95,12 +97,17 @@ def test_team_enums_use_stable_wire_values():
     assert MessageProtocol.STATUS_UPDATE.value == "status_update"
     assert MessageProtocol.SHUTDOWN_REQUEST.value == "shutdown_request"
     assert MessageProtocol.SHUTDOWN_RESPONSE.value == "shutdown_response"
+    assert MessageProtocol.TASK_ASSIGNMENT.value == "task_assignment"
+    assert MessageProtocol.CLARIFICATION_REQUEST.value == "clarification_request"
+    assert MessageProtocol.CLARIFICATION_RESPONSE.value == "clarification_response"
+    assert MessageProtocol.TOOL_APPROVAL_REQUEST.value == "tool_approval_request"
+    assert MessageProtocol.TOOL_APPROVAL_RESPONSE.value == "tool_approval_response"
+    assert MessageProtocol.TASK_RESULT.value == "task_result"
 
 
 def test_team_models_are_frozen_and_have_expected_fields(tmp_path: Path):
     now = utc_now()
     worktree_root = tmp_path / "worktree"
-    mailbox_path = tmp_path / "mailbox.jsonl"
     context_path = tmp_path / "context.json"
     lock_path = tmp_path / "lead.lock"
     artifact_path = tmp_path / "artifact.txt"
@@ -135,7 +142,6 @@ def test_team_models_are_frozen_and_have_expected_fields(tmp_path: Path):
         approval_required=True,
         worktree_root=worktree_root,
         branch_name="mycode/team-a/dev",
-        mailbox_path=mailbox_path,
         context_path=context_path,
         wake_endpoint=wake_endpoint,
         task_id="task-1",
@@ -236,7 +242,6 @@ def test_team_models_are_frozen_and_have_expected_fields(tmp_path: Path):
         repository_root=tmp_path,
         repository_id="repo-123",
         branch_name="mycode/team-a/dev",
-        mailbox_path=mailbox_path,
         context_path=context_path,
         wake_endpoint=wake_endpoint,
         task_id="task-1",
@@ -341,7 +346,6 @@ def test_team_models_are_frozen_and_have_expected_fields(tmp_path: Path):
         "approval_required",
         "worktree_root",
         "branch_name",
-        "mailbox_path",
         "context_path",
         "wake_endpoint",
         "task_id",
@@ -443,7 +447,6 @@ def test_team_models_are_frozen_and_have_expected_fields(tmp_path: Path):
         "repository_root",
         "repository_id",
         "branch_name",
-        "mailbox_path",
         "context_path",
         "wake_endpoint",
         "task_id",
@@ -547,7 +550,6 @@ def test_team_models_are_frozen_and_have_expected_fields(tmp_path: Path):
 def test_team_models_reject_invalid_state_combinations_and_paths(tmp_path: Path):
     now = utc_now()
     worktree_root = tmp_path / "worktree"
-    mailbox_path = tmp_path / "mailbox.jsonl"
     context_path = tmp_path / "context.json"
 
     with pytest.raises(ValueError, match="absolute path"):
@@ -587,7 +589,6 @@ def test_team_models_reject_invalid_state_combinations_and_paths(tmp_path: Path)
             state=MemberState.RUNNING,
             worktree_root=worktree_root,
             branch_name="mycode/team-a/dev",
-            mailbox_path=mailbox_path,
             context_path=context_path,
             revision=0,
             created_at=now,
@@ -604,7 +605,6 @@ def test_team_models_reject_invalid_state_combinations_and_paths(tmp_path: Path)
             state=MemberState.RUNNING,
             worktree_root=worktree_root,
             branch_name="mycode/team-a/dev",
-            mailbox_path=mailbox_path,
             context_path=context_path,
             revision=0,
             created_at=now,
@@ -763,8 +763,10 @@ def test_team_error_and_team_snapshot_validate_identity_and_exports(tmp_path: Pa
         "BackendSelection",
         "BatchRecord",
         "BatchState",
-        "DeliveryReceipt",
-        "IntegrationReport",
+            "DeliveryReceipt",
+            "EventFailure",
+            "EventRecipientType",
+            "IntegrationReport",
         "LeadLease",
         "MemberBackend",
         "MemberLaunchSpec",
@@ -776,13 +778,20 @@ def test_team_error_and_team_snapshot_validate_identity_and_exports(tmp_path: Pa
         "TaskKind",
         "TaskPatch",
         "TaskResult",
-        "TeamError",
+            "TeamError",
+            "TeamEvent",
+            "TeamEventState",
         "TeamMessage",
         "TeamRecord",
         "TeamSnapshot",
         "TeamState",
-        "TeamTask",
-        "TeamTaskState",
-        "WakeEndpoint",
-    }
+            "TeamTask",
+                "TeamTaskState",
+                "RoleEventCursor",
+            "WakeEndpoint",
+            "TeamRequest",
+            "TeamRequestKind",
+            "TeamRequestState",
+            "TeamRequestStore",
+        }
     assert all(not name.startswith("_") for name in team.__all__)

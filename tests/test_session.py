@@ -1,6 +1,8 @@
 import asyncio
+import logging
 
 from mycode.agent import AgentEvent, AgentEventType, AgentMode
+from mycode.dev_logging import configure_dev_logging
 from mycode.permission.models import PermissionMode, RuleSource
 from mycode.session import ChatSession
 
@@ -71,6 +73,19 @@ class FakeTeamService:
             self.operations.append("team_close")
 
 
+class ActiveLeadTeamService(FakeTeamService):
+    def runtime_state(self):
+        return type(
+            "RuntimeState",
+            (),
+            {
+                "role": type("Role", (), {"value": "lead"})(),
+                "team_name": "team-alpha",
+                "batch_id": "batch-1",
+            },
+        )()
+
+
 class RecordingMode(AgentMode):
     def __init__(self, operations):
         super().__init__()
@@ -113,6 +128,32 @@ def test_chat_session_send_passes_mode_and_approval_provider():
     assert agent.runs[0]["user_text"] == "hello"
     assert agent.runs[0]["mode"].plan_only is True
     assert agent.runs[0]["approval_provider"] is approval_provider
+
+
+def test_chat_session_send_logs_active_team_lead_identity(tmp_path):
+    class LoggingAgent:
+        async def run(self, user_text, *, mode, approval_provider=None):
+            logging.getLogger("mycode.agent.loop").info("lead deep event")
+            yield AgentEvent(AgentEventType.FINAL_RESPONSE, content="done")
+
+    log_file = tmp_path / "dev.log"
+    configure_dev_logging(log_file)
+    session = ChatSession(
+        agent=LoggingAgent(),
+        permissions=FakePermissions(),
+        team_service=ActiveLeadTeamService(),
+    )
+
+    asyncio.run(collect_async(session.send("hello")))
+
+    event_line = next(
+        line
+        for line in log_file.read_text(encoding="utf-8").splitlines()
+        if "lead deep event" in line
+    )
+    assert "角色=lead" in event_line
+    assert "团队=team-alpha" in event_line
+    assert "批次=batch-1" in event_line
 
 
 def test_chat_session_compact_forwards_current_mode_and_events():

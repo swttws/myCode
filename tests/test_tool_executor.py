@@ -283,3 +283,13 @@ def test_tool_executor_uses_default_timeout_when_definition_has_no_override():
     assert result.ok is False
     assert result.content["timed_out"] is True
     assert "0.01" in result.error
+
+
+def test_tool_executor_accepts_configured_default_timeout():
+    executor = ToolExecutor(ToolRegistry([SlowTool()]), timeout_seconds=0.05)
+
+    result = asyncio.run(executor.execute(ToolCall(id="call-configured", name="slow", arguments={})))
+
+    assert result.ok is False
+    assert result.content["timed_out"] is True
+    assert "0.05" in result.error

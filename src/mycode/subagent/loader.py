@@ -17,7 +17,7 @@ from mycode.subagent.models import (
     AgentRoleMetadata,
     AgentRoleSource,
 )
-from mycode.team.tool_names import LEGACY_TEAM_TOOL_NAMES
+from mycode.team.tooling.tool_names import LEGACY_TEAM_TOOL_NAMES
 
 
 MAX_ROLE_FILE_BYTES = 128 * 1024

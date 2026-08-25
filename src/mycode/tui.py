@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.shortcuts import CompleteStyle
@@ -14,7 +14,6 @@ from rich.console import Console
 
 from mycode.agent import ApprovalDecision, ApprovalDecisionType, ApprovalRequest, AgentEventType
 from mycode.compact.models import CompactAction, CompactStatus
-from mycode.memory.models import MemoryStatusSnapshot, SessionStatusSnapshot
 from mycode.permission.models import PermissionMode, RuleSource
 from mycode.session import ChatSession
 from mycode.slash.builtins import create_default_slash_registry
@@ -22,8 +21,6 @@ from mycode.slash.completion import SlashCommandCompleter
 from mycode.slash.dispatcher import SlashCommandDispatcher
 from mycode.slash.models import (
     ApplicationStatusSnapshot,
-    GitStatusSnapshot,
-    MCPStatusSnapshot,
     PermissionStatusSnapshot,
     SlashDispatchKind,
     SlashMode,
@@ -40,6 +37,12 @@ except ImportError:  # pragma: no cover - Windows-only fallback
 
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _RenderableSession(Protocol):
+    def render(self, text: str, *, approval_provider):
+        raise NotImplementedError
 
 
 class ChatTUI:
@@ -135,21 +138,12 @@ class ChatTUI:
         return await self._session.memory_status()
 
     def _session_stream(self, text: str):
-        render = getattr(self._session, "render", None)
-        if callable(render):
-            return render(text, approval_provider=self._approval_provider)
-        send = getattr(self._session, "send", None)
-        if callable(send):
-            return send(text, approval_provider=self._approval_provider)
-        raise RuntimeError("session_stream_unavailable")
+        if isinstance(self._session, _RenderableSession):
+            return self._session.render(text, approval_provider=self._approval_provider)
+        return self._session.send(text, approval_provider=self._approval_provider)
 
     async def detach_active_subagent(self):
-        detach = getattr(self._session, "detach_active_subagent", None)
-        if not callable(detach):
-            return None
-        result = detach()
-        if inspect.isawaitable(result):
-            result = await result
+        result = await self._session.detach_active_subagent()
         if result is None:
             return None
         self._console.print(
@@ -159,16 +153,10 @@ class ChatTUI:
         return result
 
     def list_subagent_tasks(self):
-        getter = getattr(self._session, "list_subagent_tasks", None)
-        if not callable(getter):
-            return ()
-        return getter()
+        return self._session.list_subagent_tasks()
 
     def get_subagent_task(self, task_id: str):
-        getter = getattr(self._session, "get_subagent_task", None)
-        if not callable(getter):
-            raise KeyError(f"subagent_service_unavailable: {task_id}")
-        return getter(task_id)
+        return self._session.get_subagent_task(task_id)
 
     async def application_status(self) -> ApplicationStatusSnapshot:
         try:
@@ -329,13 +317,8 @@ class ChatTUI:
             self._console.print(line, markup=False, style=style)
 
     async def _close_session(self) -> None:
-        close = getattr(self._session, "close", None)
-        if not callable(close):
-            return
         try:
-            result = close()
-            if inspect.isawaitable(result):
-                await result
+            await self._session.close()
         except Exception:
             logger.exception("session close failed")
 

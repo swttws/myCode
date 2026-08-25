@@ -13,7 +13,7 @@ from mycode.skill.models import (
     SkillSource,
     SkillStartupError,
 )
-from mycode.team.tool_names import LEGACY_TEAM_TOOL_NAMES
+from mycode.team.tooling.tool_names import LEGACY_TEAM_TOOL_NAMES
 
 
 class SkillCatalog:

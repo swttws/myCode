@@ -18,9 +18,9 @@ from mycode.team import (
     TeamTask,
     TeamTaskState,
 )
-from mycode.team.integration import IntegrationService
-from mycode.team.storage import TeamStore
-from mycode.team.tasks import TaskBoard
+from mycode.team.application.integration import IntegrationService
+from mycode.team.infrastructure.storage import TeamStore
+from mycode.team.application.tasks import TaskBoard
 from mycode.worktree.models import GitStatus
 
 

@@ -13,6 +13,7 @@ from mycode.team import (
     DeliveryReceipt,
     IntegrationReport,
     MemberBackend,
+    MemberState,
     MessageProtocol,
     TaskKind,
     TaskPatch,
@@ -25,8 +26,8 @@ from mycode.team import (
     TeamTask,
     TeamTaskState,
 )
-from mycode.team.policy import TeamPermissionInterceptor, TeamRuntimeRole, TeamToolPolicy
-from mycode.team.tool import TeamTool
+from mycode.team.tooling.policy import TeamPermissionInterceptor, TeamRuntimeRole, TeamToolPolicy
+from mycode.team.tooling.tool import TeamTool
 from mycode.tool import ToolCall, ToolDefinition, ToolKind, ToolRuntimeScope
 
 
@@ -96,11 +97,11 @@ class FakeTeamService:
 
     async def spawn_member(self, **kwargs):
         self.calls.append(("spawn_member", kwargs))
-        return type("Member", (), {"member_name": kwargs["member_name"], "state": "running"})()
+        return type("Member", (), {"member_name": kwargs["member_name"], "state": MemberState.RUNNING})()
 
     async def terminate_member(self, member_name: str, *, force: bool):
         self.calls.append(("terminate_member", member_name, force))
-        return type("Member", (), {"member_name": member_name, "state": "stopped"})()
+        return type("Member", (), {"member_name": member_name, "state": MemberState.STOPPED})()
 
     async def send_message(self, message: TeamMessage):
         self.calls.append(("send_message", message))
@@ -260,29 +261,33 @@ def test_team_tool_schema_describes_action_specific_requirements_in_chinese(tmp_
 
     parameters = tool.definition.parameters
     assert parameters["required"] == ["action"]
-    branches = parameters["oneOf"]
-    spawn = next(branch for branch in branches if branch["properties"]["action"]["enum"] == ["spawn_member"])
-
-    assert spawn["required"] == [
-        "action",
-        "member_name",
-        "role_name",
-        "role_revision",
-        "requested_backend",
-        "task_id",
-        "batch_id",
-        "goal",
-        "read_only",
-        "approval_required",
+    assert parameters["additionalProperties"] is False
+    assert "oneOf" not in parameters
+    assert parameters["properties"]["action"]["enum"] == [
+        "archive",
+        "claim_task",
+        "create_task",
+        "delete_task",
+        "get_task",
+        "integrate",
+        "list_tasks",
+        "plan_decision",
+        "send_message",
+        "shutdown_request",
+        "spawn_member",
+        "start_batch",
+        "status",
+        "terminate_member",
+        "transition_task",
+        "update_task",
     ]
-    assert spawn["properties"]["requested_backend"]["enum"] == [
+    assert parameters["properties"]["requested_backend"]["enum"] == [
         "auto",
         "tmux",
         "terminal",
         "in_process",
     ]
     assert all("description" in definition for definition in parameters["properties"].values())
-    assert all("description" in branch for branch in branches)
     assert "不同 action 使用不同参数" in parameters["description"]
 
 
@@ -912,3 +917,20 @@ def test_team_permission_interceptor_delegates_normal_tools_before_team_activati
 
     assert decision.reason_code == "normal_allowed"
     assert calls == [("read_file", False, 2)]
+def test_legacy_team_router_logs_concrete_action_on_exception(caplog, tmp_path: Path):
+    class BoomService(FakeTeamService):
+        async def create_or_attach(self, team_name: str, *, goal: str | None = None):
+            raise RuntimeError("create failed")
+
+    caplog.set_level("ERROR")
+    tool = TeamTool(service=BoomService(tmp_path))
+
+    result = asyncio.run(tool.execute_async({"action": "create", "team_name": "alpha"}))
+
+    assert result.ok is False
+    assert result.content["reason_code"] == "team_action_failed"
+    record = next((item for item in caplog.records if item.name.endswith("team.tool")), None)
+    assert record is not None
+    assert record.exc_info is not None
+    assert "action=create" in record.message
+    assert "team_name=alpha" in record.message

@@ -18,11 +18,10 @@ from mycode.permission.models import (
     PermissionPaths,
     PermissionPersistenceError,
     PermissionRule,
-    PermissionScalar,
     PermissionSessionState,
     RuleSource,
 )
-from mycode.team.tool_names import LEGACY_TEAM_TOOL_NAMES
+from mycode.team.tooling.tool_names import LEGACY_TEAM_TOOL_NAMES
 
 
 _RULE_FIELDS = {"id", "effect", "tool", "arguments"}

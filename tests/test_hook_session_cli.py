@@ -311,8 +311,23 @@ def test_cli_hidden_team_worker_argument_delegates_to_worker(monkeypatch):
 
     monkeypatch.setattr(cli.team_worker, "main", fake_worker_main)
 
-    assert cli.main(["--team-worker", "team-a/dev"]) == 17
-    assert captured["argv"] == ["team-a/dev"]
+    assert cli.main(
+        [
+            "--config",
+            "C:/cfg/mycode.yaml",
+            "--home",
+            "C:/cfg/home",
+            "--team-worker",
+            "team-a/dev",
+        ]
+    ) == 17
+    assert captured["argv"] == [
+        "team-a/dev",
+        "--config",
+        str(Path("C:/cfg/mycode.yaml")),
+        "--home",
+        str(Path("C:/cfg/home")),
+    ]
 
 
 def test_run_application_shares_hook_runtime_and_triggers_app_events(

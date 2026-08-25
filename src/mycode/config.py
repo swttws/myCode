@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
@@ -13,7 +14,7 @@ from mycode.compact.models import (
     DEFAULT_TOOL_RESULT_THRESHOLD_TOKENS,
     CompactConfig,
 )
-from mycode.team.config import TeamConfig
+from mycode.team.infrastructure.config import TeamConfig
 
 if TYPE_CHECKING:
     from mycode.subagent.models import SubAgentConfig
@@ -44,6 +45,7 @@ class LLMConfig:
     compact: CompactConfig
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
     usage: UsageConfig = field(default_factory=UsageConfig)
+    tool_timeout_seconds: float = 10.0
     sub_agent: "SubAgentConfig | None" = None
     team: TeamConfig = field(default_factory=TeamConfig)
 
@@ -68,8 +70,12 @@ def load_config(
     compact = _parse_compact(raw)
     thinking = _parse_thinking(raw.get("thinking"))
     usage = _parse_usage(raw.get("usage"))
+    tool_timeout_seconds = _parse_positive_number(
+        raw.get("tool_timeout_seconds", 10.0),
+        "tool_timeout_seconds",
+    )
     from mycode.subagent.config import parse_subagent_config
-    from mycode.team.config import parse_team_config
+    from mycode.team.infrastructure.config import parse_team_config
 
     sub_agent = parse_subagent_config(raw.get("sub_agent"))
     team = parse_team_config(raw.get("team"))
@@ -82,9 +88,20 @@ def load_config(
         compact=compact,
         thinking=thinking,
         usage=usage,
+        tool_timeout_seconds=tool_timeout_seconds,
         sub_agent=sub_agent,
         team=team,
     )
+
+
+def resolve_config_path(
+    explicit_path: str | Path | None = None,
+    *,
+    cwd: str | Path | None = None,
+    home: str | Path | None = None,
+) -> Path:
+    """Resolve the config file path without parsing it."""
+    return _resolve_config_path(explicit_path, cwd=cwd, home=home)
 
 
 def _resolve_config_path(
@@ -219,3 +236,12 @@ def _optional_int(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ConfigError("thinking.budget_tokens must be an integer.") from exc
+
+
+def _parse_positive_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or type(value) not in (int, float):
+        raise ConfigError(f"{field_name} must be a positive finite number.")
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise ConfigError(f"{field_name} must be a positive finite number.")
+    return result

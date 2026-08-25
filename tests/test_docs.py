@@ -51,6 +51,30 @@ def test_example_configs_exist_and_use_environment_variables():
         assert "sk-" not in text
 
 
+def test_openai_examples_keep_api_key_in_environment_reference():
+    for path in (
+        "examples/mycode.openai-responses.yaml",
+        "examples/mycode.openai-chat.yaml",
+    ):
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        assert data["api_key"] == "${OPENAI_API_KEY}"
+
+
+def test_readme_documents_stage_16_team_lead_and_logging_rules():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    required = [
+        "Team Lead 的唯一载体",
+        "本轮剩余工具会被跳过",
+        "按阶段可见的工具集",
+        "team_member_spawn",
+        "协调者模式",
+        "不会完整记录提示词、任务正文、环境变量或密钥",
+        "兼容视图",
+    ]
+
+    assert all(value in readme for value in required)
+
+
 def test_primary_example_configs_load_with_compact_settings(tmp_path):
     examples = {
         "examples/mycode.anthropic.yaml": {

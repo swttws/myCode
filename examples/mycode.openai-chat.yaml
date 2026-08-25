@@ -1,13 +1,27 @@
 protocol: openai_chat
-model: your-openai-chat-model
-base_url: https://api.openai.com/v1
-api_key: ${OPENAI_API_KEY}
+model: gpt-4.1
+base_url: https://dgi.deepexi.com/v1/
+api_key: sk-2Eyh7CfuXfaagoDe09B8Db90017743629eF9C79c34EdB46e
+tool_timeout_seconds: 120.0
 compact:
   context_window_tokens: 128000
 sub_agent:
   models:
-    haiku: your-openai-chat-model
-    sonnet: your-openai-chat-model
-    opus: your-openai-chat-model
+    haiku: gpt-4.1-mini
+    sonnet: gpt-4.1-mini
+    opus: gpt-4.1-mini
+
+# Agent Team 默认由根 Agent 作为唯一 Team Lead；成员必须通过 team_member_spawn 创建。
+# 团队日志只记录中文摘要、ID 和阶段上下文，不完整记录提示词、任务正文、环境变量或密钥。
+team:
+  max_members: 16
+  max_active_members: 4
+  backend_priority:
+    - in_process
+    - tmux
+    - terminal
+
+  coordinator_capability_enabled: false
+  graceful_shutdown_timeout_seconds: 10.0
 usage:
   request_stream_usage: true
