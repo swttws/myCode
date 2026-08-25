@@ -1,7 +1,7 @@
 protocol: openai_chat
 model: gpt-4.1
 base_url: https://dgi.deepexi.com/v1/
-api_key: sk-2Eyh7CfuXfaagoDe09B8Db90017743629eF9C79c34EdB46e
+api_key: 1111111
 tool_timeout_seconds: 120.0
 compact:
   context_window_tokens: 128000
